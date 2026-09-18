@@ -2,6 +2,8 @@ import express, { Express } from "express";
 import { errorHandler, notFound } from "./middleware/errorMiddleware";
 import handleCors from "./middleware/corsMiddleware";
 import userRoutes from "./routes/userRoutes";
+import planRoutes from "./routes/planRoutes";
+import subscriptionRoutes from "./routes/subscriptionRoutes";
 
 // Builds the Express app without connecting the DB or calling .listen() —
 // lets tests use it directly via supertest.
@@ -17,6 +19,8 @@ const createApp = (): Express => {
   });
 
   app.use("/api/users", userRoutes);
+  app.use("/api/plans", planRoutes);
+  app.use("/api/subscriptions", subscriptionRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

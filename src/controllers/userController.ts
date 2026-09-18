@@ -27,7 +27,7 @@ const toPublicUser = (user: IUser) => ({
   phone: user.phone,
   systemRole: user.systemRole,
   activeAccountType: user.activeAccountType,
-  subscription: user.subscription,
+  currentSubscription: user.currentSubscription,
 });
 
 // @desc    Register a new user
@@ -417,45 +417,3 @@ export const changeUserRole = asyncHandler(async (req: Request, res: Response) =
     user: { id: user._id, email: user.email, systemRole: user.systemRole },
   });
 });
-
-// @desc    Manually set a user's subscription
-// @route   PATCH /api/users/:id/subscription
-// @access  Private (Admin / Super Admin only)
-// This is an interim admin tool for granting/adjusting the one global
-// PolyGrid subscription until a payment provider is wired up — at which
-// point that integration's webhook becomes the real source of truth for
-// these fields instead of this route.
-export const updateUserSubscription = asyncHandler(
-  async (req: Request, res: Response) => {
-    const id = req.params.id as string;
-    const { planTier, status, expiresAt, autoRenew } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      res.status(400);
-      throw new Error("Invalid user id");
-    }
-
-    const user = await User.findById(id);
-
-    if (!user) {
-      res.status(404);
-      throw new Error("User not found");
-    }
-
-    if (planTier) user.subscription.planTier = planTier;
-    if (status) user.subscription.status = status;
-    if (expiresAt) user.subscription.expiresAt = new Date(expiresAt);
-    if (typeof autoRenew === "boolean") user.subscription.autoRenew = autoRenew;
-
-    if (status === "active") {
-      user.subscription.currentPeriodStart = new Date();
-    }
-
-    await user.save();
-
-    res.status(200).json({
-      message: "Subscription updated successfully",
-      subscription: user.subscription,
-    });
-  },
-);

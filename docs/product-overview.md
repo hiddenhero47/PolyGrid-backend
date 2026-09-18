@@ -60,14 +60,25 @@ separate signup.
 
 ## Global subscription model (PSN-style)
 
-- **One subscription, attached to the base `User` document** — not
-  per-pillar, not per-profile.
-- **Rule**: if `user.subscription.status === 'active'` (and `expiresAt` is in
-  the future), *every* verified business profile under that account becomes
-  active/searchable across all four pillars simultaneously.
+- **One subscription lineage per user, not per-pillar, not per-profile.**
+  `Subscription` is its own collection (`user` field points at the `User`),
+  not an embedded field — every subscription a user has ever had (granted,
+  renewed, expired, canceled) stays as its own permanent record. `User`
+  itself only holds `currentSubscription`, a pointer at the latest one — see
+  [architecture-plan.md](architecture-plan.md) for the full schema.
+- **Rule**: if the user's current `Subscription.status === 'active'` (and
+  `expiresAt` is in the future), *every* verified business profile under
+  that account becomes active/searchable across all four pillars
+  simultaneously.
 - **Non-destructive expiry**: an expired subscription does not delete or
   disable profiles in the DB — they're just filtered out of public
   search/listing queries dynamically. Nothing is lost if the user resubscribes.
+- **Plans are catalog data**, not hardcoded — an `AvailablePlan`
+  (`planTier`, `privileges[]`, `duration`, `price`, optional `maxUsers` seat
+  cap) is what a `Subscription` is created against. A `Subscription`
+  snapshots the plan's `planTier`/`privileges` at the moment it's
+  created/renewed, so past subscriptions read correctly even if the plan
+  they were bought under later changes.
 
 ## Business profiles (future work)
 

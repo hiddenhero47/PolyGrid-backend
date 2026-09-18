@@ -1,7 +1,8 @@
 # PolyGrid Backend — Architecture & Build Plan
 
-Status: **Phase 1 (setup + base User) shipped.** This doc is updated as each
-phase lands — see the checklist at the bottom for current state.
+Status: **Phase 1 (setup + base User) and Phase 1.5 (Plan/Subscription split)
+shipped.** This doc is updated as each phase lands — see the checklist at
+the bottom for current state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -29,8 +30,9 @@ Structure and conventions are deliberately carried over from
 - `src/middleware/{corsMiddleware,errorMiddleware,authMiddleware}.ts`.
 - `src/models/userModel.ts` — the base `User` document described in
   [product-overview.md](product-overview.md): `fullName`, `email`,
-  `password`, `phone`, `systemRole`, `activeAccountType`, the embedded
-  `subscription` block, `sessionId`, `tokenCache` (password-reset tokens).
+  `password`, `phone`, `systemRole`, `activeAccountType`, `sessionId`,
+  `tokenCache` (password-reset tokens), and `currentSubscription` — a
+  pointer at this user's latest `Subscription`, not an embedded value.
 - `src/controllers/userController.ts` + `src/routes/userRoutes.ts`:
   - Auth: register, login, `GET /me`, profile update (incl. password change
     + session invalidation), logout-everywhere.
@@ -40,14 +42,42 @@ Structure and conventions are deliberately carried over from
     house-maduekwe-backend; email delivery not wired up yet — see below).
   - Admin: create admin, list/filter/paginate users, change a user's
     `systemRole`.
-  - `PATCH /api/users/:id/subscription` — an **interim admin tool** for
-    granting/adjusting the one global subscription until a payment provider
-    exists (see Phase 2).
-- `requireActiveSubscription` middleware (`authMiddleware.ts`) — the global
-  subscription gate described in product-overview.md. Not yet wired to any
-  route, because no business-pillar route exists yet; it's ready for Phase 3+.
+- `src/models/planModel.ts` (`Plan`, catalog data) + `src/models/subscriptionModel.ts`
+  (`Subscription`, history) — split out from `User` so every subscription a
+  user has ever had stays a permanent, queryable record instead of being
+  overwritten in place:
+  - `Plan`: `planTier` (unique), `name`, `privileges: string[]`, `duration`
+    (days), `maxUsers` (seat cap, `null` = unlimited — stored for a future
+    team/org feature, not enforced anywhere yet), `price`, `currency`,
+    `isActive`. Never deleted, only deactivated (`isActive: false`) —
+    historical `Subscription`s reference a `Plan` by id.
+  - `Subscription`: `user` (ref), `plan` (ref), plus a **snapshot** of
+    `planTier`/`privileges` taken from the `Plan` at creation time (so a
+    past subscription reads correctly even if the `Plan` is edited later),
+    `status`, `autoRenew`, `paymentProviderId`, `paymentId`,
+    `periodStarted`, `expiresAt`. `isActive()` instance method: `status ===
+    'active' && expiresAt > now`.
+  - `src/controllers/planController.ts` + `routes/planRoutes.ts` —
+    `GET /api/plans` (public, active-only by default), `GET /api/plans/:id`
+    (public), `POST`/`PUT` (Super Admin only).
+  - `src/controllers/subscriptionController.ts` + `routes/subscriptionRoutes.ts`:
+    - `POST /api/subscriptions` — **interim admin tool** (Admin/Super Admin)
+      that grants a user a subscription to a plan by tier: creates the
+      `Subscription` record and repoints `user.currentSubscription` at it.
+      This is exactly the call a payment provider's webhook will make
+      instead of a human, once Phase 2 lands.
+    - `GET /api/subscriptions/me` / `GET /api/subscriptions/users/:userId` —
+      paginated history, self or admin-on-anyone.
+    - `GET /api/subscriptions/current` — the caller's current plan (or
+      `null`), via `attachCurrentPlan`.
+- `authMiddleware.ts` — `attachCurrentPlan` (populates `req.currentPlan`
+  from `user.currentSubscription`, non-blocking) and `requireActiveSubscription`
+  (same lookup, then 402s if there's no active plan; the gate for
+  business-pillar routes once they exist — see Phase 3+). `req.currentPlan`
+  is the `Subscription` document itself, not the `Plan`.
 - Full test coverage for all of the above:
-  `tests/integration/user.test.ts`, `tests/unit/subscription.test.ts`.
+  `tests/integration/{user,plan,subscription}.test.ts`,
+  `tests/unit/subscription.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently
@@ -58,9 +88,10 @@ ask for them yet. Add if/when actually needed.
 ## Phasing (forward-looking)
 
 ```
-Phase 1  Project setup + base User (auth, persona toggle, subscription field)   <- done
-Phase 2  Payment provider integration -> subscription lifecycle via webhook
-         (replaces the manual PATCH /api/users/:id/subscription admin tool)
+Phase 1    Project setup + base User (auth, persona toggle)                    <- done
+Phase 1.5  Plan/Subscription split out of User, history-tracked               <- done
+Phase 2    Payment provider integration -> subscription lifecycle via webhook
+           (replaces the manual POST /api/subscriptions admin tool)
 Phase 3  First pillar's business profile schema + verification pipeline
          (pick one of Engineering/Tenders/Store/SiteForce to prove the pattern)
 Phase 4  Remaining three pillars' business profiles, following the same shape

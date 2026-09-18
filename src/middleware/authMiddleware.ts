@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import asyncHandler from "express-async-handler";
 import { Request, Response, NextFunction } from "express";
 import { User, IUser, SystemRole } from "../models/userModel";
+import { Subscription, ISubscription } from "../models/subscriptionModel";
 import { AppError } from "./errorMiddleware";
 
 interface TokenPayload {
@@ -102,23 +103,42 @@ export const secureRole = (roles: SystemRole | SystemRole[]) =>
     }
   });
 
+const loadCurrentPlan = async (user: IUser): Promise<ISubscription | null> => {
+  if (!user.currentSubscription) return null;
+
+  return Subscription.findById(user.currentSubscription);
+};
+
+// Populates req.currentPlan with the caller's current Subscription record
+// (or null if they've never subscribed) without blocking the request either
+// way. Must run after `protect`. Use this on routes that want to know about
+// the caller's plan without gating access on it (e.g. showing an "upgrade"
+// prompt instead of a hard 402).
+export const attachCurrentPlan = asyncHandler(
+  async (req: Request, _res: Response, next: NextFunction) => {
+    req.currentPlan = await loadCurrentPlan(req.user as IUser);
+    next();
+  },
+);
+
 // Gate for routes belonging to a business pillar (Engineering, Tenders,
 // Store, SiteForce) — the PolyGrid membership model is one global
 // subscription on the base User, not per-pillar. Must run after `protect`.
-export const requireActiveSubscription = (
-  req: Request,
-  _res: Response,
-  next: NextFunction,
-): void => {
-  const user = req.user as IUser;
+// Populates req.currentPlan itself if `attachCurrentPlan` hasn't already run.
+export const requireActiveSubscription = asyncHandler(
+  async (req: Request, _res: Response, next: NextFunction) => {
+    if (req.currentPlan === undefined) {
+      req.currentPlan = await loadCurrentPlan(req.user as IUser);
+    }
 
-  if (!user.hasActiveSubscription()) {
-    const error: AppError = new Error(
-      "An active PolyGrid subscription is required for this action",
-    );
-    error.statusCode = 402;
-    throw error;
-  }
+    if (!req.currentPlan || !req.currentPlan.isActive()) {
+      const error: AppError = new Error(
+        "An active PolyGrid subscription is required for this action",
+      );
+      error.statusCode = 402;
+      throw error;
+    }
 
-  next();
-};
+    next();
+  },
+);

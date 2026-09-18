@@ -11,7 +11,6 @@ import {
   registerAdmin,
   getUsers,
   changeUserRole,
-  updateUserSubscription,
 } from "../controllers/userController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
@@ -38,11 +37,6 @@ router.patch(
   "/:id/role",
   secureRole(SYSTEM_ROLE.SUPER_ADMIN),
   changeUserRole,
-);
-router.patch(
-  "/:id/subscription",
-  secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
-  updateUserSubscription,
 );
 
 export default router;

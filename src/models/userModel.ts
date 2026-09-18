@@ -1,4 +1,4 @@
-import mongoose, { Document, Model, Schema } from "mongoose";
+import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import crypto from "crypto";
 
 export const SYSTEM_ROLE = {
@@ -14,34 +14,9 @@ export const ACCOUNT_TYPE = {
 } as const;
 export type AccountType = (typeof ACCOUNT_TYPE)[keyof typeof ACCOUNT_TYPE];
 
-export const PLAN_TIER = {
-  FREE: "free",
-  PRO: "pro",
-  ENTERPRISE: "enterprise",
-} as const;
-export type PlanTier = (typeof PLAN_TIER)[keyof typeof PLAN_TIER];
-
-export const SUBSCRIPTION_STATUS = {
-  ACTIVE: "active",
-  PAST_DUE: "past_due",
-  CANCELED: "canceled",
-  EXPIRED: "expired",
-} as const;
-export type SubscriptionStatus =
-  (typeof SUBSCRIPTION_STATUS)[keyof typeof SUBSCRIPTION_STATUS];
-
 export const TOKENS = {
   RESET: "resetPassword",
 } as const;
-
-export interface ISubscription {
-  planTier: PlanTier;
-  status: SubscriptionStatus;
-  currentPeriodStart: Date;
-  expiresAt: Date;
-  autoRenew: boolean;
-  paymentProviderId?: string;
-}
 
 export interface ITokenEntry {
   code: string;
@@ -55,7 +30,10 @@ export interface IUser extends Document {
   phone?: string;
   systemRole: SystemRole;
   activeAccountType: AccountType;
-  subscription: ISubscription;
+  // Points at this user's most recent Subscription record — null until they
+  // ever subscribe. Full history lives in the Subscription collection (see
+  // subscriptionModel.ts); this is just a fast pointer to "the current one".
+  currentSubscription: Types.ObjectId | null;
   tokenCache: Map<string, ITokenEntry>;
   sessionId: string;
   createdAt: Date;
@@ -63,33 +41,12 @@ export interface IUser extends Document {
   // Internal, non-persisted flag — set explicitly by trusted server code
   // (registerAdmin/changeUserRole) to bypass the admin-creation guard below.
   _adminCreation?: boolean;
-  hasActiveSubscription(): boolean;
 }
 
 const tokenEntrySchema = new Schema<ITokenEntry>(
   {
     code: { type: String, required: true },
     expiresAt: { type: Date, required: true },
-  },
-  { _id: false },
-);
-
-const subscriptionSchema = new Schema<ISubscription>(
-  {
-    planTier: {
-      type: String,
-      enum: Object.values(PLAN_TIER),
-      default: PLAN_TIER.FREE,
-    },
-    status: {
-      type: String,
-      enum: Object.values(SUBSCRIPTION_STATUS),
-      default: SUBSCRIPTION_STATUS.EXPIRED,
-    },
-    currentPeriodStart: { type: Date, default: () => new Date() },
-    expiresAt: { type: Date, default: () => new Date() },
-    autoRenew: { type: Boolean, default: false },
-    paymentProviderId: { type: String },
   },
   { _id: false },
 );
@@ -126,9 +83,10 @@ const userSchema = new Schema<IUser>(
       default: ACCOUNT_TYPE.NORMAL,
       enum: Object.values(ACCOUNT_TYPE),
     },
-    subscription: {
-      type: subscriptionSchema,
-      default: () => ({}),
+    currentSubscription: {
+      type: Schema.Types.ObjectId,
+      ref: "Subscription",
+      default: null,
     },
     tokenCache: {
       type: Map,
@@ -144,14 +102,6 @@ const userSchema = new Schema<IUser>(
 );
 
 userSchema.index({ sessionId: 1 });
-userSchema.index({ "subscription.status": 1, "subscription.expiresAt": 1 });
-
-userSchema.methods.hasActiveSubscription = function (this: IUser): boolean {
-  return (
-    this.subscription.status === SUBSCRIPTION_STATUS.ACTIVE &&
-    this.subscription.expiresAt.getTime() > Date.now()
-  );
-};
 
 // Mirrors house-maduekwe-backend's userModel guard: enforce a single Super
 // Admin and block direct Admin creation unless a trusted caller has set the

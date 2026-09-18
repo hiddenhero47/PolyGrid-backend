@@ -1,7 +1,7 @@
 import request from "supertest";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createAdmin, createSuperAdmin, generateToken } from "../setup/fixtures";
+import { createUser, createSuperAdmin, generateToken } from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
 import bcrypt from "bcryptjs";
 
@@ -283,35 +283,5 @@ describe("admin-only user management", () => {
       .send({ systemRole: SYSTEM_ROLE.ADMIN });
 
     expect(res.status).toBe(400);
-  });
-});
-
-describe("PATCH /api/users/:id/subscription", () => {
-  it("lets an admin activate a user's global subscription", async () => {
-    const admin = await createAdmin();
-    const token = generateToken(admin);
-    const user = await createUser();
-
-    const res = await request(app)
-      .patch(`/api/users/${user.id}/subscription`)
-      .set("Authorization", `Bearer ${token}`)
-      .send({ planTier: "pro", status: "active", expiresAt: "2999-01-01" });
-
-    expect(res.status).toBe(200);
-    expect(res.body.subscription.status).toBe("active");
-    expect(res.body.subscription.planTier).toBe("pro");
-  });
-
-  it("blocks a basic user from updating subscriptions", async () => {
-    const user = await createUser();
-    const token = generateToken(user);
-    const other = await createUser();
-
-    const res = await request(app)
-      .patch(`/api/users/${other.id}/subscription`)
-      .set("Authorization", `Bearer ${token}`)
-      .send({ status: "active" });
-
-    expect(res.status).toBe(401);
   });
 });
