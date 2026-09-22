@@ -84,18 +84,69 @@ tests can get an app instance without connecting to the real DB or calling
     `PUT /profile`, that an invalid attached file surfaces as a soft
     `avatarWarnings` array **without** failing the rest of the update, and
     that replacing an avatar deletes the old file from disk.
+  - `contact.test.ts` — connecting mutually (by `userId` or `email`,
+    idempotent, no self-connect), listing (paginated, newest first),
+    one-directional removal.
+  - `job.test.ts` — creation (either party as creator, auto-confirms their
+    own side, connects the two as contacts, rejects stage payments summing
+    over 100%); confirm (activates once both sides are in, blocks a
+    non-party, rejects double-confirm); creator-only pre-confirmation edit
+    (blocked once active); view/list access (party or admin only);
+    stage propose/accept/reject (only the *other* party can
+    accept/reject); the done→verify sequence (provider-only done,
+    client-only verify, verify requires done first, releases the correct
+    `amountDisposed`/`platformFeeCollected` split, auto-completes the job
+    once every stage is verified); contract upload (reuses the private-file
+    system — grants the other party, who can mint and use a real signed
+    link for it); dispute raise (either party) + `GET /disputes` (admin
+    queue, party emails populated, non-admin blocked) + resolve (requires a
+    `note`, appended to `disputeHistory`); creator-only pre-confirmation
+    cancel (blocked once active); admin-only interim payment recording
+    (also covered: it writes a matching `Payment` record — see below).
+  - `payment.test.ts` — `GET /api/payments/me` (own history only,
+    status-filterable) and `GET /api/payments` (admin-only, filterable by
+    `user`/etc.); the uniqueness-index behavior specifically: many manual
+    payments with no `providerPaymentId` are all allowed, but two payments
+    sharing the same real `providerPaymentId` are rejected — this is the
+    regression test for a real bug (see payments-plan.md) where a naive
+    `sparse` compound index let a *second* manual payment collide with the
+    first, breaking `grantSubscription` on a user's second subscription.
+    `POST /api/payments/intent` input validation for both `targetType`s
+    (invalid/missing fields, wrong-user-for-target, inactive target) and
+    `POST /api/payments/stripe/webhook` signature handling
+    (missing/garbled signature, irrelevant event types, unknown payment
+    ids) all run with no real Stripe account needed — see "Stripe is
+    tested for real" below. A **"Live Stripe round trip"** block funds a
+    job's escrow and purchases a subscription end-to-end against a real
+    Stripe test-mode account — skipped automatically (not failed) unless
+    `STRIPE_SECRET_KEY` in `.env.test` is a real `sk_test_...` key.
+  - `subscription.test.ts`'s grant test and `job.test.ts`'s payment-record
+    test both also assert the `Payment` record `grantSubscription`/
+    `recordPayment` write matches what was recorded.
 
-## What's deliberately NOT covered
+## Stripe is tested for real — unlike OAuth
 
-**Google/Apple OAuth login** (`POST /api/users/social/{google,apple}`) —
-these verify a real token against the provider's own servers
-(`google-auth-library`/`apple-signin-auth`). Mocking those SDKs deeply
-enough to trust the result would give low confidence it matches real
-behavior, and standing up real OAuth infrastructure for a test run isn't
-"simple to run" — the same call house-maduekwe-backend's own test suite
-documents for this exact case. `user.test.ts` covers only what's safely
-testable without a third party: that both routes 400 when their token
-field is missing.
+**Google/Apple OAuth login** (`POST /api/users/social/{google,apple}`) is
+deliberately *not* tested beyond input validation — these verify a real
+token against the provider's own servers
+(`google-auth-library`/`apple-signin-auth`), and there's no sandbox for
+verifying an arbitrary token without a real user actually signing in
+somewhere. Mocking those SDKs deeply enough to trust the result would give
+low confidence it matches real behavior — the same call house-maduekwe-
+backend's own test suite documents for this exact case. `user.test.ts`
+covers only that both routes 400 when their token field is missing.
+
+**Stripe is different**, and is tested for real because of it: its test
+mode provides exactly the primitives OAuth doesn't —
+`stripe.webhooks.generateTestHeaderString()` signs a synthetic webhook
+payload entirely offline (no tunnel needed), and test payment methods like
+`pm_card_visa` let a PaymentIntent be confirmed to `succeeded` via a single
+API call, no browser/redirect involved. `payment.test.ts`'s live block
+uses both to genuinely exercise the verification logic that matters
+(re-fetching and re-checking the intent from Stripe) against real
+Stripe-returned data, not a mock standing in for it. See
+[payments-plan.md](../docs/payments-plan.md) for the full breakdown of
+what's offline vs. what needs the real key.
 
 ## Adding more tests
 

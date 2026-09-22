@@ -25,7 +25,8 @@
     "google-auth-library": "^11.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
-    "multer": "^2.4.0"
+    "multer": "^2.4.0",
+    "stripe": "^22.6.2"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

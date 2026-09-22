@@ -6,6 +6,9 @@ import userRoutes from "./routes/userRoutes";
 import planRoutes from "./routes/planRoutes";
 import subscriptionRoutes from "./routes/subscriptionRoutes";
 import fileRoutes from "./routes/fileRoutes";
+import contactRoutes from "./routes/contactRoutes";
+import jobRoutes from "./routes/jobRoutes";
+import paymentRoutes from "./routes/paymentRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
@@ -19,6 +22,11 @@ const forms = multer();
 const createApp = (): Express => {
   const app = express();
 
+  // Must be registered before express.json() below — Stripe's webhook
+  // signature is computed over the exact raw request bytes, so this one
+  // path is deliberately never JSON-parsed. Same ordering house-maduekwe-
+  // backend uses for its own Stripe callback route.
+  app.use("/api/payments/stripe/webhook", express.raw({ type: "application/json" }));
   app.use(express.json({ limit: "10mb" }));
   app.use(forms.any());
   app.use(express.urlencoded({ extended: false, limit: "10mb" }));
@@ -43,6 +51,9 @@ const createApp = (): Express => {
   app.use("/api/plans", planRoutes);
   app.use("/api/subscriptions", subscriptionRoutes);
   app.use("/api/files", fileRoutes);
+  app.use("/api/contacts", contactRoutes);
+  app.use("/api/jobs", jobRoutes);
+  app.use("/api/payments", paymentRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

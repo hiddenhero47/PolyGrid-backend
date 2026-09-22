@@ -9,6 +9,7 @@ import {
   generateToken,
 } from "../setup/fixtures";
 import { PLAN_TIER } from "../../src/models/planModel";
+import { Payment } from "../../src/models/paymentModel";
 import { User } from "../../src/models/userModel";
 
 const app = createApp();
@@ -44,6 +45,15 @@ describe("POST /api/subscriptions", () => {
 
     const updatedUser = await User.findById(user.id);
     expect(updatedUser?.currentSubscription?.toString()).toBe(res.body._id);
+
+    const payment = await Payment.findOne({
+      targetType: "Subscription",
+      targetId: res.body._id,
+    });
+    expect(payment?.amount).toBe(plan.price);
+    expect(payment?.user.toString()).toBe(user.id);
+    expect(payment?.provider).toBe("manual");
+    expect(payment?.recordedBy?.toString()).toBe(admin.id);
   });
 
   it("rejects an unknown or inactive plan tier", async () => {

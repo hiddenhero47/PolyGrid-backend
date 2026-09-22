@@ -1,8 +1,10 @@
 # PolyGrid Backend — Architecture & Build Plan
 
 Status: **Phase 1 (setup + base User), Phase 1.5 (Plan/Subscription split),
-and Phase 1.6 (public/private file uploads) shipped.** This doc is updated
-as each phase lands — see the checklist at the bottom for current state.
+Phase 1.6 (public/private file uploads), Phase 1.7 (Jobs & Contacts),
+Phase 1.8 (unified Payment model), and Phase 2 (live Stripe integration)
+shipped.** This doc is updated as each phase lands — see the checklist at
+the bottom for current state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -79,8 +81,9 @@ Structure and conventions are deliberately carried over from
     - `POST /api/subscriptions` — **interim admin tool** (Admin/Super Admin)
       that grants a user a subscription to a plan by tier: creates the
       `Subscription` record and repoints `user.currentSubscription` at it.
-      This is exactly the call a payment provider's webhook will make
-      instead of a human, once Phase 2 lands.
+      Still around for admin comps/manual grants even now that a real
+      Stripe purchase path exists (`POST /api/payments/intent`, see below)
+      — the two aren't mutually exclusive.
     - `GET /api/subscriptions/me` / `GET /api/subscriptions/users/:userId` —
       paginated history, self or admin-on-anyone.
     - `GET /api/subscriptions/current` — the caller's current plan (or
@@ -129,9 +132,75 @@ Structure and conventions are deliberately carried over from
     (always public) and silently no-ops (a soft `avatarWarnings`, not a
     failed request) if nothing valid was attached — a bad avatar must never
     fail the rest of a profile update.
-- Full test coverage for all of the above (except OAuth login's actual
-  third-party verification, deliberately — see above):
-  `tests/integration/{user,plan,subscription,fileAccess}.test.ts`,
+- Jobs & Contacts — subscription-free trust/tracking tool, not tied to any
+  one pillar. Full design (the always-one-stage simplification, the
+  confirm/lock/propose-to-change workflow, the escrow ledger, what's
+  deliberately simplified for v1) is in
+  [jobs-and-contacts-plan.md](jobs-and-contacts-plan.md):
+  - `src/models/contactModel.ts` (`Contact`) — one doc per user,
+    `list: [{user, email, connectedAt}]`. Connecting is mutual
+    (`contactController.connectUsers`), which `jobController.createJob`
+    calls too — creating a job with someone connects you the same way
+    adding them as a contact directly does.
+  - `src/models/jobModel.ts` (`Job`) — `client`/`provider` (each
+    `{userId, isConfirmed, contractFile?}`), `stages` (always at least
+    one — a no-stages job gets one implicit 100%-payment stage, so there's
+    only one completion code path), `proposedStages` (a pending revision
+    once active — the *other* party must accept), `oldStages` (history,
+    never overwritten), `totalAmount`/`amountPaid`/`amountDisposed`/
+    `platformFeeCollected`/`platformFeePercent` (snapshotted at creation),
+    `status`, dispute/cancel fields.
+  - `src/controllers/jobController.ts` + `routes/jobRoutes.ts` — create,
+    confirm, creator-only pre-confirmation edit, stage propose/accept/
+    reject, provider-only mark-done, client-only verify (the only thing
+    that releases escrow — see the plan doc for the fee math), contract
+    upload (reuses `uploadHandler` exactly as `User.avatar` does, private,
+    grants the other party via `FileGrant`), dispute raise (either party)
+    + `GET /api/jobs/disputes` (admin queue, party emails populated) +
+    admin-resolve (requires a `note`, appended to `disputeHistory` — a job
+    can be disputed more than once; resolution correspondence itself
+    happens by email, deliberately not an in-app chat, see the plan doc),
+    creator-only pre-confirmation cancel, admin-only interim
+    `POST /:id/payments` (writes to the job ledger *and* a `Payment`
+    record — see below).
+- Payments — one unified, polymorphic ledger across jobs and subscriptions,
+  now including live Stripe integration. Full design (the real uniqueness-
+  index bug the test suite caught, the lazy-Stripe-client boot-crash bug,
+  the subscription-purchase design gap and how it was resolved, why this is
+  the one third-party integration actually tested end-to-end) is in
+  [payments-plan.md](payments-plan.md):
+  - `src/models/paymentModel.ts` (`Payment`) — `targetType: 'Job' |
+    'Subscription'` + `targetId` (Mongoose `refPath` polymorphic
+    reference), `amount`/`currency`/`provider`/`providerPaymentId?`/
+    `providerFeeAmount`/`status`/`recordedBy?`.
+  - `src/models/paymentProviderModel.ts` (`PaymentProvider`) — catalog
+    data (fee structure per provider), same shape as `Plan`; not consulted
+    by anything yet.
+  - `SUBSCRIPTION_STATUS.PENDING` (`subscriptionModel.ts`) — a subscription
+    now exists in this state from the moment Stripe checkout starts, before
+    payment succeeds; never becomes `user.currentSubscription` until it
+    does.
+  - `src/config/stripe.ts` — lazily-constructed client (see payments-plan.md
+    for why eager construction broke app boot entirely without a key).
+  - `src/providers/paymentProviders/` — the Stripe adapter, behind a small
+    interface a second provider could implement later.
+  - Wired into both existing manual/interim tools —
+    `subscriptionController.grantSubscription` and
+    `jobController.recordPayment` both also write a `Payment` record
+    (`provider: 'manual'`) — so there's one real ledger regardless of how a
+    payment was actually collected.
+  - `src/controllers/paymentController.ts` + `routes/paymentRoutes.ts` —
+    `GET /api/payments/me`, `GET /api/payments` (admin, filterable),
+    `POST /api/payments/intent` (real Stripe PaymentIntent, Job or
+    Subscription), `POST /api/payments/stripe/webhook` (raw-body-scoped in
+    `app.ts`, no `protect` — authenticated by Stripe's signature instead).
+  - `errorMiddleware.errorHandler` — now checks `res.headersSent` before
+    writing (needed once the webhook handler started acking early and
+    continuing async work after).
+- Full test coverage for all of the above (Stripe's live round trip
+  included — see payments-plan.md for why that's different from OAuth's
+  input-validation-only coverage):
+  `tests/integration/{user,plan,subscription,fileAccess,contact,job,payment}.test.ts`,
   `tests/unit/{subscription,fileSignature}.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
@@ -145,8 +214,14 @@ yet. Add if/when actually needed.
 ```
 Phase 1    Project setup + base User (auth, persona toggle)                    <- done
 Phase 1.5  Plan/Subscription split out of User, history-tracked               <- done
-Phase 2    Payment provider integration -> subscription lifecycle via webhook
-           (replaces the manual POST /api/subscriptions admin tool)
+Phase 1.6  Public/private file uploads                                        <- done
+Phase 1.7  Jobs & Contacts (subscription-free trust/tracking tool)            <- done
+Phase 1.8  Unified Payment model (Job + Subscription, polymorphic)            <- done
+Phase 2    Live Stripe integration — POST /api/payments/intent + webhook,   <- done
+           both Job funding and Subscription purchase. The manual admin
+           tools (POST /api/subscriptions, POST /api/jobs/:id/payments)
+           stay — comps/manual grants aren't going away, they're just no
+           longer the only path.
 Phase 3  First pillar's business profile schema + verification pipeline
          (pick one of Engineering/Tenders/Store/SiteForce to prove the pattern)
 Phase 4  Remaining three pillars' business profiles, following the same shape

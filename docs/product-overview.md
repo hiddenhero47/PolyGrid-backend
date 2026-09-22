@@ -36,6 +36,17 @@ products or separate signups.
   personnel — foremen, carpenters, plumbers, electricians, masons, general
   laborers — with skill verification and ratings.
 
+## Jobs & Contacts — cross-pillar trust tool
+
+Not tied to any one pillar, and **not gated by subscription** — two people
+who already know each other (or connect through the platform) can track a
+piece of work between themselves regardless of account type. A job has one
+or more payment-bearing stages, a mutual confirm/lock workflow, an escrow
+ledger (PolyGrid takes a `platformFeePercent` cut on release), and
+optional contract file attachments per party. Creating a job with someone
+also adds them to your `Contact` list (mutually). Full design in
+[jobs-and-contacts-plan.md](jobs-and-contacts-plan.md).
+
 ## Roles & personas
 
 ### System roles

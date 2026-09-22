@@ -11,6 +11,7 @@ import {
   SubscriptionStatus,
 } from "../../src/models/subscriptionModel";
 import { FileGrant } from "../../src/models/fileGrantModel";
+import { Job, IJob, JOB_STATUS } from "../../src/models/jobModel";
 import { uploadHandler, FILE_VISIBILITY, SavedFileInfo } from "../../src/helpers/fileStorage";
 
 let counter = 0;
@@ -183,4 +184,36 @@ export const createPrivateFile = async ({
   }
 
   return saved;
+};
+
+interface CreateActiveJobOptions {
+  client: IUser;
+  provider: IUser;
+  [key: string]: unknown;
+}
+
+// Direct DB insert, not through the real create+confirm HTTP flow —
+// job.test.ts has its own HTTP-driven version of this (it's testing that
+// flow itself); this one is for tests elsewhere (e.g. payment.test.ts) that
+// just need an active job to act on, without re-exercising creation logic
+// already covered there.
+export const createActiveJob = async ({
+  client,
+  provider,
+  ...overrides
+}: CreateActiveJobOptions): Promise<IJob> => {
+  const n = next();
+
+  return Job.create({
+    jobTitle: `Test Job ${n}`,
+    jobDescription: "Test job description",
+    createdBy: client._id,
+    client: { userId: client._id, isConfirmed: true },
+    provider: { userId: provider._id, isConfirmed: true },
+    stages: [{ details: [], payment: 100 }],
+    totalAmount: 1000,
+    platformFeePercent: 5,
+    status: JOB_STATUS.ACTIVE,
+    ...overrides,
+  });
 };
