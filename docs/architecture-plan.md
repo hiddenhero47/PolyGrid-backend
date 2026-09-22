@@ -30,16 +30,27 @@ Structure and conventions are deliberately carried over from
 - `src/middleware/{corsMiddleware,errorMiddleware,authMiddleware}.ts`.
 - `src/models/userModel.ts` — the base `User` document described in
   [product-overview.md](product-overview.md): `fullName`, `email`,
-  `password`, `phoneNumber` (`{number, country}`), `avatar` (loose object —
-  no upload pipeline yet, expects an already-hosted URL), `authProviders`
-  (`{provider: local|google|apple, providerId}[]` — schema only, OAuth login
-  itself isn't wired up), `verified`, `user2fa` (schema only, no
-  otplib/qrcode wiring yet), `systemRole`, `activeAccountType`, `sessionId`,
-  `tokenCache` (password-reset tokens), and `currentSubscription` — a
-  pointer at this user's latest `Subscription`, not an embedded value.
+  `password`, `phoneNumber` (`{number, country}`), `avatar` (set via the
+  file-upload helper — see below), `authProviders`
+  (`{provider: local|google|apple, providerId}[]`), `verified`, `user2fa`
+  (schema only, no otplib/qrcode wiring yet), `systemRole`,
+  `activeAccountType`, `sessionId`, `tokenCache` (password-reset tokens),
+  and `currentSubscription` — a pointer at this user's latest
+  `Subscription`, not an embedded value.
 - `src/controllers/userController.ts` + `src/routes/userRoutes.ts`:
   - Auth: register, login, `GET /me`, profile update (incl. password change
     + session invalidation), logout-everywhere.
+  - OAuth: `POST /api/users/social/{google,apple}` — verifies the provider's
+    id/identity token (`google-auth-library`/`apple-signin-auth`), finds or
+    creates the user (email first, falling back to `authProviders.providerId`
+    for Apple's later-login-omits-email case), links the provider if this is
+    the account's first login with it, 409s if that provider account is
+    already linked to a *different* user. A new Google user's avatar is
+    pulled from their Google profile picture via the same `uploadHandler` as
+    everything else (never fails the login if that fetch fails). Not covered
+    by automated tests beyond input validation — see
+    [tests/README.md](../tests/README.md) for why, same reasoning
+    house-maduekwe-backend's own test suite documents for this exact case.
   - Persona toggle: `PATCH /api/users/account-type` (explicit target or a
     blind flip).
   - Password reset: request + reset, token-cache based (same shape as
@@ -118,15 +129,16 @@ Structure and conventions are deliberately carried over from
     (always public) and silently no-ops (a soft `avatarWarnings`, not a
     failed request) if nothing valid was attached — a bad avatar must never
     fail the rest of a profile update.
-- Full test coverage for all of the above:
+- Full test coverage for all of the above (except OAuth login's actual
+  third-party verification, deliberately — see above):
   `tests/integration/{user,plan,subscription,fileAccess}.test.ts`,
   `tests/unit/{subscription,fileSignature}.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently
-returns the token directly in non-production responses instead), OAuth
-login, 2FA — house-maduekwe-backend has these but PolyGrid's brief didn't
-ask for them yet. Add if/when actually needed.
+returns the token directly in non-production responses instead), 2FA —
+house-maduekwe-backend has these but PolyGrid's brief didn't ask for them
+yet. Add if/when actually needed.
 
 ## Phasing (forward-looking)
 

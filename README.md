@@ -14,10 +14,15 @@ touching the subscription/auth model.
 NODE_ENV=development
 PORT=4000
 MONGO_URI=
+BASE_URL=
 JWT_SECRET=
 JWT_EMAIL_SECRET=
+FILE_SIGNING_SECRET=
 APP_NAME=PolyGrid
 FRONTEND_URL=
+GOOGLE_CLIENT_ID=
+APPLE_CLIENT_ID=
+STORAGE_ROOT=
 ```
 
 Copy `.env.example` to `.env` and fill in real values.

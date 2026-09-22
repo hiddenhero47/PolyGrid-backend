@@ -85,6 +85,18 @@ tests can get an app instance without connecting to the real DB or calling
     `avatarWarnings` array **without** failing the rest of the update, and
     that replacing an avatar deletes the old file from disk.
 
+## What's deliberately NOT covered
+
+**Google/Apple OAuth login** (`POST /api/users/social/{google,apple}`) —
+these verify a real token against the provider's own servers
+(`google-auth-library`/`apple-signin-auth`). Mocking those SDKs deeply
+enough to trust the result would give low confidence it matches real
+behavior, and standing up real OAuth infrastructure for a test run isn't
+"simple to run" — the same call house-maduekwe-backend's own test suite
+documents for this exact case. `user.test.ts` covers only what's safely
+testable without a third party: that both routes 400 when their token
+field is missing.
+
 ## Adding more tests
 
 Use `tests/setup/fixtures.ts` for common setup instead of building documents

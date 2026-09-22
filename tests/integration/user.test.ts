@@ -78,6 +78,27 @@ describe("POST /api/users/login", () => {
   });
 });
 
+// Google/Apple OAuth login itself isn't covered here — verifying a real
+// idToken/identityToken means either calling the real provider or mocking
+// their SDKs deeply enough that a pass wouldn't give much confidence it
+// matches real behavior (same call house-maduekwe-backend's own test suite
+// makes, see its tests/README.md). What's cheaply and safely testable
+// without touching a third party — basic input validation — is covered
+// instead.
+describe("POST /api/users/social/google", () => {
+  it("requires an idToken", async () => {
+    const res = await request(app).post("/api/users/social/google").send({});
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/users/social/apple", () => {
+  it("requires an identityToken", async () => {
+    const res = await request(app).post("/api/users/social/apple").send({});
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("PUT /api/users/profile", () => {
   it("updates fullName/phoneNumber", async () => {
     const user = await createUser();
