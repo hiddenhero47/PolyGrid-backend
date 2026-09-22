@@ -1,8 +1,8 @@
 # PolyGrid Backend — Architecture & Build Plan
 
-Status: **Phase 1 (setup + base User) and Phase 1.5 (Plan/Subscription split)
-shipped.** This doc is updated as each phase lands — see the checklist at
-the bottom for current state.
+Status: **Phase 1 (setup + base User), Phase 1.5 (Plan/Subscription split),
+and Phase 1.6 (public/private file uploads) shipped.** This doc is updated
+as each phase lands — see the checklist at the bottom for current state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -30,7 +30,11 @@ Structure and conventions are deliberately carried over from
 - `src/middleware/{corsMiddleware,errorMiddleware,authMiddleware}.ts`.
 - `src/models/userModel.ts` — the base `User` document described in
   [product-overview.md](product-overview.md): `fullName`, `email`,
-  `password`, `phone`, `systemRole`, `activeAccountType`, `sessionId`,
+  `password`, `phoneNumber` (`{number, country}`), `avatar` (loose object —
+  no upload pipeline yet, expects an already-hosted URL), `authProviders`
+  (`{provider: local|google|apple, providerId}[]` — schema only, OAuth login
+  itself isn't wired up), `verified`, `user2fa` (schema only, no
+  otplib/qrcode wiring yet), `systemRole`, `activeAccountType`, `sessionId`,
   `tokenCache` (password-reset tokens), and `currentSubscription` — a
   pointer at this user's latest `Subscription`, not an embedded value.
 - `src/controllers/userController.ts` + `src/routes/userRoutes.ts`:
@@ -75,9 +79,48 @@ Structure and conventions are deliberately carried over from
   (same lookup, then 402s if there's no active plan; the gate for
   business-pillar routes once they exist — see Phase 3+). `req.currentPlan`
   is the `Subscription` document itself, not the `Plan`.
+- Public/private file uploads — a reusable helper other controllers call
+  directly, not a standalone CRUD resource, and access is decided once
+  (upstream) rather than on every read. Full design/rationale (the
+  never-throws helper contract, the signed-URL model and why it's
+  app-key-only with no sessionId, why `file-type` isn't used) is in
+  [file-uploads-plan.md](file-uploads-plan.md):
+  - `src/helpers/{fileSignature,fileStorage,fileSigning}.ts` — magic-byte
+    validation, disk I/O (`uploadHandler`, never throws; private files are
+    written to `PRIVATE_DIR/<ownerId>/<fileName>`), and
+    `signFileUrl`/`verifyFileUrlToken` — short-lived (10 min), app-key-signed
+    (`FILE_SIGNING_SECRET`, separate from `JWT_SECRET`) URLs scoped to one
+    exact `{ownerId, fileName, mode}`.
+  - `src/models/fileGrantModel.ts` (`FileGrant`) — bookkeeping only
+    (`ownerId`, `fileName`, `allowedUsers`), written **only** when an
+    upload names extra `allowedUserIds`. An owner-only private file costs
+    zero DB writes and zero DB reads to view.
+  - `src/controllers/fileController.ts` + `routes/fileRoutes.ts`:
+    - `POST /api/files/private` — the one upload-only route (400s on
+      failure, correctly, since uploading *is* its whole job); response
+      includes signed `requestUrl`/`downloadUrl` for the file just uploaded.
+    - `GET /api/files/private/:ownerId/:fileName/link` — the generic
+      "check access, mint links" endpoint (owner/admin cost zero extra
+      queries off `req.user`; only an explicit-share check reads
+      `FileGrant`). A domain with its own access rules (e.g. a future KYC
+      feature) skips this and calls `signFileUrl()` directly after its own
+      check.
+    - `GET /private/view|download/:ownerId/:fileName?token=...`, mounted
+      directly in `app.ts` — **no** `protect`, **no** DB read: the signed
+      token itself is the authorization, verified via
+      `res.sendFile`/`res.download` with `root` locked to that owner's
+      folder (closes a path-traversal gap an earlier manual
+      `fs.createReadStream` version had). This is what lets a signed URL go
+      straight into `<img src>`/`<video src>`.
+    - `GET /public/:fileName` is a plain `express.static` mount, no route
+      of its own.
+  - `User.avatar` is the first real caller: `updateUserProfile` uploads
+    (always public) and silently no-ops (a soft `avatarWarnings`, not a
+    failed request) if nothing valid was attached — a bad avatar must never
+    fail the rest of a profile update.
 - Full test coverage for all of the above:
-  `tests/integration/{user,plan,subscription}.test.ts`,
-  `tests/unit/subscription.test.ts`.
+  `tests/integration/{user,plan,subscription,fileAccess}.test.ts`,
+  `tests/unit/{subscription,fileSignature}.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently

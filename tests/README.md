@@ -35,8 +35,9 @@ tests/
     globalSetup.ts      starts the in-memory replica set (once, whole run)
     globalTeardown.ts   stops it
     fixtures.ts         factories: users (basic/admin/super admin), plans,
-                         subscriptions (incl. a user with an active one) +
-                         JWT token generation
+                         subscriptions (incl. a user with an active one),
+                         private files + JWT token generation + a real tiny
+                         PNG (base64 + Buffer) for upload tests
   unit/          pure functions/methods/middleware, no HTTP, DB used only
                  where the thing under test needs a real document
   integration/   real HTTP requests via supertest against src/app.ts
@@ -48,9 +49,12 @@ tests can get an app instance without connecting to the real DB or calling
 
 ## What's covered
 
-- **Unit** (`tests/unit/subscription.test.ts`): `Subscription.isActive()`
-  status/expiry logic, and the `attachCurrentPlan`/`requireActiveSubscription`
-  middleware called directly (allows/blocks based on subscription state).
+- **Unit**:
+  - `subscription.test.ts` — `Subscription.isActive()` status/expiry logic,
+    and the `attachCurrentPlan`/`requireActiveSubscription` middleware
+    called directly (allows/blocks based on subscription state).
+  - `fileSignature.test.ts` — magic-byte detection for each supported type
+    (JPEG/PNG/WEBP/PDF) plus rejection of unrecognized/truncated content.
 - **Integration**:
   - `user.test.ts` — register/login, `GET /me`, profile update including
     password change + session invalidation (the old token must stop
@@ -64,6 +68,22 @@ tests can get an app instance without connecting to the real DB or calling
     granting again keeps the old record (history preserved) and moves the
     pointer; unknown/inactive plan tier rejected; self/admin history
     listing; `GET /current` returns the active plan or `null`.
+  - `fileAccess.test.ts` — `POST /api/files/private` (real PNG bytes; fails
+    the whole request on an invalid file, since uploading is its only job;
+    writes a `FileGrant` only when `allowedUserIds` names real users, none
+    at all when no one's shared with; response's signed `requestUrl`/
+    `downloadUrl` both work immediately); `GET /api/files/private/:ownerId/:fileName/link`
+    mints links for the owner/admin/an explicitly granted user and 403s a
+    stranger; the signed `/private/view|download/:ownerId/:fileName` routes
+    need no `Authorization` header at all (the token is the credential),
+    reject no-token/garbled/expired tokens and a token replayed against the
+    wrong mode or a different file, and always set
+    `Cache-Control: no-store`; a publicly-uploaded avatar is fetchable
+    unauthenticated from `/public/:fileName`.
+  - `user.test.ts` also covers avatar-specific behavior: uploading one via
+    `PUT /profile`, that an invalid attached file surfaces as a soft
+    `avatarWarnings` array **without** failing the rest of the update, and
+    that replacing an avatar deletes the old file from disk.
 
 ## Adding more tests
 

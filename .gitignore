@@ -4,3 +4,5 @@ dist
 .env.test
 coverage
 .DS_Store
+/storage
+/storage-test

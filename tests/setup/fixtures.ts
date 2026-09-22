@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
+import { Request } from "express";
 import { User, IUser, SYSTEM_ROLE, SystemRole } from "../../src/models/userModel";
 import { Plan, IPlan, PLAN_TIER, PlanTier } from "../../src/models/planModel";
 import {
@@ -9,6 +10,8 @@ import {
   SUBSCRIPTION_STATUS,
   SubscriptionStatus,
 } from "../../src/models/subscriptionModel";
+import { FileGrant } from "../../src/models/fileGrantModel";
+import { uploadHandler, FILE_VISIBILITY, SavedFileInfo } from "../../src/helpers/fileStorage";
 
 let counter = 0;
 const next = (): number => {
@@ -134,3 +137,50 @@ export const generateToken = (user: IUser): string =>
   jwt.sign({ id: user._id, sessionId: user.sessionId }, process.env.JWT_SECRET as string, {
     expiresIn: "1d",
   });
+
+// A real (tiny, valid) 1x1 transparent PNG — needed anywhere code validates
+// file type by magic bytes (src/helpers/fileSignature.ts), not just by
+// extension/declared mimetype. Fully local, no network involved.
+export const TEST_PNG_BASE64 =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+export const TEST_PNG_BUFFER = Buffer.from(
+  TEST_PNG_BASE64.split("base64,")[1],
+  "base64",
+);
+
+interface CreatePrivateFileOptions {
+  uploader: IUser;
+  allowedUsers?: IUser[];
+}
+
+// Goes through the real uploadHandler (same path fileController.uploadPrivateFile
+// uses) with a synthetic request, so fixtures stay honest about what
+// actually lands on disk — a FileGrant is only written when allowedUsers is
+// non-empty, matching the controller's "no shares, no DB record" rule.
+export const createPrivateFile = async ({
+  uploader,
+  allowedUsers = [],
+}: CreatePrivateFileOptions): Promise<SavedFileInfo> => {
+  const fakeReq = {
+    files: [{ buffer: TEST_PNG_BUFFER, originalname: "private-test.png" }],
+    body: {},
+  } as unknown as Request;
+
+  const { results } = await uploadHandler({
+    req: fakeReq,
+    visibility: FILE_VISIBILITY.PRIVATE,
+    ownerId: uploader.id,
+  });
+  const saved = results[0];
+
+  if (allowedUsers.length > 0) {
+    await FileGrant.create({
+      ownerId: uploader._id,
+      fileName: saved.fileName,
+      allowedUsers: allowedUsers.map((u) => u._id),
+    });
+  }
+
+  return saved;
+};

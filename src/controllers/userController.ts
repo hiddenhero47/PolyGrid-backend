@@ -11,6 +11,7 @@ import {
   ACCOUNT_TYPE,
   TOKENS,
 } from "../models/userModel";
+import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
 
 const generateToken = (user: IUser): string => {
   return jwt.sign(
@@ -24,17 +25,26 @@ const toPublicUser = (user: IUser) => ({
   id: user.id,
   fullName: user.fullName,
   email: user.email,
-  phone: user.phone,
+  phoneNumber: user.phoneNumber,
+  // storagePath is internal only (used to delete the old file on replace) —
+  // never sent to a client.
+  avatar: user.avatar
+    ? { fileName: user.avatar.fileName, mime: user.avatar.mime, size: user.avatar.size, url: user.avatar.url }
+    : undefined,
+  verified: user.verified,
   systemRole: user.systemRole,
   activeAccountType: user.activeAccountType,
   currentSubscription: user.currentSubscription,
+  user2fa: {
+    enable: user.user2fa?.enable || false,
+  },
 });
 
 // @desc    Register a new user
 // @route   POST /api/users
 // @access  Public
 export const registerUser = asyncHandler(async (req: Request, res: Response) => {
-  const { fullName, email, password, phone } = req.body;
+  const { fullName, email, password, phoneNumber } = req.body;
 
   if (!fullName || !email || !password) {
     res.status(400);
@@ -54,7 +64,7 @@ export const registerUser = asyncHandler(async (req: Request, res: Response) => 
     fullName,
     email,
     password: hashedPassword,
-    phone,
+    phoneNumber,
     systemRole: SYSTEM_ROLE.USER,
   });
 
@@ -101,7 +111,7 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
     throw new Error("User not found");
   }
 
-  const { fullName, phone, password, oldPassword } = req.body;
+  const { fullName, phoneNumber, password, oldPassword } = req.body;
 
   if (password) {
     if (!oldPassword) {
@@ -122,14 +132,53 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
     user.sessionId = crypto.randomUUID();
   }
 
+  if (phoneNumber && !phoneNumber.number && !phoneNumber.country) {
+    res.status(400);
+    throw new Error("Both phone number and country code are required");
+  }
+
   if (fullName) user.fullName = fullName;
-  if (phone) user.phone = phone;
+  if (phoneNumber) user.phoneNumber = phoneNumber;
+
+  // An avatar is one optional field on a form that's mostly about other
+  // things — a bad/missing image must never fail the whole profile update.
+  // uploadHandler already never throws; it just reports what it couldn't
+  // save in errorLogs, which we surface as a soft warning instead of an
+  // error response.
+  const hasIncomingFile =
+    (req.files as Express.Multer.File[] | undefined)?.length || req.body?.base64 || req.body?.url;
+  let avatarWarnings: string[] = [];
+
+  if (hasIncomingFile) {
+    const { results, errorLogs } = await uploadHandler({
+      req,
+      visibility: FILE_VISIBILITY.PUBLIC, // avatars are always public
+    });
+
+    if (results.length > 0) {
+      if (user.avatar?.storagePath) {
+        await deleteStoredFile(user.avatar.storagePath);
+      }
+
+      const saved = results[0];
+      user.avatar = {
+        fileName: saved.fileName,
+        storagePath: saved.storagePath,
+        mime: saved.mime,
+        size: saved.size,
+        url: saved.url,
+      };
+    }
+
+    avatarWarnings = errorLogs;
+  }
 
   await user.save();
 
   res.json({
     message: "Profile updated successfully",
     user: toPublicUser(user),
+    ...(avatarWarnings.length > 0 ? { avatarWarnings } : {}),
   });
 });
 
@@ -319,6 +368,7 @@ export const registerAdmin = asyncHandler(async (req: Request, res: Response) =>
     fullName,
     email,
     password: hashedPassword,
+    verified: true,
     systemRole: SYSTEM_ROLE.ADMIN,
   });
 
@@ -355,7 +405,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     User.find(filter)
-      .select("-password -tokenCache")
+      .select("-password -tokenCache -user2fa")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
