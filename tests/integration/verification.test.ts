@@ -290,7 +290,7 @@ describe("POST /api/verifications", () => {
       profileType: "ConsultancyProfile",
       profileId: profile.id,
       country: "NG",
-      state: "Lagos",
+      state: "LA", // Lagos's real ISO 3166-2 code
       form: { businessName: "Acme Engineering" },
     }).attach("business_certificate", TEST_PNG_BUFFER, "cert.png");
 
@@ -303,7 +303,7 @@ describe("POST /api/verifications", () => {
     await createVerificationTemplate({ country: "NG", state: null, documents: [] });
     const stateTemplate = await createVerificationTemplate({
       country: "NG",
-      state: "LAGOS",
+      state: "LA", // Lagos's real ISO 3166-2 code
       fields: [{ key: "businessName", label: "Business name", type: "string", required: true }],
       documents: [],
     });
@@ -312,7 +312,7 @@ describe("POST /api/verifications", () => {
       profileType: "ConsultancyProfile",
       profileId: profile.id,
       country: "NG",
-      state: "lagos",
+      state: "la",
       form: { businessName: "Acme Engineering" },
     });
 

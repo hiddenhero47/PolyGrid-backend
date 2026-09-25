@@ -83,6 +83,22 @@ describe("POST /api/jobs", () => {
     expect(clientContacts?.list.map((e) => e.user.toString())).toEqual([providerUser.id]);
   });
 
+  it("rejects a currency that isn't a real ISO 4217 code, as a clean 400 not a 500", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+
+    const res = await createJobAs(generateToken(clientUser), {
+      counterpartyUserId: providerUser.id,
+      myRole: "client",
+      jobTitle: "Build a fence",
+      jobDescription: "Wooden fence around the back yard",
+      totalAmount: 1000,
+      currency: "NOT_REAL",
+    });
+
+    expect(res.status).toBe(400);
+  });
+
   it("lets the creator be the provider instead", async () => {
     const clientUser = await createUser();
     const providerUser = await createUser();

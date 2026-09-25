@@ -182,6 +182,18 @@ describe("PUT /api/users/profile", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a phoneNumber.country that isn't a real ISO code (previously just checked it was 2 letters)", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ phoneNumber: { number: "+2348012345678", country: "ZZ" } });
+
+    expect(res.status).toBe(400);
+  });
+
   it("changes password and invalidates the old session", async () => {
     const password = "password123";
     const user = await createUser({ password: await bcrypt.hash(password, 4) });

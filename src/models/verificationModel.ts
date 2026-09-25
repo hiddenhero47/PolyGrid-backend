@@ -1,4 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
 
 // The KYC/verification submission — deliberately its own model, not
 // embedded on a profile, for two reasons: (1) it's genuinely reusable
@@ -81,8 +82,28 @@ const verificationDocumentSchema = new Schema<IVerificationDocument>(
 
 const verificationLocationSchema = new Schema<IVerificationLocation>(
   {
-    country: { type: String, required: true, uppercase: true, trim: true },
-    state: { type: String, trim: true, uppercase: true },
+    country: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: isValidCountryCode,
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+      },
+    },
+    state: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      validate: {
+        validator: function (this: IVerificationLocation, value: string | undefined) {
+          if (!value) return true;
+          return isValidStateCode(this.country, value);
+        },
+        message: "Not a recognized state/province for this country",
+      },
+    },
   },
   { _id: false },
 );

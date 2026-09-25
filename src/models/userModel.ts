@@ -1,5 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import crypto from "crypto";
+import { isValidCountryCode } from "../helpers/countryReference";
 
 export const SYSTEM_ROLE = {
   SUPER_ADMIN: "super_admin",
@@ -120,10 +121,13 @@ const userSchema = new Schema<IUser>(
         type: String,
         uppercase: true,
         trim: true,
-        match: [
-          /^[A-Z]{2}$/,
-          "Phone country must be a valid 2-letter country code (e.g. NG, US)",
-        ],
+        // Was a bare 2-letter regex before — matched the shape of a
+        // country code without checking it was a real one (e.g. "ZZ"
+        // passed). Now checked against actual ISO 3166-1 reference data.
+        validate: {
+          validator: (value: string) => !value || isValidCountryCode(value),
+          message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+        },
       },
     },
     avatar: {

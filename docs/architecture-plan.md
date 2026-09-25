@@ -3,10 +3,11 @@
 Status: **Phase 1 (setup + base User), Phase 1.5 (Plan/Subscription split),
 Phase 1.6 (public/private file uploads), Phase 1.7 (Jobs & Contacts),
 Phase 1.8 (unified Payment model), Phase 2 (live Stripe integration),
-Phase 3 (ConsultancyProfile + generic Verification pipeline), and Phase 3.1
-(Yup request validation + template-driven Verification) shipped.** This
-doc is updated as each phase lands — see the checklist at the bottom for
-current state.
+Phase 3 (ConsultancyProfile + generic Verification pipeline), Phase 3.1
+(Yup request validation + template-driven Verification), and Phase 3.2
+(country/state/city/currency reference data) shipped.** This doc is
+updated as each phase lands — see the checklist at the bottom for current
+state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -333,6 +334,31 @@ Structure and conventions are deliberately carried over from
     `addPortfolioMedia` for appending to an existing item later, plus hard
     caps (`MAX_PORTFOLIO_ITEMS`, `MAX_MEDIA_PER_ITEM`) enforced both in the
     controller and as a Mongoose array `validate`.
+- Reference data — every `country`/`state`/`currency` field across the app
+  (`ConsultancyProfile`, `VerificationTemplate`, `Verification.location`,
+  `Job`, `Payment`, `Plan`, `User.phoneNumber`) was previously just an
+  uppercased free string with no check against reality. Full design
+  (library choice, validation strictness per field type, the real
+  Mongoose-`ValidationError`-was-a-500 bug this surfaced and fixed) is in
+  [reference-data-plan.md](reference-data-plan.md):
+  - `src/helpers/countryReference.ts` / `currencyReference.ts` — the only
+    files that import `country-state-city`/`currency-codes`; everything
+    else validates through these. Country and currency are hard-validated
+    everywhere (complete, unambiguous ISO lists); state is validated only
+    when the country has states listed in this dataset; city is
+    deliberately never hard-validated (coverage is too uneven) but still
+    has a lookup route for a frontend autocomplete.
+  - `src/controllers/referenceController.ts` +
+    `routes/referenceRoutes.ts` (`GET /api/reference/{countries,
+    countries/:code/states, countries/:code/cities, currencies}`) —
+    public, no auth, pure in-memory lookups, the same data every
+    validator checks against.
+  - `errorMiddleware.ts`'s `errorHandler` now converts a raw
+    `mongoose.Error.ValidationError` into a clean `400` — previously it
+    had no `statusCode` of its own and fell through to the generic 500
+    branch, meaning *every* schema validation failure across the whole
+    app (not just these new checks) surfaced as a server error instead of
+    a client-input one.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently
@@ -362,6 +388,10 @@ Phase 3.1  Yup request-validation convention + VerificationTemplate        <- do
            catalog data — what a profile needs to verify is now
            data-driven per profileType+location, not hardcoded per
            country.
+Phase 3.2  country/state/city/currency reference data, applied to every   <- done
+           existing free-text field of that kind app-wide + a public
+           GET /api/reference/* lookup API + fixed a latent bug where
+           every Mongoose ValidationError surfaced as a 500.
 Phase 4  Remaining three pillars' business profiles (Contractor/Tenders,
          Store, Labor/SiteForce), following consultancy-profile-plan.md's
          shape and registering in PROFILE_MODEL_REGISTRY

@@ -60,6 +60,20 @@ describe("POST /api/consultancy-profiles", () => {
     expect(res.body.isVerified).toBe(false);
   });
 
+  it("rejects a country that isn't a real ISO code, as a clean 400 not a 500", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .post("/api/consultancy-profiles")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ headline: "Structural Engineer", country: "ZZ" });
+
+    // No manual pre-check for this in the controller — exercises the
+    // schema validate -> Mongoose ValidationError -> errorMiddleware 400
+    // conversion, same as plan.test.ts/job.test.ts's currency checks.
+    expect(res.status).toBe(400);
+  });
+
   it("disambiguates a slug collision", async () => {
     const first = await createUser({ fullName: "Ada Lovelace" });
     const second = await createUser({ fullName: "Ada Lovelace" });

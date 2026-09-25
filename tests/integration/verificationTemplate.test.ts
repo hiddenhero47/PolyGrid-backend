@@ -153,10 +153,10 @@ describe("GET /api/verification-templates/lookup", () => {
   it("prefers a state-specific template over the nationwide default", async () => {
     const user = await createUser();
     await createVerificationTemplate({ country: "NG", state: null });
-    const stateTemplate = await createVerificationTemplate({ country: "NG", state: "LAGOS" });
+    const stateTemplate = await createVerificationTemplate({ country: "NG", state: "LA" }); // Lagos's ISO 3166-2 code
 
     const res = await request(app)
-      .get("/api/verification-templates/lookup?profileType=ConsultancyProfile&country=NG&state=lagos")
+      .get("/api/verification-templates/lookup?profileType=ConsultancyProfile&country=NG&state=la")
       .set("Authorization", `Bearer ${generateToken(user)}`);
 
     expect(res.status).toBe(200);

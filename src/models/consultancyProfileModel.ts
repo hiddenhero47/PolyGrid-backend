@@ -1,4 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { isValidCountryCode } from "../helpers/countryReference";
+import { isValidCurrencyCode } from "../helpers/currencyReference";
 
 // PolyGrid Engineering's profile — the discovery/presence layer only
 // ("a personal mini-site"). Actually *engaging* a consultant — booking a
@@ -35,7 +37,7 @@ export const MAX_PORTFOLIO_ITEMS = 20;
 export const MAX_MEDIA_PER_ITEM = 6;
 // Same reasoning for external links — a handful of "where else to find me"
 // links, not an unbounded list.
-export const MAX_PROFILE_LINKS = 3;
+export const MAX_PROFILE_LINKS = 10;
 
 // External links only (website, LinkedIn, a portfolio site, Behance,
 // GitHub, etc.) — deliberately NOT a place for raw contact details (phone/
@@ -179,7 +181,16 @@ const serviceListingSchema = new Schema<IServiceListing>({
     required: true,
   },
   price: { type: Number, required: true, min: 0 },
-  currency: { type: String, default: "USD", uppercase: true, trim: true },
+  currency: {
+    type: String,
+    default: "USD",
+    uppercase: true,
+    trim: true,
+    validate: {
+      validator: isValidCurrencyCode,
+      message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
+    },
+  },
   durationMinutes: { type: Number, min: 1 },
 });
 
@@ -224,7 +235,21 @@ const consultancyProfileSchema = new Schema<IConsultancyProfile>(
       enum: Object.values(SPECIALIZATION),
       default: [],
     },
-    country: { type: String, required: true, uppercase: true, trim: true },
+    country: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: isValidCountryCode,
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+      },
+    },
+    // Not validated against reference data on purpose — see
+    // countryReference.ts: city-level coverage is uneven enough that a
+    // hard check would reject legitimate towns just for being absent from
+    // one dataset. GET /api/reference/countries/:code/cities exists for a
+    // frontend that wants an autocomplete/dropdown anyway.
     city: { type: String, trim: true },
     yearsOfExperience: { type: Number, min: 0 },
     links: {

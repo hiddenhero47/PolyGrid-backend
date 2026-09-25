@@ -57,14 +57,29 @@ tests can get an app instance without connecting to the real DB or calling
     called directly (allows/blocks based on subscription state).
   - `fileSignature.test.ts` — magic-byte detection for each supported type
     (JPEG/PNG/WEBP/PDF) plus rejection of unrecognized/truncated content.
+  - `countryReference.test.ts` — real ISO country/state codes accepted,
+    made-up ones rejected, a state check against a country with no states
+    listed in the dataset accepts anything (found dynamically, not
+    hardcoded), `getDefaultCurrencyForCountry`/`getCitiesOfState` return
+    real data.
+  - `currencyReference.test.ts` — real ISO 4217 codes accepted, a made-up
+    one rejected, decimal digits are correct for a normal currency (2) and
+    a zero-decimal one (JPY, 0).
 - **Integration**:
   - `user.test.ts` — register/login, `GET /me`, profile update including
     password change + session invalidation (the old token must stop
     working), the persona toggle (`PATCH /account-type`), logout-everywhere,
     the full password-reset round trip, admin user management (create
-    admin, list/paginate, change role, Super-Admin-can't-modify-self guard).
+    admin, list/paginate, change role, Super-Admin-can't-modify-self guard),
+    and `phoneNumber.country` rejecting a made-up 2-letter code that isn't
+    a real ISO country (the field used to only check the shape — 2
+    letters — not that it meant anything).
   - `plan.test.ts` — listing (active-only by default), get-by-id, Super
-    Admin create/update, duplicate-`planTier` rejection, non-admin blocked.
+    Admin create/update, duplicate-`planTier` rejection, non-admin blocked,
+    and a made-up `currency` rejected as a clean `400` — `planController`
+    has no manual pre-check for this, so it's what actually exercises the
+    `mongoose.Error.ValidationError` → 400 conversion in
+    `errorMiddleware.ts` (see reference-data-plan.md).
   - `subscription.test.ts` — granting a subscription (Admin/Super Admin
     only) creates a history record and repoints `user.currentSubscription`;
     granting again keeps the old record (history preserved) and moves the
@@ -99,7 +114,8 @@ tests can get an app instance without connecting to the real DB or calling
     one-directional removal.
   - `job.test.ts` — creation (either party as creator, auto-confirms their
     own side, connects the two as contacts, rejects stage payments summing
-    over 100%); confirm (activates once both sides are in, blocks a
+    over 100%, rejects a made-up `currency` as a clean `400`); confirm
+    (activates once both sides are in, blocks a
     non-party, rejects double-confirm); creator-only pre-confirmation edit
     (blocked once active); view/list access (party or admin only);
     stage propose/accept/reject (only the *other* party can
@@ -135,7 +151,8 @@ tests can get an app instance without connecting to the real DB or calling
     `recordPayment` write matches what was recorded.
   - `consultancyProfile.test.ts` — create (unique slug from name,
     collision disambiguation, one-per-user, invalid specializations
-    silently dropped), get/update mine, public profile page by id/slug:
+    silently dropped, a made-up `country` rejected as a clean `400`),
+    get/update mine, public profile page by id/slug:
     the URL always resolves (200) but the content is withheld
     (`{ available: false }`, nothing else leaked) while not currently
     subscribed, the full profile is returned once subscribed even if
@@ -205,6 +222,12 @@ tests can get an app instance without connecting to the real DB or calling
     rendering a verification form) resolves the nationwide default and
     prefers a state-specific override when one exists, 404s when nothing's
     configured for that profileType/location yet.
+  - `reference.test.ts` — `GET /api/reference/{countries,
+    countries/:code/states, countries/:code/cities, currencies}` are all
+    public (no auth) and return real data (Nigeria is in the country
+    list with its real currency, Lagos is a real Nigerian state, JPY
+    really has 0 decimal digits); an unknown country code 404s on the
+    states/cities routes; cities can be scoped to a state via `?state=`.
 
 ## Stripe is tested for real — unlike OAuth
 
