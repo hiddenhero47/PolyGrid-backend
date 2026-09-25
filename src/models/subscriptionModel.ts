@@ -2,6 +2,11 @@ import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { PLAN_TIER, PlanTier } from "./planModel";
 
 export const SUBSCRIPTION_STATUS = {
+  // Checkout has started (a Payment/PaymentIntent exists) but hasn't
+  // succeeded yet — a real, queryable state ("who started checkout and
+  // never finished"), not just payments plumbing. Never becomes the user's
+  // currentSubscription; only a webhook flipping this to ACTIVE does that.
+  PENDING: "pending",
   ACTIVE: "active",
   PAST_DUE: "past_due",
   CANCELED: "canceled",

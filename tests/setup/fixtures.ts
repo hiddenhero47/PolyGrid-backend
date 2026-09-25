@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
+import { Request } from "express";
 import { User, IUser, SYSTEM_ROLE, SystemRole } from "../../src/models/userModel";
 import { Plan, IPlan, PLAN_TIER, PlanTier } from "../../src/models/planModel";
 import {
@@ -9,6 +10,22 @@ import {
   SUBSCRIPTION_STATUS,
   SubscriptionStatus,
 } from "../../src/models/subscriptionModel";
+import { FileGrant } from "../../src/models/fileGrantModel";
+import { Job, IJob, JOB_STATUS } from "../../src/models/jobModel";
+import {
+  ConsultancyProfile,
+  IConsultancyProfile,
+} from "../../src/models/consultancyProfileModel";
+import {
+  VerificationTemplate,
+  IVerificationTemplate,
+  ITemplateField,
+  ITemplateDocument,
+  TEMPLATE_FIELD_TYPE,
+  TEMPLATE_DOCUMENT_FORMAT,
+} from "../../src/models/verificationTemplateModel";
+import { PROFILE_TYPE } from "../../src/constants/profileTypes";
+import { uploadHandler, FILE_VISIBILITY, SavedFileInfo } from "../../src/helpers/fileStorage";
 
 let counter = 0;
 const next = (): number => {
@@ -134,3 +151,152 @@ export const generateToken = (user: IUser): string =>
   jwt.sign({ id: user._id, sessionId: user.sessionId }, process.env.JWT_SECRET as string, {
     expiresIn: "1d",
   });
+
+// A real (tiny, valid) 1x1 transparent PNG — needed anywhere code validates
+// file type by magic bytes (src/helpers/fileSignature.ts), not just by
+// extension/declared mimetype. Fully local, no network involved.
+export const TEST_PNG_BASE64 =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+export const TEST_PNG_BUFFER = Buffer.from(
+  TEST_PNG_BASE64.split("base64,")[1],
+  "base64",
+);
+
+interface CreatePrivateFileOptions {
+  uploader: IUser;
+  allowedUsers?: IUser[];
+}
+
+// Goes through the real uploadHandler (same path fileController.uploadPrivateFile
+// uses) with a synthetic request, so fixtures stay honest about what
+// actually lands on disk — a FileGrant is only written when allowedUsers is
+// non-empty, matching the controller's "no shares, no DB record" rule.
+export const createPrivateFile = async ({
+  uploader,
+  allowedUsers = [],
+}: CreatePrivateFileOptions): Promise<SavedFileInfo> => {
+  const fakeReq = {
+    files: [{ buffer: TEST_PNG_BUFFER, originalname: "private-test.png" }],
+    body: {},
+  } as unknown as Request;
+
+  const { results } = await uploadHandler({
+    req: fakeReq,
+    visibility: FILE_VISIBILITY.PRIVATE,
+    ownerId: uploader.id,
+  });
+  const saved = results[0];
+
+  if (allowedUsers.length > 0) {
+    await FileGrant.create({
+      ownerId: uploader._id,
+      fileName: saved.fileName,
+      allowedUsers: allowedUsers.map((u) => u._id),
+    });
+  }
+
+  return saved;
+};
+
+interface CreateActiveJobOptions {
+  client: IUser;
+  provider: IUser;
+  [key: string]: unknown;
+}
+
+// Direct DB insert, not through the real create+confirm HTTP flow —
+// job.test.ts has its own HTTP-driven version of this (it's testing that
+// flow itself); this one is for tests elsewhere (e.g. payment.test.ts) that
+// just need an active job to act on, without re-exercising creation logic
+// already covered there.
+export const createActiveJob = async ({
+  client,
+  provider,
+  ...overrides
+}: CreateActiveJobOptions): Promise<IJob> => {
+  const n = next();
+
+  return Job.create({
+    jobTitle: `Test Job ${n}`,
+    jobDescription: "Test job description",
+    createdBy: client._id,
+    client: { userId: client._id, isConfirmed: true },
+    provider: { userId: provider._id, isConfirmed: true },
+    stages: [{ details: [], payment: 100 }],
+    totalAmount: 1000,
+    platformFeePercent: 5,
+    status: JOB_STATUS.ACTIVE,
+    ...overrides,
+  });
+};
+
+interface CreateConsultancyProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createConsultancyProfile = async ({
+  user,
+  ...overrides
+}: CreateConsultancyProfileOptions): Promise<IConsultancyProfile> => {
+  const n = next();
+
+  return ConsultancyProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    slug: `test-consultant-${n}`,
+    headline: `Test Consultant ${n}`,
+    country: "NG",
+    ...overrides,
+  });
+};
+
+interface CreateVerificationTemplateOptions {
+  profileType?: string;
+  country?: string;
+  state?: string | null;
+  fields?: ITemplateField[];
+  documents?: ITemplateDocument[];
+  [key: string]: unknown;
+}
+
+// A realistic-shaped default (business name + registration number, one
+// required PDF document) rather than an empty template — most tests just
+// need *a* valid template to submit against, not to define their own field
+// set from scratch.
+export const createVerificationTemplate = async ({
+  profileType = PROFILE_TYPE.CONSULTANCY,
+  country = "NG",
+  state = null,
+  fields = [
+    { key: "businessName", label: "Business name", type: TEMPLATE_FIELD_TYPE.STRING, required: true },
+    {
+      key: "registrationNumber",
+      label: "Registration number",
+      type: TEMPLATE_FIELD_TYPE.STRING,
+      required: false,
+    },
+  ],
+  documents = [
+    {
+      type: "business_certificate",
+      label: "Business registration certificate",
+      required: true,
+      acceptedFormats: [TEMPLATE_DOCUMENT_FORMAT.PDF],
+    },
+  ],
+  ...overrides
+}: CreateVerificationTemplateOptions = {}): Promise<IVerificationTemplate> => {
+  const n = next();
+
+  return VerificationTemplate.create({
+    profileType,
+    country,
+    state,
+    name: `Test Template ${n}`,
+    fields,
+    documents,
+    ...overrides,
+  });
+};

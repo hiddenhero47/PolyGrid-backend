@@ -2,6 +2,8 @@ import express from "express";
 import {
   registerUser,
   loginUser,
+  googleLogin,
+  appleLogin,
   getMe,
   updateUserProfile,
   toggleAccountType,
@@ -19,6 +21,8 @@ const router = express.Router();
 
 router.post("/", registerUser);
 router.post("/login", loginUser);
+router.post("/social/google", googleLogin);
+router.post("/social/apple", appleLogin);
 router.post("/request-reset", requestReset);
 router.post("/reset-password", resetPassword);
 

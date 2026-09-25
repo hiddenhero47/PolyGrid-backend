@@ -18,16 +18,58 @@ export const TOKENS = {
   RESET: "resetPassword",
 } as const;
 
+export const AUTH_PROVIDER = {
+  LOCAL: "local",
+  GOOGLE: "google",
+  APPLE: "apple",
+} as const;
+export type AuthProviderName = (typeof AUTH_PROVIDER)[keyof typeof AUTH_PROVIDER];
+
 export interface ITokenEntry {
   code: string;
   expiresAt: Date;
+}
+
+export interface IPhoneNumber {
+  number?: string;
+  country?: string;
+}
+
+export interface IAuthProvider {
+  provider: AuthProviderName;
+  providerId: string;
+}
+
+// Set via fileStorage.uploadHandler (see userController.updateUserProfile)
+// — always visibility: 'public', so `url` is always populated once set.
+// `storagePath` is kept so a replaced avatar's old file can be deleted; it's
+// stripped before this ever reaches a client response (see toPublicUser).
+export interface IAvatar {
+  fileName: string;
+  storagePath: string;
+  mime: string;
+  size: number;
+  url?: string;
+}
+
+// Loosely typed to match the schema's `type: Object` — 2FA setup isn't
+// implemented yet (no otplib/qrcode wiring), this just reserves the shape
+// house-maduekwe-backend uses (`secret`/`tempSecret`) for when it is.
+export interface IUser2fa {
+  enable: boolean;
+  secret?: string;
+  tempSecret?: string;
 }
 
 export interface IUser extends Document {
   fullName: string;
   email: string;
   password: string;
-  phone?: string;
+  phoneNumber?: IPhoneNumber;
+  avatar?: IAvatar;
+  authProviders: IAuthProvider[];
+  verified: boolean;
+  user2fa: IUser2fa;
   systemRole: SystemRole;
   activeAccountType: AccountType;
   // Points at this user's most recent Subscription record — null until they
@@ -69,9 +111,46 @@ const userSchema = new Schema<IUser>(
       type: String,
       required: [true, "Please add a password"],
     },
-    phone: {
-      type: String,
-      trim: true,
+    phoneNumber: {
+      number: {
+        type: String,
+        trim: true,
+      },
+      country: {
+        type: String,
+        uppercase: true,
+        trim: true,
+        match: [
+          /^[A-Z]{2}$/,
+          "Phone country must be a valid 2-letter country code (e.g. NG, US)",
+        ],
+      },
+    },
+    avatar: {
+      type: Object,
+    },
+    authProviders: [
+      {
+        provider: {
+          type: String,
+          enum: Object.values(AUTH_PROVIDER),
+          required: true,
+          index: false,
+        },
+        providerId: {
+          type: String,
+          required: true,
+          index: false,
+        },
+      },
+    ],
+    verified: {
+      type: Boolean,
+      default: false,
+    },
+    user2fa: {
+      type: Object,
+      default: { enable: false },
     },
     systemRole: {
       type: String,

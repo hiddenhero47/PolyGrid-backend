@@ -1,7 +1,7 @@
 import request from "supertest";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createSuperAdmin, generateToken } from "../setup/fixtures";
+import { createUser, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
 import bcrypt from "bcryptjs";
 
@@ -78,19 +78,108 @@ describe("POST /api/users/login", () => {
   });
 });
 
+// Google/Apple OAuth login itself isn't covered here — verifying a real
+// idToken/identityToken means either calling the real provider or mocking
+// their SDKs deeply enough that a pass wouldn't give much confidence it
+// matches real behavior (same call house-maduekwe-backend's own test suite
+// makes, see its tests/README.md). What's cheaply and safely testable
+// without touching a third party — basic input validation — is covered
+// instead.
+describe("POST /api/users/social/google", () => {
+  it("requires an idToken", async () => {
+    const res = await request(app).post("/api/users/social/google").send({});
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/users/social/apple", () => {
+  it("requires an identityToken", async () => {
+    const res = await request(app).post("/api/users/social/apple").send({});
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("PUT /api/users/profile", () => {
-  it("updates fullName/phone", async () => {
+  it("updates fullName/phoneNumber", async () => {
     const user = await createUser();
     const token = generateToken(user);
 
     const res = await request(app)
       .put("/api/users/profile")
       .set("Authorization", `Bearer ${token}`)
-      .send({ fullName: "New Name", phone: "+2348012345678" });
+      .send({
+        fullName: "New Name",
+        phoneNumber: { number: "+2348012345678", country: "NG" },
+      });
 
     expect(res.status).toBe(200);
     expect(res.body.user.fullName).toBe("New Name");
-    expect(res.body.user.phone).toBe("+2348012345678");
+    expect(res.body.user.phoneNumber).toEqual({
+      number: "+2348012345678",
+      country: "NG",
+    });
+  });
+
+  it("uploads a public avatar", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar.png");
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.avatar.fileName).toEqual(expect.any(String));
+    expect(res.body.user.avatar.url).toContain("/public/");
+    expect(res.body.user.avatar.storagePath).toBeUndefined(); // internal only
+  });
+
+  it("does not fail the whole update when the attached file is invalid — it's one optional field among several", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field("fullName", "Still Updates")
+      .attach("file", Buffer.from("not a real image"), "avatar.png");
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.fullName).toBe("Still Updates");
+    expect(res.body.user.avatar).toBeUndefined();
+    expect(res.body.avatarWarnings).toEqual(expect.arrayContaining([expect.any(String)]));
+  });
+
+  it("deletes the previous avatar file when replaced", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const first = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar.png");
+    const firstUrl = first.body.user.avatar.url as string;
+    const firstPath = new URL(firstUrl).pathname;
+
+    const second = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar2.png");
+    expect(second.status).toBe(200);
+
+    const staleFetch = await request(app).get(firstPath);
+    expect(staleFetch.status).toBe(404);
+  });
+
+  it("rejects a phoneNumber missing both number and country", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ phoneNumber: {} });
+
+    expect(res.status).toBe(400);
   });
 
   it("changes password and invalidates the old session", async () => {
