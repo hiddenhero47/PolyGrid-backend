@@ -94,15 +94,17 @@ gateway webhook doing the same two things once one is wired up.
 
 ## Deliberately simplified for v1
 
-- **Disputes are flag-and-record, resolved by email, not in-app chat.**
+- **Disputes are flag-and-record, resolved by email, not in-app chat —
+  still true even now that chat exists** (see [chat-plan.md](chat-plan.md)).
   `PATCH /:id/dispute` (either party, with a `reason`) puts a job on the
   admin queue: `GET /api/jobs/disputes` (admin-only, `client`/`provider`/
   `disputedBy` populated with `fullName`/`email` so an admin can reach both
   sides without a second lookup). The actual back-and-forth with the two
-  parties happens over email, outside this system — a deliberate choice,
-  not a gap: an in-app chat is a real feature (and a real moderation
-  surface — "what's said in the chat isn't PolyGrid's business" cuts both
-  ways) worth adding later, not now. `PATCH /:id/dispute/resolve` requires
+  parties happens over email, outside this system, on purpose: chat is
+  deliberately 1:1 between the two users and never reviewed by PolyGrid
+  (see chat-plan.md's "persisted, never reviewed" section) — the exact
+  opposite of what an admin mediating a dispute needs, which is a visible,
+  three-way record. `PATCH /:id/dispute/resolve` requires
   a `note` (the admin's own record of the outcome, e.g. "refunded stage 2
   per agreement over email") and appends it to `disputeHistory` — a job can
   be disputed more than once over its life, so this is a history, not a

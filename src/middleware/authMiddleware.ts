@@ -10,7 +10,10 @@ interface TokenPayload {
   sessionId: string;
 }
 
-const getAuthenticatedUser = async (token: string): Promise<IUser> => {
+// Exported so the Socket.IO auth handshake (src/socket/index.ts) verifies
+// a connecting client's token exactly the same way every HTTP request
+// does — one place decides what a valid token/session is, not two.
+export const getAuthenticatedUser = async (token: string): Promise<IUser> => {
   const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as TokenPayload;
 
   const user = await User.findById(decoded.id);

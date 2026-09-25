@@ -47,6 +47,11 @@ optional contract file attachments per party. Creating a job with someone
 also adds them to your `Contact` list (mutually). Full design in
 [jobs-and-contacts-plan.md](jobs-and-contacts-plan.md).
 
+Two connected users can also message each other directly (1:1, real-time
+over Socket.IO) — never reviewed by PolyGrid, and never the channel a Job
+dispute gets resolved through (that stays email, see
+jobs-and-contacts-plan.md). Full design in [chat-plan.md](chat-plan.md).
+
 ## Roles & personas
 
 ### System roles

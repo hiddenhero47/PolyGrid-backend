@@ -13,6 +13,8 @@ import consultancyProfileRoutes from "./routes/consultancyProfileRoutes";
 import verificationRoutes from "./routes/verificationRoutes";
 import verificationTemplateRoutes from "./routes/verificationTemplateRoutes";
 import referenceRoutes from "./routes/referenceRoutes";
+import conversationRoutes from "./routes/conversationRoutes";
+import messageRoutes from "./routes/messageRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
@@ -62,6 +64,8 @@ const createApp = (): Express => {
   app.use("/api/verifications", verificationRoutes);
   app.use("/api/verification-templates", verificationTemplateRoutes);
   app.use("/api/reference", referenceRoutes);
+  app.use("/api/conversations", conversationRoutes);
+  app.use("/api/messages", messageRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

@@ -26,6 +26,7 @@ import {
 } from "../../src/models/verificationTemplateModel";
 import { PROFILE_TYPE } from "../../src/constants/profileTypes";
 import { uploadHandler, FILE_VISIBILITY, SavedFileInfo } from "../../src/helpers/fileStorage";
+import { connectUsers } from "../../src/controllers/contactController";
 
 let counter = 0;
 const next = (): number => {
@@ -300,3 +301,9 @@ export const createVerificationTemplate = async ({
     ...overrides,
   });
 };
+
+// Reuses the real connectUsers side effect (same one jobController.createJob
+// triggers) rather than writing to Contact directly, so fixtures stay
+// honest about what "being connected" actually means.
+export const createContactConnection = (userA: IUser, userB: IUser): Promise<void> =>
+  connectUsers(userA._id as mongoose.Types.ObjectId, userB._id as mongoose.Types.ObjectId);

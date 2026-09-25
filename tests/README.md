@@ -36,10 +36,10 @@ tests/
     globalTeardown.ts   stops it
     fixtures.ts         factories: users (basic/admin/super admin), plans,
                          subscriptions (incl. a user with an active one),
-                         private files, an active job, a consultancy
-                         profile, a verification template + JWT token
-                         generation + a real tiny PNG (base64 + Buffer) for
-                         upload tests
+                         private files, an active job, a contact
+                         connection, a consultancy profile, a verification
+                         template + JWT token generation + a real tiny PNG
+                         (base64 + Buffer) for upload tests
   unit/          pure functions/methods/middleware, no HTTP, DB used only
                  where the thing under test needs a real document
   integration/   real HTTP requests via supertest against src/app.ts
@@ -112,6 +112,24 @@ tests can get an app instance without connecting to the real DB or calling
   - `contact.test.ts` — connecting mutually (by `userId` or `email`,
     idempotent, no self-connect), listing (paginated, newest first),
     one-directional removal.
+  - `conversation.test.ts` — starting a conversation requires an existing
+    Contact connection (403 otherwise, 404 for an unknown user, 400 for
+    yourself); starting one twice (from either side) returns the same
+    conversation rather than creating a duplicate; sending requires a
+    non-empty body and updates the conversation's `lastMessageAt`/
+    `lastMessagePreview`; a non-participant 404s the same conversation id
+    (never 403 — so a guessed id can't confirm a conversation exists
+    between two other people); unread count is per-recipient (my own sent
+    messages never count against me) and clears via
+    `PATCH /:id/read`; reporting a message requires a `reason`, is blocked
+    for a non-participant, and an admin-only `GET /api/messages/reports`
+    lists it without deleting the underlying message.
+  - `chatSocket.test.ts` — a real `http.Server` + `initSocket` +
+    `socket.io-client`, scoped to only what the socket layer itself can
+    prove (everything else is REST, covered above): connecting with no
+    token or a garbled one is rejected; sending a message over REST
+    delivers a live `message:new` event to the recipient's socket
+    specifically, not the sender's own connection.
   - `job.test.ts` — creation (either party as creator, auto-confirms their
     own side, connects the two as contacts, rejects stage payments summing
     over 100%, rejects a made-up `currency` as a clean `400`); confirm

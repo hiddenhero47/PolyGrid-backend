@@ -4,10 +4,10 @@ Status: **Phase 1 (setup + base User), Phase 1.5 (Plan/Subscription split),
 Phase 1.6 (public/private file uploads), Phase 1.7 (Jobs & Contacts),
 Phase 1.8 (unified Payment model), Phase 2 (live Stripe integration),
 Phase 3 (ConsultancyProfile + generic Verification pipeline), Phase 3.1
-(Yup request validation + template-driven Verification), and Phase 3.2
-(country/state/city/currency reference data) shipped.** This doc is
-updated as each phase lands — see the checklist at the bottom for current
-state.
+(Yup request validation + template-driven Verification), Phase 3.2
+(country/state/city/currency reference data), and Phase 3.3 (1:1 chat over
+Socket.IO) shipped.** This doc is updated as each phase lands — see the
+checklist at the bottom for current state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -359,6 +359,41 @@ Structure and conventions are deliberately carried over from
     branch, meaning *every* schema validation failure across the whole
     app (not just these new checks) surfaced as a server error instead of
     a client-input one.
+- 1:1 chat between connected users, deliberately minimal (no group chat,
+  no presence/typing indicators, no moderation dashboard) — scoped that
+  way on purpose after weighing build-vs-third-party (Stream/Sendbird)
+  earlier. Full design in [chat-plan.md](chat-plan.md):
+  - `src/models/conversationModel.ts` (`Conversation`) — keyed by the
+    unordered pair of participants (`sortParticipants`), one conversation
+    per pair reused across every Job/contact context, found via an atomic
+    `findOneAndUpdate(upsert: true)`. `lastReadAt` is a two-entry
+    `Map<userId, Date>`, not per-message read state.
+  - `src/models/messageModel.ts` / `messageReportModel.ts` — plain text
+    messages (no attachments/editing), and a deliberately minimal
+    admin-visible report record (no moderation workflow) for the one case
+    PolyGrid does need to know about a chat: something genuinely reported.
+  - `src/socket/index.ts` (`initSocket`, `emitToUser`) — the *only* file
+    that imports `socket.io`. Authenticates a connecting socket through
+    `getAuthenticatedUser` (exported from `authMiddleware.ts` for exactly
+    this reuse), joins room `user:<id>`. Has no business logic of its
+    own: **sending a message is a normal REST call**
+    (`POST /api/conversations/:id/messages`, validated/persisted exactly
+    like every other write in this app), and the controller calls
+    `emitToUser` once afterward as a best-effort live push — the socket
+    layer never receives or validates a chat event from the client.
+  - `src/controllers/conversationController.ts` +
+    `routes/{conversation,message}Routes.ts` — starting a conversation
+    requires the two users to already be Contacts (chat isn't an open DM
+    to a stranger); a conversation looked up by id that isn't mine 404s
+    (never 403), so a guessed/foreign id can't confirm a conversation
+    exists between two other people.
+  - `src/server.ts` now builds an explicit `http.Server` (`initSocket`
+    needs the raw server, not just the Express app) instead of calling
+    `app.listen()` directly.
+  - `tests/integration/chatSocket.test.ts` — a real `http.Server` +
+    `socket.io-client`, narrowly scoped to what only the socket layer can
+    prove (auth rejects a missing/garbled token; a REST-sent message
+    delivers live to the recipient's room specifically, not the sender's).
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently
@@ -392,6 +427,10 @@ Phase 3.2  country/state/city/currency reference data, applied to every   <- don
            existing free-text field of that kind app-wide + a public
            GET /api/reference/* lookup API + fixed a latent bug where
            every Mongoose ValidationError surfaced as a 500.
+Phase 3.3  1:1 chat over Socket.IO — deliberately minimal (no group      <- done
+           chat, no moderation dashboard); REST does all the writes,
+           the socket only pushes; gated on an existing Contact
+           connection, not an open DM to a stranger.
 Phase 4  Remaining three pillars' business profiles (Contractor/Tenders,
          Store, Labor/SiteForce), following consultancy-profile-plan.md's
          shape and registering in PROFILE_MODEL_REGISTRY
