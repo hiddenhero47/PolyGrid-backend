@@ -207,3 +207,15 @@ account, not hypothetically:
   earlier in the same chain and so isn't itself race-free to poll on
   either) instead of asserting immediately. Worth remembering for any
   future test against a handler that acks-then-works.
+- **The exact same class of bug turned up again later**, in the job-funding
+  round trip specifically: it polled `Payment.status === 'success'`, but
+  the handler saves that *before* its subsequent `Job.updateOne(...
+  amountPaid ...)` — so the poller could resolve while the job's own update
+  was still in flight, and the very next assertion (`Job.amountPaid`) would
+  occasionally read a stale value. It went unnoticed for a while because it
+  only failed under enough system load to widen that window. Fixed the same
+  way: poll the actual field being asserted (`Job.amountPaid === 250`), not
+  an earlier write in the same chain. The lesson from the first bullet
+  generalizes: for any handler that keeps writing after its response is
+  sent, a test must poll the *last* relevant write, not merely *a* write
+  that happens to run before it.

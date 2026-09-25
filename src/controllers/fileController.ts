@@ -4,8 +4,25 @@ import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { uploadHandler, FILE_VISIBILITY, PRIVATE_DIR } from "../helpers/fileStorage";
 import { signFileUrl, verifyFileUrlToken, FILE_URL_MODE, FileUrlMode } from "../helpers/fileSigning";
+import { lockUrl } from "../helpers/fileLinkLock";
 import { FileGrant } from "../models/fileGrantModel";
 import { User, IUser, SYSTEM_ROLE } from "../models/userModel";
+
+// The lock key is read from a header on the *mint* request only, never a
+// query param — the whole point is that it doesn't travel inside a URL,
+// which is what commonly leaks (browser history, referrer headers, proxy/
+// server access logs). It's never needed again after that: the response
+// hands back the resulting requestUrl/downloadUrl encrypted (see
+// fileLinkLock.ts), and the frontend — which generated this key itself and
+// held onto it — decrypts them locally before using the recovered URL
+// exactly like an ordinary unlocked one. The redemption routes below never
+// see or need this header at all.
+const LOCK_KEY_HEADER = "x-file-lock-key";
+
+const readLockKey = (req: Request): string | undefined => {
+  const value = req.headers[LOCK_KEY_HEADER];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+};
 
 const resolveValidUserIds = async (ids: unknown): Promise<mongoose.Types.ObjectId[]> => {
   if (!Array.isArray(ids)) return [];
@@ -99,10 +116,25 @@ export const getPrivateFileLink = asyncHandler(async (req: Request, res: Respons
     }
   }
 
-  res.status(200).json({
-    requestUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.VIEW }),
-    downloadUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.DOWNLOAD }),
-  });
+  const requestUrl = signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.VIEW });
+  const downloadUrl = signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.DOWNLOAD });
+
+  // Optional — see LOCK_KEY_HEADER above. Most callers send nothing here and
+  // get the plain URLs back, unchanged from before. When a lock key is
+  // sent, requestUrl/downloadUrl become { iv, data } ciphertext instead of
+  // strings — copying them out of this response is useless without the key
+  // that only the caller who sent it holds.
+  const lockKey = readLockKey(req);
+  if (lockKey) {
+    res.status(200).json({
+      locked: true,
+      requestUrl: lockUrl(requestUrl, lockKey),
+      downloadUrl: lockUrl(downloadUrl, lockKey),
+    });
+    return;
+  }
+
+  res.status(200).json({ locked: false, requestUrl, downloadUrl });
 });
 
 // GET /private/view/:ownerId/:fileName and GET /private/download/:ownerId/:fileName

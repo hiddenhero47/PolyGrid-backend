@@ -2,9 +2,11 @@
 
 Status: **Phase 1 (setup + base User), Phase 1.5 (Plan/Subscription split),
 Phase 1.6 (public/private file uploads), Phase 1.7 (Jobs & Contacts),
-Phase 1.8 (unified Payment model), and Phase 2 (live Stripe integration)
-shipped.** This doc is updated as each phase lands — see the checklist at
-the bottom for current state.
+Phase 1.8 (unified Payment model), Phase 2 (live Stripe integration),
+Phase 3 (ConsultancyProfile + generic Verification pipeline), and Phase 3.1
+(Yup request validation + template-driven Verification) shipped.** This
+doc is updated as each phase lands — see the checklist at the bottom for
+current state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -202,6 +204,135 @@ Structure and conventions are deliberately carried over from
   input-validation-only coverage):
   `tests/integration/{user,plan,subscription,fileAccess,contact,job,payment}.test.ts`,
   `tests/unit/{subscription,fileSignature}.test.ts`.
+- ConsultancyProfile + Verification — PolyGrid Engineering (the first
+  pillar business profile), and the reusable pattern the remaining three
+  pillars follow. Full design (why booking reuses Jobs instead of a new
+  engine, the denormalized-but-still-live-checked `currentSubscription`,
+  the polymorphic reusable `Verification` model) is in
+  [consultancy-profile-plan.md](consultancy-profile-plan.md):
+  - `src/models/consultancyProfileModel.ts` (`ConsultancyProfile`) —
+    `userId` (unique), `currentSubscription` (denormalized, synced),
+    `isVerified` + `verification` (pointer to the latest `Verification`),
+    `slug` (unique), `headline`, `bio`, `specializations[]`, `country`,
+    `city`, `yearsOfExperience`, `links[]` (public external links only —
+    deliberately no raw contact details, see consultancy-profile-plan.md),
+    `portfolio[]` (each item capped at `MAX_MEDIA_PER_ITEM` media, with a
+    `startedAt`/`completedAt` date range), `services[]`, `mentorship` —
+    `portfolio`/`links` both capped array-wide too
+    (`MAX_PORTFOLIO_ITEMS`/`MAX_PROFILE_LINKS`).
+  - `src/models/verificationModel.ts` (`Verification`) — polymorphic
+    `profileType`/`profileId` (`refPath`, same pattern as `Payment`), so
+    it's reusable by every future pillar profile with no pillar-specific
+    code; never overwritten, every (re)submission is a new record.
+  - `src/constants/profileTypes.ts` — `PROFILE_MODEL_REGISTRY`, the single
+    source of truth mapping a profile-type string to its Mongoose model.
+    Add each new pillar profile here.
+  - `src/helpers/profileSubscriptionSync.ts` — fans a `User.currentSubscription`
+    change out to every profile that user owns across every registered
+    pillar; called from `subscriptionController.grantSubscription` and the
+    Stripe webhook's subscription-activation branch, the only two places
+    that value ever changes.
+  - `src/controllers/consultancyProfileController.ts` +
+    `routes/consultancyProfileRoutes.ts` — create/get-mine/update-mine,
+    public search (verified AND currently-subscribed, checked live via
+    aggregation, not from the denormalized boolean), public profile page
+    by id or slug (the URL always resolves, but content is withheld —
+    `{ available: false }` — unless currently subscribed, checked live the
+    same way; verification status doesn't gate this, only subscription
+    does), portfolio item/media add/remove (public images via
+    `uploadHandler`, capped at `MAX_PORTFOLIO_ITEMS`/`MAX_MEDIA_PER_ITEM`
+    — see "Corrections" below for the media-management fix).
+  - `src/controllers/verificationController.ts` +
+    `routes/verificationRoutes.ts` — submit (ownership-checked, resolves
+    the applicable `VerificationTemplate`, validates `form`/`documents`
+    against it), my submissions, admin queue, admin approve/reject
+    (approve generically flips `isVerified` on whichever profile model the
+    registry resolves).
+  - `tests/integration/{consultancyProfile,verification}.test.ts`.
+- Request validation with Yup, and template-driven `Verification` — a
+  first-layer validation convention (new to this codebase) plus a redesign
+  of what "verify a profile" requires, since it can't be hardcoded per
+  country on a platform that isn't Nigeria-only. Full design (why the
+  first `Verification` schema didn't generalize, the `VerificationTemplate`
+  catalog-data pattern, the Yup `stripUnknown` footgun hit and fixed) is in
+  [verification-templates-plan.md](verification-templates-plan.md):
+  - `src/models/verificationTemplateModel.ts` (`VerificationTemplate`) —
+    one document per `(profileType, country[, state])`: `fields[]` (the
+    form — key/label/type/required/constraints) and `documents[]` (required
+    file types + accepted formats). Never edited in place — creating a new
+    one for the same combination deactivates the old and bumps `version`,
+    same "Plan is never edited, only superseded" instinct, via a
+    `partialFilterExpression: { isActive: true }` unique index (same
+    pattern as `Payment`'s uniqueness fix).
+  - `src/helpers/verificationTemplateLookup.ts` — resolves the active
+    template for a profileType/location, state-specific first then
+    falling back to the country's nationwide default (`state: null`).
+  - `src/validators/{validate,templateFormSchema,verificationValidator,verificationTemplateValidator}.ts` —
+    `validateBody(schema)` Express middleware; `buildFormSchema(fields)`
+    builds a Yup object schema from a template's field definitions at
+    request time (the same definitions the frontend fetches to render the
+    form and build its own matching Yup schema from).
+  - `src/helpers/sanitize.ts` (`pickDefinedFields`) — the habit going
+    forward for turning request data into a document update: keep only
+    accepted keys, drop `undefined`/`""` (no value provided), leave `null`
+    alone unless a field opts in to being explicitly resettable.
+  - `verificationModel.ts` now stores `location`/`templateId`/`form`
+    instead of the old hardcoded `country`/`regulatoryBody`/`discipline`/
+    `registrationNumber`/`additionalInfo`.
+  - `src/controllers/verificationTemplateController.ts` +
+    `routes/verificationTemplateRoutes.ts` — admin create/list, plus
+    `GET /lookup` (any authenticated user) for the frontend to fetch the
+    form definition before rendering it.
+  - `tests/integration/verificationTemplate.test.ts`.
+- Corrections to the above, made once reviewed: Verification's documents
+  were being pre-uploaded via a separate route and only referenced
+  afterward, which let a user accumulate private files with nothing ever
+  attached to them (`Job.uploadContract` already avoided this — it uploads
+  inline); the file-link "lock key" needed to gate *redemption* rather than
+  just encrypt what's handed back, which put the key back in play on every
+  fetch instead of only once; and `ConsultancyProfile.portfolio`'s media
+  had no real deletion path or any limits at all. Full design in
+  [verification-templates-plan.md](verification-templates-plan.md)'s
+  "Submission flow" section,
+  [file-uploads-plan.md](file-uploads-plan.md)'s "Lock keys" section, and
+  [consultancy-profile-plan.md](consultancy-profile-plan.md)'s "Portfolio
+  media management" section:
+  - `POST /api/verifications` is now `multipart/form-data` — files are
+    attached directly on the submission itself, one per document type,
+    under a field name equal to that document's declared `type` (so a
+    template's `documents[]` doubles as the exact set of expected field
+    names). Every non-file field (`profileType`/`profileId`/`country`/
+    `state`/`form`) travels bundled as one JSON-stringified `data` field —
+    `src/helpers/parseMultipartData.ts` unpacks it, mirroring
+    house-maduekwe-backend's `shopItemHelper.parseMultipartData`
+    (`shopItems`' own create/update routes use the identical
+    structured-fields-plus-real-files shape). `resolveAndSaveDocuments`
+    (`verificationController.ts`) saves each file individually through
+    `uploadHandler`, scoped to that document's own `acceptedFormats`; a
+    required document's failure rejects the whole submission and **rolls
+    back every file this same request already saved**, so a rejected
+    submission never leaves anything orphaned on disk; an optional
+    document's failure is dropped and surfaced as a non-blocking
+    `documentWarnings` entry instead (same contract as `avatarWarnings`).
+  - `src/helpers/fileLinkLock.ts` (`lockUrl`/`unlockUrl`) — replaced the
+    first pass at a "lock key" (which hashed the key into the JWT and
+    required resending it as a header on every redemption). Now
+    `getPrivateFileLink` AES-256-GCM-encrypts the resulting
+    `requestUrl`/`downloadUrl` themselves when a caller sends
+    `X-File-Lock-Key` on the *mint* request; the frontend decrypts locally
+    (Web Crypto, key derived the same way server-side does — SHA-256 of
+    the lock key) and then uses the recovered plain URL exactly like an
+    unlocked one. `verifyFileUrlToken` (redemption) is completely
+    unmodified by this — it never sees or needs the lock key at all.
+  - `IPortfolioMedia` now genuinely carries `storagePath`/`mime`/`size`
+    (its own comment claimed it matched `IAvatar`'s shape already; it
+    didn't) — without `storagePath`, `removePortfolioItem` couldn't
+    actually delete a removed item's files, so every deletion silently
+    orphaned them. Fixed, plus a new `removePortfolioMedia` for removing
+    one file without deleting the whole item, plus a new
+    `addPortfolioMedia` for appending to an existing item later, plus hard
+    caps (`MAX_PORTFOLIO_ITEMS`, `MAX_MEDIA_PER_ITEM`) enforced both in the
+    controller and as a Mongoose array `validate`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently
@@ -222,9 +353,18 @@ Phase 2    Live Stripe integration — POST /api/payments/intent + webhook,   <-
            tools (POST /api/subscriptions, POST /api/jobs/:id/payments)
            stay — comps/manual grants aren't going away, they're just no
            longer the only path.
-Phase 3  First pillar's business profile schema + verification pipeline
-         (pick one of Engineering/Tenders/Store/SiteForce to prove the pattern)
-Phase 4  Remaining three pillars' business profiles, following the same shape
+Phase 3    ConsultancyProfile (PolyGrid Engineering) + generic Verification <- done
+           pipeline — proves the pattern: polymorphic Verification,
+           PROFILE_MODEL_REGISTRY, denormalized-but-live-checked
+           currentSubscription, Jobs reused for booking instead of a new
+           engine.
+Phase 3.1  Yup request-validation convention + VerificationTemplate        <- done
+           catalog data — what a profile needs to verify is now
+           data-driven per profileType+location, not hardcoded per
+           country.
+Phase 4  Remaining three pillars' business profiles (Contractor/Tenders,
+         Store, Labor/SiteForce), following consultancy-profile-plan.md's
+         shape and registering in PROFILE_MODEL_REGISTRY
 Phase 5  Cross-pillar aggregation queries (active + verified + subscribed)
          and geo-spatial queries (Store physical goods, SiteForce jobs)
 ```
@@ -232,5 +372,5 @@ Phase 5  Cross-pillar aggregation queries (active + verified + subscribed)
 Each pillar's profile schema, controllers, and routes should get their own
 plan doc in this folder before code is written (same habit as
 house-maduekwe-backend's `docs/shipping-provider-architecture-plan.md`) —
-`EngineeringProfile` first is a reasonable default unless product priority
-says otherwise.
+`consultancy-profile-plan.md` is now that template for the remaining
+three.

@@ -10,6 +10,7 @@ import {
 } from "../setup/fixtures";
 import { FileGrant } from "../../src/models/fileGrantModel";
 import { signFileUrl, FILE_URL_MODE } from "../../src/helpers/fileSigning";
+import { unlockUrl } from "../../src/helpers/fileLinkLock";
 
 const app = createApp();
 
@@ -210,6 +211,82 @@ describe("GET /private/view|download/:ownerId/:fileName (signed link)", () => {
 
     const res = await request(app).get(pathOf(url));
     expect(res.headers["cache-control"]).toContain("no-store");
+  });
+});
+
+describe("lock key — the returned URL is encrypted, not gated at redemption", () => {
+  it("mints ordinary, unlocked (plain string) links when no lock key header is sent", async () => {
+    const owner = await createUser();
+    const file = await createPrivateFile({ uploader: owner });
+
+    const res = await request(app)
+      .get(`/api/files/private/${owner.id}/${file.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(owner)}`);
+
+    expect(res.body.locked).toBe(false);
+    expect(typeof res.body.requestUrl).toBe("string");
+
+    const view = await request(app).get(pathOf(res.body.requestUrl));
+    expect(view.status).toBe(200);
+  });
+
+  it("returns encrypted {iv, data} envelopes instead of plain URLs when a lock key is sent while minting", async () => {
+    const owner = await createUser();
+    const file = await createPrivateFile({ uploader: owner });
+
+    const res = await request(app)
+      .get(`/api/files/private/${owner.id}/${file.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(owner)}`)
+      .set("X-File-Lock-Key", "reviewer-session-key-123");
+
+    expect(res.body.locked).toBe(true);
+    expect(typeof res.body.requestUrl).toBe("object");
+    expect(res.body.requestUrl.iv).toBeTruthy();
+    expect(res.body.requestUrl.data).toBeTruthy();
+  });
+
+  it("decrypting with the right lock key recovers a working URL that needs no header to redeem", async () => {
+    const owner = await createUser();
+    const file = await createPrivateFile({ uploader: owner });
+
+    const minted = await request(app)
+      .get(`/api/files/private/${owner.id}/${file.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(owner)}`)
+      .set("X-File-Lock-Key", "reviewer-session-key-123");
+
+    const decryptedUrl = unlockUrl(minted.body.requestUrl, "reviewer-session-key-123");
+
+    // No X-File-Lock-Key header at all here — the key already did its job
+    // client-side by being required to recover the URL in the first place.
+    const res = await request(app).get(pathOf(decryptedUrl));
+    expect(res.status).toBe(200);
+  });
+
+  it("decrypting with the wrong lock key fails outright — the envelope is not usable", async () => {
+    const owner = await createUser();
+    const file = await createPrivateFile({ uploader: owner });
+
+    const minted = await request(app)
+      .get(`/api/files/private/${owner.id}/${file.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(owner)}`)
+      .set("X-File-Lock-Key", "reviewer-session-key-123");
+
+    expect(() => unlockUrl(minted.body.requestUrl, "wrong-key")).toThrow();
+  });
+
+  it("copying the locked response's requestUrl/downloadUrl verbatim is useless — they aren't URLs at all", async () => {
+    const owner = await createUser();
+    const file = await createPrivateFile({ uploader: owner });
+
+    const minted = await request(app)
+      .get(`/api/files/private/${owner.id}/${file.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(owner)}`)
+      .set("X-File-Lock-Key", "reviewer-session-key-123");
+
+    // Someone who only copied the JSON response (no lock key) has an {iv,
+    // data} object, not a path+token — there's nothing to even attempt a
+    // request with.
+    expect(() => new URL(String(minted.body.requestUrl))).toThrow();
   });
 });
 

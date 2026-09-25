@@ -47,7 +47,11 @@ export const signFileUrl = ({
 // Throws on anything wrong — expired, tampered, or minted for a different
 // file/mode than the one being requested (so a "view" link can't be
 // replayed against the download route, and a link for file A can't be
-// pointed at file B just by editing the URL's path segments).
+// pointed at file B just by editing the URL's path segments). Deliberately
+// has no concept of a "lock key" — that's a layer applied to the URL
+// *after* this signs it, and undone entirely on the frontend before this
+// route is ever called (see fileLinkLock.ts) — this stays exactly what it
+// was before that feature existed.
 export const verifyFileUrlToken = (
   token: string,
   expected: { ownerId: string; fileName: string; mode: FileUrlMode },

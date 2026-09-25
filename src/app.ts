@@ -9,6 +9,9 @@ import fileRoutes from "./routes/fileRoutes";
 import contactRoutes from "./routes/contactRoutes";
 import jobRoutes from "./routes/jobRoutes";
 import paymentRoutes from "./routes/paymentRoutes";
+import consultancyProfileRoutes from "./routes/consultancyProfileRoutes";
+import verificationRoutes from "./routes/verificationRoutes";
+import verificationTemplateRoutes from "./routes/verificationTemplateRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
@@ -54,6 +57,9 @@ const createApp = (): Express => {
   app.use("/api/contacts", contactRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/payments", paymentRoutes);
+  app.use("/api/consultancy-profiles", consultancyProfileRoutes);
+  app.use("/api/verifications", verificationRoutes);
+  app.use("/api/verification-templates", verificationTemplateRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

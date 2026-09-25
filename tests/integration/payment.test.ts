@@ -353,7 +353,12 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     });
     expect(webhookRes.status).toBe(200);
 
-    await waitFor(async () => (await Payment.findById(payment!.id))?.status === "success");
+    // Poll the actual final write, not an intermediate one — the webhook
+    // handler saves Payment.status = 'success' *before* it updates
+    // Job.amountPaid (two separate awaited writes in the same
+    // fire-and-forget chain after the 200 ack), so polling on Payment
+    // status alone can resolve while the Job update is still in flight.
+    await waitFor(async () => (await Job.findById(job.id))?.amountPaid === 250);
 
     const updatedPayment = await Payment.findById(payment!.id);
     expect(updatedPayment?.status).toBe("success");

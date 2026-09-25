@@ -6,6 +6,7 @@ import { Plan } from "../models/planModel";
 import { Subscription } from "../models/subscriptionModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
+import { syncProfilesSubscription } from "../helpers/profileSubscriptionSync";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -66,6 +67,7 @@ export const grantSubscription = asyncHandler(async (req: Request, res: Response
 
   user.currentSubscription = subscription._id as mongoose.Types.ObjectId;
   await user.save();
+  await syncProfilesSubscription(user._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
 
   await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,

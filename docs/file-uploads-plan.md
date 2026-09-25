@@ -135,6 +135,50 @@ there's no need to store or look up a mime type to serve a file correctly.
   can't be replayed against the download route, or against a different file,
   just by editing the URL.
 
+## Lock keys — encrypting the returned URL itself, not gating redemption
+
+Added for a case a signed URL alone doesn't fully cover: an admin
+reviewing a sensitive private file (a KYC document, say) where the *response
+handing back the link* might end up somewhere it shouldn't — a proxy log,
+a copy-pasted support ticket — even though the link itself is short-lived.
+A first pass at this made redemption require re-sending the key as a
+header on every fetch; the actual design is different and simpler for the
+redemption side: **the key encrypts the URL in the mint response, and
+nothing downstream of that ever needs to know about it.**
+
+1. The frontend generates a random key itself, holding it only in memory
+   for that one interaction (e.g. a review session) — never sent anywhere
+   except step 2.
+2. It sends that key as an `X-File-Lock-Key` header on the request that
+   mints the link (`GET /api/files/private/:ownerId/:fileName/link`, or any
+   domain controller calling `lockUrl()` after its own check). Deliberately
+   a header, not a query param — it must never end up inside a URL, which
+   is what actually leaks (browser history, referrer headers, access logs).
+3. `signFileUrl()` runs exactly as it always has — the JWT itself has no
+   idea locking exists. `lockUrl()` (`src/helpers/fileLinkLock.ts`) then
+   AES-256-GCM-encrypts the *resulting URL string*, keyed by a SHA-256
+   derivation of the lock key. The response's `requestUrl`/`downloadUrl`
+   become `{ iv, data }` ciphertext objects instead of plain strings, and
+   `locked: true` is set alongside them so the frontend can branch on it.
+4. The frontend — holding the exact key it generated in step 1 — decrypts
+   `{ iv, data }` locally (Web Crypto's `crypto.subtle.decrypt` with
+   AES-GCM; derive the key the same way: `crypto.subtle.digest("SHA-256",
+   new TextEncoder().encode(lockKey))`, and note the ciphertext already has
+   the GCM auth tag appended, exactly the layout `subtle.decrypt` expects)
+   to recover the real signed URL, then uses it exactly like an ordinary
+   unlocked one — a plain `GET`, no special header, works in `<img src>`
+   just fine once decrypted.
+
+**Copying the mint response alone is useless**: `{ iv, data }` isn't a URL
+and can't be turned into one without the key, which never left the
+frontend's memory in the first place. And `verifyFileUrlToken` — the
+redemption check — never sees or needs any of this; it's unmodified from
+before this feature existed.
+
+**Entirely opt-in**: omit the header when minting and the response comes
+back exactly as it always has (`locked: false`, plain strings) — this is
+what nearly every caller of `getPrivateFileLink` still does.
+
 ## `FileGrant` — the simple-sharing primitive
 
 `src/models/fileGrantModel.ts` is bookkeeping only (`ownerId`, `fileName`,

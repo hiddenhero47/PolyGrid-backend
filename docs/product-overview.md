@@ -91,22 +91,36 @@ separate signup.
   created/renewed, so past subscriptions read correctly even if the plan
   they were bought under later changes.
 
-## Business profiles (future work)
+## Business profiles
 
 Each pillar's provider-side data lives in its own document, 1-to-1 with
-`User` via `userId` (not modeled yet — see
-[architecture-plan.md](architecture-plan.md) for build order):
-`EngineeringProfile`, `ContractorProfile`, `StoreProfile`, `LaborProfile`.
-All share an embedded verification block:
+`User` via `userId`. **`ConsultancyProfile` (PolyGrid Engineering) is
+built** — see [consultancy-profile-plan.md](consultancy-profile-plan.md)
+for the full design and [architecture-plan.md](architecture-plan.md) for
+what shipped. The remaining three — `ContractorProfile` (Tenders),
+`StoreProfile`, `LaborProfile` (SiteForce) — are not modeled yet, and
+should follow the same shape.
+
+Every pillar profile shares `userId`, a denormalized-but-live-checked
+`currentSubscription`, `isVerified`, and a pointer at its latest
+`Verification` record — `Verification` itself is one shared, polymorphic
+model (`profileType`/`profileId`), not duplicated per pillar:
 
 ```
-verification: {
-  status: 'unverified' | 'pending' | 'approved' | 'rejected',
-  documents: string[],
-  verifiedAt?: Date,
-}
+status: 'pending' | 'approved' | 'rejected'  // absence of a record = unverified
+location: { country, state? }
+templateId  // the VerificationTemplate this was validated against
+form        // validated against templateId's field definitions
+documents: { type: string, fileName: string }[]
 ```
 
-Physical-goods and labor pillars additionally store location as a GeoJSON
-Point (plus plain `country`/`state`/`city` strings) and a
+**What's actually required to verify a profile is data, not hardcoded per
+country** — a `VerificationTemplate` catalog entry per
+`(profileType, country[, state])` declares both the form fields and the
+required documents for that pillar/location combination, the same
+"catalog data, not a hardcoded enum" instinct `Plan` already uses. See
+[verification-templates-plan.md](verification-templates-plan.md).
+
+Physical-goods and labor pillars will additionally store location as a
+GeoJSON Point (plus plain `country`/`state`/`city` strings) and a
 `maxServiceRadiusKm`, for `$nearSphere`/`$geoWithin` queries.

@@ -8,6 +8,7 @@ import { Job, JOB_STATUS } from "../models/jobModel";
 import { Plan } from "../models/planModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../models/subscriptionModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
+import { syncProfilesSubscription } from "../helpers/profileSubscriptionSync";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -254,6 +255,7 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
       { _id: subscription.user },
       { currentSubscription: subscription._id },
     );
+    await syncProfilesSubscription(subscription.user, subscription._id as mongoose.Types.ObjectId);
   }
 });
 // @route   GET /api/payments

@@ -12,6 +12,19 @@ import {
 } from "../../src/models/subscriptionModel";
 import { FileGrant } from "../../src/models/fileGrantModel";
 import { Job, IJob, JOB_STATUS } from "../../src/models/jobModel";
+import {
+  ConsultancyProfile,
+  IConsultancyProfile,
+} from "../../src/models/consultancyProfileModel";
+import {
+  VerificationTemplate,
+  IVerificationTemplate,
+  ITemplateField,
+  ITemplateDocument,
+  TEMPLATE_FIELD_TYPE,
+  TEMPLATE_DOCUMENT_FORMAT,
+} from "../../src/models/verificationTemplateModel";
+import { PROFILE_TYPE } from "../../src/constants/profileTypes";
 import { uploadHandler, FILE_VISIBILITY, SavedFileInfo } from "../../src/helpers/fileStorage";
 
 let counter = 0;
@@ -214,6 +227,76 @@ export const createActiveJob = async ({
     totalAmount: 1000,
     platformFeePercent: 5,
     status: JOB_STATUS.ACTIVE,
+    ...overrides,
+  });
+};
+
+interface CreateConsultancyProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createConsultancyProfile = async ({
+  user,
+  ...overrides
+}: CreateConsultancyProfileOptions): Promise<IConsultancyProfile> => {
+  const n = next();
+
+  return ConsultancyProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    slug: `test-consultant-${n}`,
+    headline: `Test Consultant ${n}`,
+    country: "NG",
+    ...overrides,
+  });
+};
+
+interface CreateVerificationTemplateOptions {
+  profileType?: string;
+  country?: string;
+  state?: string | null;
+  fields?: ITemplateField[];
+  documents?: ITemplateDocument[];
+  [key: string]: unknown;
+}
+
+// A realistic-shaped default (business name + registration number, one
+// required PDF document) rather than an empty template — most tests just
+// need *a* valid template to submit against, not to define their own field
+// set from scratch.
+export const createVerificationTemplate = async ({
+  profileType = PROFILE_TYPE.CONSULTANCY,
+  country = "NG",
+  state = null,
+  fields = [
+    { key: "businessName", label: "Business name", type: TEMPLATE_FIELD_TYPE.STRING, required: true },
+    {
+      key: "registrationNumber",
+      label: "Registration number",
+      type: TEMPLATE_FIELD_TYPE.STRING,
+      required: false,
+    },
+  ],
+  documents = [
+    {
+      type: "business_certificate",
+      label: "Business registration certificate",
+      required: true,
+      acceptedFormats: [TEMPLATE_DOCUMENT_FORMAT.PDF],
+    },
+  ],
+  ...overrides
+}: CreateVerificationTemplateOptions = {}): Promise<IVerificationTemplate> => {
+  const n = next();
+
+  return VerificationTemplate.create({
+    profileType,
+    country,
+    state,
+    name: `Test Template ${n}`,
+    fields,
+    documents,
     ...overrides,
   });
 };
