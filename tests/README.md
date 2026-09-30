@@ -79,11 +79,17 @@ role promotion itself.
   - `user.test.ts` — register/login, `GET /me`, profile update including
     password change + session invalidation (the old token must stop
     working), the persona toggle (`PATCH /account-type`), logout-everywhere,
-    the full password-reset round trip, admin user management (create
-    admin, list/paginate, change role, Super-Admin-can't-modify-self guard),
-    and `phoneNumber.country` rejecting a made-up 2-letter code that isn't
-    a real ISO country (the field used to only check the shape — 2
-    letters — not that it meant anything).
+    the full password-reset round trip (also asserts the mocked
+    `sendTemplatedEmail` was called with the `forgotPassword` template and
+    the user's real email, and — for an unknown email — that it's never
+    called at all, on top of the response's own no-account-revealed
+    shape), admin user management (create admin, list/paginate, change
+    role, Super-Admin-can't-modify-self guard), and `phoneNumber.country`
+    rejecting a made-up 2-letter code that isn't a real ISO country (the
+    field used to only check the shape — 2 letters — not that it meant
+    anything). Mocks `src/helpers/emailSender.ts` at the top of the file
+    (see "Email is mocked, never really sent" below) — no real Mailgun
+    call is ever made.
   - `plan.test.ts` — listing (active-only by default), get-by-id, Super
     Admin create/update, duplicate-`planTier` rejection, non-admin blocked,
     and a made-up `currency` rejected as a clean `400` — `planController`
@@ -151,14 +157,44 @@ role promotion itself.
     stage propose/accept/reject (only the *other* party can
     accept/reject); the done→verify sequence (provider-only done,
     client-only verify, verify requires done first, releases the correct
-    `amountDisposed`/`platformFeeCollected` split, auto-completes the job
+    `amountDisbursed`/`platformFeeCollected` split, auto-completes the job
     once every stage is verified); contract upload (reuses the private-file
     system — grants the other party, who can mint and use a real signed
     link for it); dispute raise (either party) + `GET /disputes` (admin
     queue, party emails populated, non-admin blocked) + resolve (requires a
     `note`, appended to `disputeHistory`); creator-only pre-confirmation
     cancel (blocked once active); admin-only interim payment recording
-    (also covered: it writes a matching `Payment` record — see below).
+    (also covered: it writes a matching `Payment` record — see below);
+    `GET /:id/payments` (admin and customer_care can both list every
+    `Payment` recorded against the job, everyone else blocked, 404 for an
+    unknown job); refund requests (`POST /:id/refund-requests`,
+    client-only — blocks the provider and a stranger; requires a positive
+    `amount` and a `reason`; rejects a request that would exceed
+    `amountPaid`; blocks a second pending request while one is already
+    pending; **doesn't touch `totalRefunded` or `status` until approved**)
+    + `GET /refund-requests` (admin/customer_care queue, everyone else
+    blocked) + approve (`PATCH .../approve`, admin-only, moves
+    `totalRefunded`, closes the job on the first approval, and a
+    **second, corrective request approved on an already-closed job
+    appends without re-closing it or moving `closedAt`**, and emails the
+    client via the mocked `sendTemplatedEmail`) + decline
+    (`PATCH .../decline`, admin-only, requires a `declineReason`, leaves
+    the job's balance/status untouched, and emails the client the
+    decline reason); payout requests
+    (`POST /:id/payout-requests`, provider-only — blocks the client;
+    `amount` optional; blocked when nothing's available, while disputed,
+    cancelled, or closed, or while a request is already pending) +
+    `GET /payout-requests` (admin/customer_care queue, includes a freshly
+    recomputed `available` per job) + approve (`PATCH .../approve`,
+    admin-only, resolves the final amount — admin's override, else the
+    request's, else everything available — moves `amountPaidOut`, rejects
+    exceeding what's currently available, never changes job status, all
+    verified across multiple stage-verify calls, emails the provider) +
+    decline (same `declineReason` requirement, leaves `amountPaidOut`
+    untouched, emails the provider — asserted to fall back to the string
+    `"the full available amount"` when the original request never
+    specified a concrete number). Mocks `src/helpers/emailSender.ts` at
+    the top of the file (see "Email is mocked, never really sent" below).
   - `payment.test.ts` — `GET /api/payments/me` (own history only,
     status-filterable) and `GET /api/payments` (admin-only, filterable by
     `user`/etc.); the uniqueness-index behavior specifically: many manual
@@ -362,6 +398,30 @@ uses both to genuinely exercise the verification logic that matters
 Stripe-returned data, not a mock standing in for it. See
 [payments-plan.md](../docs/payments-plan.md) for the full breakdown of
 what's offline vs. what needs the real key.
+
+## Email is mocked, never really sent
+
+Unlike Stripe, there's no equivalent offline test-mode for Mailgun that
+would let a real send be verified without actually delivering mail
+somewhere — so every test file that exercises a controller calling
+`sendTemplatedEmail` (`user.test.ts`, `job.test.ts`) mocks
+`src/helpers/emailSender.ts` entirely at the top of the file, identical to
+how house-maduekwe-backend's own test suite mocks its equivalent module:
+
+```ts
+jest.mock("../../src/helpers/emailSender", () => ({
+  sendTemplatedEmail: jest.fn().mockResolvedValue({}),
+  loadTemplates: jest.fn().mockResolvedValue(undefined),
+}));
+```
+
+Both files also `jest.clearAllMocks()` in `afterEach`, alongside
+`clearTestDB()`, so a call asserted in one test never leaks into the
+next. What gets asserted is the *call* — recipient, template name, and the
+relevant variables — not that mail actually arrived anywhere, the same
+boundary the rest of this file draws around every other third-party
+integration that has no safe way to test for real. See
+[email-plan.md](../docs/email-plan.md).
 
 ## Adding more tests
 

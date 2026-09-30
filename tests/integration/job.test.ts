@@ -1,3 +1,11 @@
+// Refund/payout approve/decline each send a notification email — mocked
+// exactly like house-maduekwe-backend's own test suite mocks its
+// emailSender, so no real Mailgun call is ever made here.
+jest.mock("../../src/helpers/emailSender", () => ({
+  sendTemplatedEmail: jest.fn().mockResolvedValue({}),
+  loadTemplates: jest.fn().mockResolvedValue(undefined),
+}));
+
 import request from "supertest";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
@@ -12,6 +20,7 @@ import { Contact } from "../../src/models/contactModel";
 import { FileGrant } from "../../src/models/fileGrantModel";
 import { Payment } from "../../src/models/paymentModel";
 import { IUser } from "../../src/models/userModel";
+import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 
 const app = createApp();
 
@@ -21,6 +30,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await clearTestDB();
+  jest.clearAllMocks();
 });
 
 afterAll(async () => {
@@ -414,7 +424,7 @@ describe("stage done/verify and payment math", () => {
 
     expect(verifyA.status).toBe(200);
     // 40% of 1000 = 400, minus PLATFORM_FEE_PERCENT (5% test default) = 380
-    expect(verifyA.body.amountDisposed).toBeCloseTo(380);
+    expect(verifyA.body.amountDisbursed).toBeCloseTo(380);
     expect(verifyA.body.platformFeeCollected).toBeCloseTo(20);
     expect(verifyA.body.status).toBe("active"); // stage B still pending
 
@@ -424,7 +434,7 @@ describe("stage done/verify and payment math", () => {
       .set("Authorization", `Bearer ${clientToken}`);
 
     expect(verifyB.body.status).toBe("completed");
-    expect(verifyB.body.amountDisposed).toBeCloseTo(950); // 380 + (600 * 0.95)
+    expect(verifyB.body.amountDisbursed).toBeCloseTo(950); // 380 + (600 * 0.95)
     expect(verifyB.body.platformFeeCollected).toBeCloseTo(50);
   });
 });
@@ -631,6 +641,542 @@ describe("PATCH /api/jobs/:id/cancel", () => {
       .set("Authorization", `Bearer ${generateToken(clientUser)}`);
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /api/jobs/:id/payments", () => {
+  it("lists every payment made toward the job, for admin and customer_care", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const customerCare = await createCustomerCare();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 300 });
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 200 });
+
+    for (const viewer of [admin, customerCare]) {
+      const res = await request(app)
+        .get(`/api/jobs/${job._id}/payments`)
+        .set("Authorization", `Bearer ${generateToken(viewer)}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(2);
+      expect(res.body.map((p: { amount: number }) => p.amount).sort()).toEqual([200, 300]);
+    }
+  });
+
+  it("blocks a non-admin, non-customer_care caller", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .get(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("404s for an unknown job", async () => {
+    const admin = await createAdmin();
+
+    const res = await request(app)
+      .get("/api/jobs/507f1f77bcf86cd799439011/payments")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/jobs/:id/refund-requests", () => {
+  it("blocks anyone other than the job's client", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const stranger = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const asProvider = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`)
+      .send({ amount: 100, reason: "x" });
+    expect(asProvider.status).toBe(403);
+
+    const asStranger = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(stranger)}`)
+      .send({ amount: 100, reason: "x" });
+    expect(asStranger.status).toBe(403);
+  });
+
+  it("requires a positive amount and a reason", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+    const clientToken = generateToken(clientUser);
+
+    const noAmount = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${clientToken}`)
+      .send({ reason: "x" });
+    expect(noAmount.status).toBe(400);
+
+    const noReason = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${clientToken}`)
+      .send({ amount: 100 });
+    expect(noReason.status).toBe(400);
+  });
+
+  it("rejects requesting more than has actually been paid into the job", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 600, reason: "overpaid correction" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a second pending request while one is already pending", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const clientToken = generateToken(clientUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${clientToken}`)
+      .send({ amount: 100, reason: "first" });
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${clientToken}`)
+      .send({ amount: 100, reason: "second" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("doesn't touch the job's balance or status until approved", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 500, reason: "client cancelled" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe("active");
+    expect(res.body.totalRefunded).toBe(0);
+    expect(res.body.refunds).toHaveLength(1);
+    expect(res.body.refunds[0].status).toBe("pending");
+    expect(res.body.refunds[0].requestedBy).toBe(clientUser.id);
+  });
+});
+
+describe("GET /api/jobs/refund-requests + approve/decline", () => {
+  it("lists pending refund requests for admin/customer_care, blocks everyone else", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const customerCare = await createCustomerCare();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+    await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 500, reason: "client cancelled" });
+
+    for (const viewer of [admin, customerCare]) {
+      const res = await request(app)
+        .get("/api/jobs/refund-requests")
+        .set("Authorization", `Bearer ${generateToken(viewer)}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(1);
+      expect(res.body.data[0].jobId).toBe(job._id);
+      expect(res.body.data[0].refund.status).toBe("pending");
+    }
+
+    const blocked = await request(app)
+      .get("/api/jobs/refund-requests")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+    expect(blocked.status).toBe(401);
+  });
+
+  it("approving closes the job and moves totalRefunded, and a later correction appends without re-closing", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 500, reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const approved = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(approved.status).toBe(200);
+    expect(approved.body.status).toBe("closed");
+    expect(approved.body.totalRefunded).toBe(500);
+    expect(approved.body.refunds[0].status).toBe("approved");
+    expect(approved.body.refunds[0].decidedBy).toBe(admin.id);
+    const closedAt = approved.body.closedAt;
+    expect(closedAt).toBeTruthy();
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: clientUser.email,
+        template: "paymentRequestDecision",
+        variables: expect.objectContaining({ requestType: "refund", approved: true, amount: 500 }),
+      }),
+    );
+
+    // A second, corrective request on an already-closed job — approving
+    // it should append, not fail or re-close/move closedAt.
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 200 });
+    const secondRequest = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 200, reason: "found an extra duplicate payment" });
+    const secondRefundId = secondRequest.body.refunds[1]._id;
+
+    const secondApproved = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${secondRefundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(secondApproved.status).toBe(200);
+    expect(secondApproved.body.status).toBe("closed");
+    expect(secondApproved.body.totalRefunded).toBe(700);
+    expect(secondApproved.body.refunds).toHaveLength(2);
+    expect(secondApproved.body.closedAt).toBe(closedAt);
+  });
+
+  it("declining requires a reason and leaves the job untouched", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 500, reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const missingReason = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/decline`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({});
+    expect(missingReason.status).toBe(400);
+
+    const declined = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/decline`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ declineReason: "dispute not raised, work was completed" });
+
+    expect(declined.status).toBe(200);
+    expect(declined.body.status).toBe("active"); // never closed
+    expect(declined.body.totalRefunded).toBe(0);
+    expect(declined.body.refunds[0].status).toBe("declined");
+    expect(declined.body.refunds[0].declineReason).toBe(
+      "dispute not raised, work was completed",
+    );
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: clientUser.email,
+        template: "paymentRequestDecision",
+        variables: expect.objectContaining({
+          requestType: "refund",
+          approved: false,
+          declineReason: "dispute not raised, work was completed",
+        }),
+      }),
+    );
+  });
+});
+
+describe("POST /api/jobs/:id/payout-requests", () => {
+  it("blocks anyone other than the job's provider", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    expect(res.status).toBe(403);
+  });
+
+  it("blocks a request when nothing has been released from escrow yet", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a second pending request while one is already pending", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const clientToken = generateToken(clientUser);
+    const providerToken = generateToken(providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 1000 });
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/done`).set("Authorization", `Bearer ${providerToken}`);
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/verify`).set("Authorization", `Bearer ${clientToken}`);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a request on a disputed, cancelled, or closed job", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/dispute`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "x" });
+
+    const disputed = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    expect(disputed.status).toBe(400);
+
+    const created = await createJobAs(generateToken(clientUser), {
+      counterpartyUserId: providerUser.id,
+      myRole: "client",
+      jobTitle: "t",
+      jobDescription: "d",
+      totalAmount: 1000,
+    });
+    await request(app)
+      .patch(`/api/jobs/${created.body._id}/cancel`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    const cancelled = await request(app)
+      .post(`/api/jobs/${created.body._id}/payout-requests`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    expect(cancelled.status).toBe(400);
+
+    const closedJob = await createActiveJob(clientUser, providerUser);
+    await request(app)
+      .post(`/api/jobs/${closedJob._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+    const refundReq = await request(app)
+      .post(`/api/jobs/${closedJob._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ amount: 500, reason: "cancelled by agreement" });
+    await request(app)
+      .patch(`/api/jobs/${closedJob._id}/refund-requests/${refundReq.body.refunds[0]._id}/approve`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    const closed = await request(app)
+      .post(`/api/jobs/${closedJob._id}/payout-requests`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    expect(closed.status).toBe(400);
+  });
+});
+
+describe("GET /api/jobs/payout-requests + approve/decline", () => {
+  it("approving pays out exactly what's available (capped by whichever of amountPaid/amountDisbursed is smaller), across multiple stages", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser, {
+      totalAmount: 1000,
+      stages: [{ details: ["a"], payment: 40 }, { details: ["b"], payment: 60 }],
+    });
+    const clientToken = generateToken(clientUser);
+    const providerToken = generateToken(providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 1000 });
+
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/done`).set("Authorization", `Bearer ${providerToken}`);
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/verify`).set("Authorization", `Bearer ${clientToken}`);
+    // amountDisbursed is now 380 (40% of 1000, minus the 5% test platform fee)
+
+    const firstRequest = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    expect(firstRequest.status).toBe(201);
+
+    const queue = await request(app)
+      .get("/api/jobs/payout-requests")
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(queue.body.data).toHaveLength(1);
+    const firstPayoutId = queue.body.data[0].payout._id;
+
+    const firstApproved = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${firstPayoutId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(firstApproved.status).toBe(200);
+    expect(firstApproved.body.payouts).toHaveLength(1);
+    expect(firstApproved.body.payouts[0].amount).toBeCloseTo(380);
+    expect(firstApproved.body.payouts[0].status).toBe("approved");
+    expect(firstApproved.body.amountPaidOut).toBeCloseTo(380);
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: providerUser.email,
+        template: "paymentRequestDecision",
+        variables: expect.objectContaining({ requestType: "payout", approved: true }),
+      }),
+    );
+
+    const nothingLeft = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    expect(nothingLeft.status).toBe(400);
+
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[1]._id}/done`).set("Authorization", `Bearer ${providerToken}`);
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[1]._id}/verify`).set("Authorization", `Bearer ${clientToken}`);
+    // amountDisbursed is now 950 (380 + 60% of 1000 minus fee)
+
+    const secondRequest = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`)
+      .send({ note: "please wire to my bank" });
+    expect(secondRequest.status).toBe(201);
+    const secondPayoutId = secondRequest.body.payouts[1]._id;
+
+    const overshoot = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${secondPayoutId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 999999 });
+    expect(overshoot.status).toBe(400);
+
+    const secondApproved = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${secondPayoutId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(secondApproved.status).toBe(200);
+    expect(secondApproved.body.payouts[1].note).toBe("please wire to my bank");
+    expect(secondApproved.body.amountPaidOut).toBeCloseTo(950);
+  });
+
+  it("declining requires a reason and leaves amountPaidOut untouched", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+    const providerToken = generateToken(providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 1000 });
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/done`).set("Authorization", `Bearer ${providerToken}`);
+    await request(app).patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/verify`).set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    const payoutId = requested.body.payouts[0]._id;
+
+    const missingReason = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${payoutId}/decline`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({});
+    expect(missingReason.status).toBe(400);
+
+    const declined = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${payoutId}/decline`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ declineReason: "wrong bank details on file" });
+
+    expect(declined.status).toBe(200);
+    expect(declined.body.amountPaidOut).toBe(0);
+    expect(declined.body.payouts[0].status).toBe("declined");
+    expect(declined.body.payouts[0].declineReason).toBe("wrong bank details on file");
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: providerUser.email,
+        template: "paymentRequestDecision",
+        variables: expect.objectContaining({
+          requestType: "payout",
+          approved: false,
+          // The request never specified an amount, so the decline email
+          // falls back to this description rather than `undefined`.
+          amount: "the full available amount",
+          declineReason: "wrong bank details on file",
+        }),
+      }),
+    );
   });
 });
 

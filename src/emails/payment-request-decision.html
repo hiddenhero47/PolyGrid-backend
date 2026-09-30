@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>{{uppercase requestType}} Request Update</title>
+  </head>
+
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f9f9f9;
+      font-family: Arial, sans-serif;
+    "
+  >
+    <table width="100%" cellpadding="0" cellspacing="0" style="padding: 40px 0">
+      <tr>
+        <td align="center">
+          <table
+            width="600"
+            style="background: #ffffff; border-radius: 10px; padding: 30px"
+          >
+            <tr>
+              <td>
+                {{#if approved}}
+                <h2 style="margin: 0; color: #000">
+                  ✅ Your {{requestType}} request was approved
+                </h2>
+                {{else}}
+                <h2 style="margin: 0; color: #000">
+                  ❌ Your {{requestType}} request was declined
+                </h2>
+                {{/if}}
+
+                <p style="color: #6f6f6f; font-size: 14px; margin-top: 8px">
+                  Hi {{name}}, here's an update on your {{requestType}}
+                  request for "{{jobTitle}}".
+                </p>
+              </td>
+            </tr>
+
+            <tr>
+              <td>
+                <hr
+                  style="
+                    border: none;
+                    border-top: 1px solid #eee;
+                    margin: 20px 0;
+                  "
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td style="color: #000; font-size: 14px">
+                <p>
+                  Amount: <strong>{{amount}} {{currency}}</strong>
+                </p>
+
+                {{#if approved}}
+                <p>This has been processed.</p>
+                {{else}}
+                <p>Reason: {{declineReason}}</p>
+                {{/if}}
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding-top: 30px; color: #999; font-size: 12px">
+                If you have any questions, reply to this email or contact
+                support. <br /><br />
+                © {{year}} PolyGrid
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
