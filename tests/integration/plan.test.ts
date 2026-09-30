@@ -77,6 +77,28 @@ describe("POST /api/plans", () => {
     expect(res.body.planTier).toBe(PLAN_TIER.PRO);
   });
 
+  it("rejects a currency that isn't a real ISO 4217 code, as a clean 400 not a 500", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+
+    const res = await request(app)
+      .post("/api/plans")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        planTier: PLAN_TIER.PRO,
+        name: "Pro",
+        duration: 30,
+        price: 20,
+        currency: "NOT_REAL",
+      });
+
+    // Nothing in planController pre-checks currency — this exercises the
+    // Mongoose ValidationError -> 400 conversion in errorMiddleware.ts,
+    // which every schema `validate` across the app relies on to avoid
+    // surfacing a client-input problem as a 500.
+    expect(res.status).toBe(400);
+  });
+
   it("blocks a non-super-admin", async () => {
     const user = await createUser();
     const token = generateToken(user);

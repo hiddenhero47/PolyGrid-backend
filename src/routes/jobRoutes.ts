@@ -18,13 +18,15 @@ import {
   recordPayment,
 } from "../controllers/jobController";
 import { protect, secureRole } from "../middleware/authMiddleware";
-import { SYSTEM_ROLE } from "../models/userModel";
+import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 
 const router = express.Router();
 
 router.post("/", protect, createJob);
 router.get("/mine", protect, getMyJobs);
-router.get("/disputes", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), getDisputedJobs);
+// Read-only queue — customer_care can see it too; resolving one is a real
+// change and stays admin-only below.
+router.get("/disputes", secureRole([...REVIEW_ROLES]), getDisputedJobs);
 router.get("/:id", protect, getJob);
 router.patch("/:id", protect, updateJob);
 router.patch("/:id/confirm", protect, confirmJob);

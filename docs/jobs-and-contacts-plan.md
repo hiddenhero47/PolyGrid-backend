@@ -55,6 +55,17 @@ stage changes go through `proposedStages` — either party proposes
 `oldStages` first — never overwritten, same instinct as `Subscription`'s
 history) or rejects (`PATCH /:id/stages/reject`).
 
+A creator-only edit that actually changes `totalAmount` now also pushes
+`{previousAmount, changedBy, changedAt}` onto `Job.amountHistory` — added
+for PolyGrid Store's checkout flow (see store-plan.md), where the shop
+owner is the job's creator and may adjust a system-calculated price before
+the buyer confirms, but genuinely useful for every job type: a paper trail
+of what a job's price actually was before it changed, not just a
+`totalAmount` that silently became a different number. The buyer/other
+party still only ever confirms once, on whatever the number is at that
+moment — `amountHistory` doesn't change that guarantee, it just makes it
+visible.
+
 ### Per-stage execution & the escrow ledger
 
 `PATCH /:id/stages/:stageId/done` — provider only. `.../verify` — client
@@ -94,15 +105,17 @@ gateway webhook doing the same two things once one is wired up.
 
 ## Deliberately simplified for v1
 
-- **Disputes are flag-and-record, resolved by email, not in-app chat.**
+- **Disputes are flag-and-record, resolved by email, not in-app chat —
+  still true even now that chat exists** (see [chat-plan.md](chat-plan.md)).
   `PATCH /:id/dispute` (either party, with a `reason`) puts a job on the
   admin queue: `GET /api/jobs/disputes` (admin-only, `client`/`provider`/
   `disputedBy` populated with `fullName`/`email` so an admin can reach both
   sides without a second lookup). The actual back-and-forth with the two
-  parties happens over email, outside this system — a deliberate choice,
-  not a gap: an in-app chat is a real feature (and a real moderation
-  surface — "what's said in the chat isn't PolyGrid's business" cuts both
-  ways) worth adding later, not now. `PATCH /:id/dispute/resolve` requires
+  parties happens over email, outside this system, on purpose: chat is
+  deliberately 1:1 between the two users and never reviewed by PolyGrid
+  (see chat-plan.md's "persisted, never reviewed" section) — the exact
+  opposite of what an admin mediating a dispute needs, which is a visible,
+  three-way record. `PATCH /:id/dispute/resolve` requires
   a `note` (the admin's own record of the outcome, e.g. "refunded stage 2
   per agreement over email") and appends it to `disputeHistory` — a job can
   be disputed more than once over its life, so this is a history, not a

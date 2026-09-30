@@ -11,7 +11,12 @@ import { uploadHandler, deleteStoredFile, FILE_VISIBILITY, PRIVATE_DIR } from ".
 import { AppError } from "../middleware/errorMiddleware";
 import { connectUsers } from "./contactController";
 
-const getPlatformFeePercent = (): number => Number(process.env.PLATFORM_FEE_PERCENT) || 0;
+// Exported for storeOrderController.ts — a store checkout creates a Job
+// directly (not through the HTTP createJob endpoint below, since the shop
+// owner needs to end up as its creator even though the buyer is the one
+// calling checkout), and needs the exact same fee snapshot, not a second
+// copy of this that could drift.
+export const getPlatformFeePercent = (): number => Number(process.env.PLATFORM_FEE_PERCENT) || 0;
 
 type NormalizedStage = Pick<IJobStage, "details" | "payment">;
 
@@ -19,8 +24,8 @@ type NormalizedStage = Pick<IJobStage, "details" | "payment">;
 // amount — so "provider marks done, client verifies" is the only
 // completion code path this controller ever needs, no separate
 // no-stages branch. Also enforces stage payments never exceed 100% of
-// totalAmount.
-const normalizeStages = (stages: unknown): NormalizedStage[] => {
+// totalAmount. Exported for the same reason as getPlatformFeePercent above.
+export const normalizeStages = (stages: unknown): NormalizedStage[] => {
   if (!Array.isArray(stages) || stages.length === 0) {
     return [{ details: [], payment: 100 }];
   }
@@ -254,7 +259,14 @@ export const updateJob = asyncHandler(async (req: Request, res: Response) => {
   if (jobTitle) job.jobTitle = jobTitle;
   if (jobDescription) job.jobDescription = jobDescription;
   if (jobType && Object.values(JOB_TYPE).includes(jobType)) job.jobType = jobType as JobType;
-  if (totalAmount !== undefined) job.totalAmount = totalAmount;
+  if (totalAmount !== undefined && totalAmount !== job.totalAmount) {
+    job.amountHistory.push({
+      previousAmount: job.totalAmount,
+      changedBy: requester._id as mongoose.Types.ObjectId,
+      changedAt: new Date(),
+    });
+    job.totalAmount = totalAmount;
+  }
   if (stages !== undefined) {
     job.stages = normalizeStages(stages) as unknown as mongoose.Types.DocumentArray<IJobStage>;
   }

@@ -1,4 +1,11 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { isValidCountryCode } from "../helpers/countryReference";
+import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { IProfileLink, profileLinkSchema, validateLinkCount, MAX_PROFILE_LINKS } from "./profileLink";
+import { IMediaFile, mediaFileSchema } from "./mediaFile";
+
+export type { IProfileLink };
+export { MAX_PROFILE_LINKS };
 
 // PolyGrid Engineering's profile — the discovery/presence layer only
 // ("a personal mini-site"). Actually *engaging* a consultant — booking a
@@ -33,38 +40,10 @@ export type ServicePricingMode =
 // constraint — revisit the numbers if a real user's usage says otherwise.
 export const MAX_PORTFOLIO_ITEMS = 20;
 export const MAX_MEDIA_PER_ITEM = 6;
-// Same reasoning for external links — a handful of "where else to find me"
-// links, not an unbounded list.
-export const MAX_PROFILE_LINKS = 3;
 
-// External links only (website, LinkedIn, a portfolio site, Behance,
-// GitHub, etc.) — deliberately NOT a place for raw contact details (phone/
-// email/WhatsApp). PolyGrid's whole Jobs system exists to capture a
-// platform fee on an engagement; publicly exposing a way to reach a
-// consultant directly would make it trivial to arrange payment off-
-// platform and skip that fee entirely, the same reason most real
-// consultant marketplaces (Upwork, Toptal, Contra) don't surface direct
-// contact info on a public profile either. A client reaches out by
-// creating a Job instead.
-export interface IProfileLink {
-  label: string; // e.g. "Website", "LinkedIn", "Portfolio"
-  url: string;
-}
-
-// Genuinely matches IAvatar's shape now ({fileName, storagePath, mime,
-// size, url}) — storagePath is what lets a deleted/replaced media entry's
-// file actually be removed from disk (fileSyncStorage.deleteStoredFile
-// needs a real path, not just a fileName), same reason IAvatar keeps it.
-// Stripped before a public response the same way toPublicUser strips it
-// off avatar — an internal filesystem path has no business leaving the
-// server.
-export interface IPortfolioMedia {
-  fileName: string;
-  storagePath: string;
-  mime: string;
-  size: number;
-  url?: string;
-}
+// See src/models/mediaFile.ts for why this shape (storagePath for real
+// deletion, real detected mime/size, stripped before a public response).
+export type IPortfolioMedia = IMediaFile;
 
 export interface IPortfolioItem {
   _id: Types.ObjectId;
@@ -127,22 +106,11 @@ export interface IConsultancyProfile extends Document {
   updatedAt: Date;
 }
 
-const portfolioMediaSchema = new Schema<IPortfolioMedia>(
-  {
-    fileName: { type: String, required: true },
-    storagePath: { type: String, required: true },
-    mime: { type: String, required: true },
-    size: { type: Number, required: true },
-    url: { type: String },
-  },
-  { _id: false },
-);
-
 const portfolioItemSchema = new Schema<IPortfolioItem>({
   title: { type: String, required: true, trim: true },
   description: { type: String },
   media: {
-    type: [portfolioMediaSchema],
+    type: [mediaFileSchema],
     default: [],
     // Defense in depth alongside the controller-level checks in
     // consultancyProfileController.ts, which is what actually produces a
@@ -179,22 +147,18 @@ const serviceListingSchema = new Schema<IServiceListing>({
     required: true,
   },
   price: { type: Number, required: true, min: 0 },
-  currency: { type: String, default: "USD", uppercase: true, trim: true },
-  durationMinutes: { type: Number, min: 1 },
-});
-
-const profileLinkSchema = new Schema<IProfileLink>(
-  {
-    label: { type: String, required: true, trim: true },
-    url: {
-      type: String,
-      required: true,
-      trim: true,
-      match: [/^https?:\/\//i, "url must start with http:// or https://"],
+  currency: {
+    type: String,
+    default: "USD",
+    uppercase: true,
+    trim: true,
+    validate: {
+      validator: isValidCurrencyCode,
+      message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
     },
   },
-  { _id: false },
-);
+  durationMinutes: { type: Number, min: 1 },
+});
 
 const mentorshipSchema = new Schema<IMentorship>(
   {
@@ -224,14 +188,28 @@ const consultancyProfileSchema = new Schema<IConsultancyProfile>(
       enum: Object.values(SPECIALIZATION),
       default: [],
     },
-    country: { type: String, required: true, uppercase: true, trim: true },
+    country: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: isValidCountryCode,
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+      },
+    },
+    // Not validated against reference data on purpose — see
+    // countryReference.ts: city-level coverage is uneven enough that a
+    // hard check would reject legitimate towns just for being absent from
+    // one dataset. GET /api/reference/countries/:code/cities exists for a
+    // frontend that wants an autocomplete/dropdown anyway.
     city: { type: String, trim: true },
     yearsOfExperience: { type: Number, min: 0 },
     links: {
       type: [profileLinkSchema],
       default: [],
       validate: {
-        validator: (links: IProfileLink[]) => links.length <= MAX_PROFILE_LINKS,
+        validator: validateLinkCount,
         message: `A profile can have at most ${MAX_PROFILE_LINKS} links`,
       },
     },

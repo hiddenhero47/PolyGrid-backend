@@ -1,12 +1,30 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import crypto from "crypto";
+import { isValidCountryCode } from "../helpers/countryReference";
 
 export const SYSTEM_ROLE = {
   SUPER_ADMIN: "super_admin",
   ADMIN: "admin",
+  // Read-only staff role: can see review queues (disputes, verifications,
+  // message reports) but every route that actually changes something
+  // stays Admin/Super-Admin-only. Phase 1 of a future workflow — a
+  // customer_care reviewer will eventually push their findings to a
+  // queue an admin confirms, rather than just having eyes on the same
+  // queues an admin does; that queue doesn't exist yet, this role does.
+  CUSTOMER_CARE: "customer_care",
   USER: "user",
 } as const;
 export type SystemRole = (typeof SYSTEM_ROLE)[keyof typeof SYSTEM_ROLE];
+
+// Anyone allowed to view an admin review queue (disputes, verifications,
+// message reports) without necessarily being able to act on it — the
+// mutating routes on those same queues stay ADMIN/SUPER_ADMIN-only,
+// deliberately not reusing this constant.
+export const REVIEW_ROLES = [
+  SYSTEM_ROLE.ADMIN,
+  SYSTEM_ROLE.SUPER_ADMIN,
+  SYSTEM_ROLE.CUSTOMER_CARE,
+] as const;
 
 export const ACCOUNT_TYPE = {
   NORMAL: "normal",
@@ -120,10 +138,13 @@ const userSchema = new Schema<IUser>(
         type: String,
         uppercase: true,
         trim: true,
-        match: [
-          /^[A-Z]{2}$/,
-          "Phone country must be a valid 2-letter country code (e.g. NG, US)",
-        ],
+        // Was a bare 2-letter regex before — matched the shape of a
+        // country code without checking it was a real one (e.g. "ZZ"
+        // passed). Now checked against actual ISO 3166-1 reference data.
+        validate: {
+          validator: (value: string) => !value || isValidCountryCode(value),
+          message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+        },
       },
     },
     avatar: {
@@ -207,9 +228,12 @@ userSchema.pre("save", async function (next) {
       }
     }
 
-    if (this.systemRole === SYSTEM_ROLE.ADMIN && !this._adminCreation) {
+    if (
+      (this.systemRole === SYSTEM_ROLE.ADMIN || this.systemRole === SYSTEM_ROLE.CUSTOMER_CARE) &&
+      !this._adminCreation
+    ) {
       const error: Error & { statusCode?: number } = new Error(
-        "Admin creation not allowed",
+        "Admin/customer care creation not allowed",
       );
       error.statusCode = 403;
       return next(error);

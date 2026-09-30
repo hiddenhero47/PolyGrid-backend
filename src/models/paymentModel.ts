@@ -1,15 +1,17 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { PAYMENT_PROVIDER_NAME, PaymentProviderName } from "./paymentProviderModel";
+import { isValidCurrencyCode } from "../helpers/currencyReference";
 
-// Polymorphic — a Payment is always *for* something, and that something is
-// either a Job (topping up escrow) or a Subscription (buying/renewing a
-// plan). `targetId` uses Mongoose's refPath so `.populate('targetId')`
-// resolves to the right collection automatically instead of needing two
-// near-identical models. Add a case here (and to PAYMENT_TARGET_TYPE) if a
-// third kind of purchase (e.g. a Store order) needs payments later.
+// Polymorphic — a Payment is always *for* something: a Job (topping up
+// escrow), a Subscription (buying/renewing a plan), or a DigitalPurchase
+// (a direct one-off buy, no escrow/negotiation — see
+// digitalPurchaseModel.ts). `targetId` uses Mongoose's refPath so
+// `.populate('targetId')` resolves to the right collection automatically
+// instead of needing three near-identical models.
 export const PAYMENT_TARGET_TYPE = {
   JOB: "Job",
   SUBSCRIPTION: "Subscription",
+  DIGITAL_PURCHASE: "DigitalPurchase",
 } as const;
 export type PaymentTargetType = (typeof PAYMENT_TARGET_TYPE)[keyof typeof PAYMENT_TARGET_TYPE];
 
@@ -63,7 +65,17 @@ const paymentSchema = new Schema<IPayment>(
     user: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     userEmail: { type: String, required: true },
     amount: { type: Number, required: true, min: 0 },
-    currency: { type: String, required: true, default: "USD", uppercase: true, trim: true },
+    currency: {
+      type: String,
+      required: true,
+      default: "USD",
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: isValidCurrencyCode,
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
+      },
+    },
     providerFeeAmount: { type: Number, default: 0, min: 0 },
     provider: {
       type: String,

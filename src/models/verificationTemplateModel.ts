@@ -1,5 +1,6 @@
 import mongoose, { Document, Model, Schema } from "mongoose";
 import { PROFILE_TYPE, ProfileType } from "../constants/profileTypes";
+import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
 
 // What verification actually requires varies by pillar (a consultant's KYC
 // looks nothing like a store's business registration) AND by where the
@@ -115,8 +116,33 @@ const templateDocumentSchema = new Schema<ITemplateDocument>(
 const verificationTemplateSchema = new Schema<IVerificationTemplate>(
   {
     profileType: { type: String, enum: Object.values(PROFILE_TYPE), required: true },
-    country: { type: String, required: true, uppercase: true, trim: true },
-    state: { type: String, trim: true, uppercase: true, default: null },
+    country: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: isValidCountryCode,
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+      },
+    },
+    state: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: null,
+      // `this` is the template document — a plain function so Mongoose
+      // binds it, same technique as the portfolio item's completedAt
+      // check. A country with no states in the reference data has nothing
+      // to check against (see countryReference.isValidStateCode).
+      validate: {
+        validator: function (this: IVerificationTemplate, value: string | null) {
+          if (!value) return true;
+          return isValidStateCode(this.country, value);
+        },
+        message: "Not a recognized state/province for this country",
+      },
+    },
     name: { type: String, required: true, trim: true },
     version: { type: Number, default: 1 },
     isActive: { type: Boolean, default: true },

@@ -4,6 +4,7 @@ import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
   createAdmin,
+  createCustomerCare,
   createConsultancyProfile,
   createVerificationTemplate,
   generateToken,
@@ -290,7 +291,7 @@ describe("POST /api/verifications", () => {
       profileType: "ConsultancyProfile",
       profileId: profile.id,
       country: "NG",
-      state: "Lagos",
+      state: "LA", // Lagos's real ISO 3166-2 code
       form: { businessName: "Acme Engineering" },
     }).attach("business_certificate", TEST_PNG_BUFFER, "cert.png");
 
@@ -303,7 +304,7 @@ describe("POST /api/verifications", () => {
     await createVerificationTemplate({ country: "NG", state: null, documents: [] });
     const stateTemplate = await createVerificationTemplate({
       country: "NG",
-      state: "LAGOS",
+      state: "LA", // Lagos's real ISO 3166-2 code
       fields: [{ key: "businessName", label: "Business name", type: "string", required: true }],
       documents: [],
     });
@@ -312,7 +313,7 @@ describe("POST /api/verifications", () => {
       profileType: "ConsultancyProfile",
       profileId: profile.id,
       country: "NG",
-      state: "lagos",
+      state: "la",
       form: { businessName: "Acme Engineering" },
     });
 
@@ -376,6 +377,22 @@ describe("admin review", () => {
     const approve = await request(app)
       .patch(`/api/verifications/${submitted.body._id}/approve`)
       .set("Authorization", `Bearer ${generateToken(user)}`);
+    expect(approve.status).toBe(401);
+  });
+
+  it("lets customer_care view the queue but not approve/reject", async () => {
+    const { submitted } = await setupSubmission();
+    const customerCare = await createCustomerCare();
+
+    const list = await request(app)
+      .get("/api/verifications?status=pending")
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+    expect(list.status).toBe(200);
+    expect(list.body.data).toHaveLength(1);
+
+    const approve = await request(app)
+      .patch(`/api/verifications/${submitted.body._id}/approve`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
     expect(approve.status).toBe(401);
   });
 

@@ -26,6 +26,23 @@ import {
 } from "../../src/models/verificationTemplateModel";
 import { PROFILE_TYPE } from "../../src/constants/profileTypes";
 import { uploadHandler, FILE_VISIBILITY, SavedFileInfo } from "../../src/helpers/fileStorage";
+import { connectUsers } from "../../src/controllers/contactController";
+import { StoreProfile, IStoreProfile, MATERIAL_CATEGORY } from "../../src/models/storeProfileModel";
+import { Product, IProduct } from "../../src/models/productModel";
+import {
+  DigitalCreatorProfile,
+  IDigitalCreatorProfile,
+} from "../../src/models/digitalCreatorProfileModel";
+import {
+  DigitalProduct,
+  IDigitalProduct,
+  DIGITAL_PRODUCT_CATEGORY,
+} from "../../src/models/digitalProductModel";
+import {
+  DigitalPurchase,
+  IDigitalPurchase,
+  DIGITAL_PURCHASE_STATUS,
+} from "../../src/models/digitalPurchaseModel";
 
 let counter = 0;
 const next = (): number => {
@@ -52,7 +69,11 @@ export const createUser = async ({
     ...overrides,
   });
 
-  if (systemRole === SYSTEM_ROLE.ADMIN || systemRole === SYSTEM_ROLE.SUPER_ADMIN) {
+  if (
+    systemRole === SYSTEM_ROLE.ADMIN ||
+    systemRole === SYSTEM_ROLE.SUPER_ADMIN ||
+    systemRole === SYSTEM_ROLE.CUSTOMER_CARE
+  ) {
     user._adminCreation = true; // required by userModel's pre-save guard
   }
 
@@ -66,6 +87,9 @@ export const createAdmin = (overrides?: CreateUserOptions): Promise<IUser> =>
 
 export const createSuperAdmin = (overrides?: CreateUserOptions): Promise<IUser> =>
   createUser({ systemRole: SYSTEM_ROLE.SUPER_ADMIN, ...overrides });
+
+export const createCustomerCare = (overrides?: CreateUserOptions): Promise<IUser> =>
+  createUser({ systemRole: SYSTEM_ROLE.CUSTOMER_CARE, ...overrides });
 
 interface CreatePlanOptions {
   planTier?: PlanTier;
@@ -300,3 +324,129 @@ export const createVerificationTemplate = async ({
     ...overrides,
   });
 };
+
+// Reuses the real connectUsers side effect (same one jobController.createJob
+// triggers) rather than writing to Contact directly, so fixtures stay
+// honest about what "being connected" actually means.
+export const createContactConnection = (userA: IUser, userB: IUser): Promise<void> =>
+  connectUsers(userA._id as mongoose.Types.ObjectId, userB._id as mongoose.Types.ObjectId);
+
+interface CreateStoreProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createStoreProfile = async ({
+  user,
+  ...overrides
+}: CreateStoreProfileOptions): Promise<IStoreProfile> => {
+  const n = next();
+
+  return StoreProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    slug: `test-store-${n}`,
+    storeName: `Test Store ${n}`,
+    categories: [MATERIAL_CATEGORY.CEMENT_CONCRETE],
+    country: "NG",
+    ...overrides,
+  });
+};
+
+interface CreateProductOptions {
+  store: IStoreProfile;
+  [key: string]: unknown;
+}
+
+export const createProduct = async ({ store, ...overrides }: CreateProductOptions): Promise<IProduct> => {
+  const n = next();
+
+  return Product.create({
+    storeId: store._id,
+    category: store.categories[0],
+    title: `Test Product ${n}`,
+    price: 100,
+    currency: "USD",
+    unit: "bag",
+    shippingLocations: [{ country: "NG", price: 10 }],
+    ...overrides,
+  });
+};
+
+interface CreateDigitalCreatorProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createDigitalCreatorProfile = async ({
+  user,
+  ...overrides
+}: CreateDigitalCreatorProfileOptions): Promise<IDigitalCreatorProfile> => {
+  const n = next();
+
+  return DigitalCreatorProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    slug: `test-creator-${n}`,
+    displayName: `Test Creator ${n}`,
+    country: "NG",
+    ...overrides,
+  });
+};
+
+interface CreateDigitalProductOptions {
+  creator: IDigitalCreatorProfile;
+  [key: string]: unknown;
+}
+
+// `files` is a raw model insert, not a real upload — a fixture-shaped
+// stand-in is enough for tests that don't exercise getDownloadLink's
+// actual signed-URL minting against real bytes on disk.
+export const createDigitalProduct = async ({
+  creator,
+  ...overrides
+}: CreateDigitalProductOptions): Promise<IDigitalProduct> => {
+  const n = next();
+
+  return DigitalProduct.create({
+    creatorId: creator._id,
+    category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN,
+    title: `Test Digital Product ${n}`,
+    price: 50,
+    currency: "USD",
+    files: [
+      {
+        fileName: `deliverable-${n}.pdf`,
+        storagePath: `/tmp/deliverable-${n}.pdf`,
+        mime: "application/pdf",
+        size: 1024,
+      },
+    ],
+    ...overrides,
+  });
+};
+
+interface CreateDigitalPurchaseOptions {
+  product: IDigitalProduct;
+  buyer: IUser;
+  creator: IDigitalCreatorProfile;
+  status?: string;
+  [key: string]: unknown;
+}
+
+export const createDigitalPurchase = async ({
+  product,
+  buyer,
+  creator,
+  status = DIGITAL_PURCHASE_STATUS.SUCCESS,
+  ...overrides
+}: CreateDigitalPurchaseOptions): Promise<IDigitalPurchase> =>
+  DigitalPurchase.create({
+    product: product._id,
+    buyer: buyer._id,
+    creator: creator._id,
+    priceSnapshot: product.price,
+    currency: product.currency,
+    status,
+    ...overrides,
+  });

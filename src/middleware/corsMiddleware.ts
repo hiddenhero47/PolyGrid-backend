@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 
-const ALLOWED_ORIGINS = [
+// Exported so the Socket.IO server (src/socket/index.ts) can allow the
+// same origins for its own handshake — one list, not two to keep in sync.
+export const ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:5173",
   "https://polygrid.com",

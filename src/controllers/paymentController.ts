@@ -7,6 +7,9 @@ import { IUser, User } from "../models/userModel";
 import { Job, JOB_STATUS } from "../models/jobModel";
 import { Plan } from "../models/planModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../models/subscriptionModel";
+import { DigitalProduct } from "../models/digitalProductModel";
+import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
+import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
 import { syncProfilesSubscription } from "../helpers/profileSubscriptionSync";
 
@@ -152,9 +155,91 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     .json({ clientSecret, paymentId: payment.id, subscriptionId: subscription.id });
 };
 
-// @desc    Create a Stripe PaymentIntent to fund a job's escrow or purchase
-//          a subscription. Only creates the intent — nothing is confirmed
-//          paid until the webhook says so.
+// A digital product is bought directly, no Job/escrow involved at all —
+// see docs/digital-storefront-plan.md. Blocks a duplicate purchase (one
+// pending or successful DigitalPurchase per buyer+product is enough; a
+// second attempt just points at the existing one rather than creating a
+// competing PaymentIntent for something already bought or in progress).
+// Also blocks buying from a creator who isn't currently subscribed/
+// verified — same as that product being unreachable through the feed or
+// its creator's page in the first place.
+const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): Promise<void> => {
+  const requester = req.user as IUser;
+  const { targetId } = req.body;
+
+  if (!targetId || !mongoose.Types.ObjectId.isValid(targetId)) {
+    res.status(400);
+    throw new Error("Please add a valid targetId");
+  }
+
+  const product = await DigitalProduct.findById(targetId);
+  if (!product || !product.isActive) {
+    res.status(404);
+    throw new Error("Digital product not found");
+  }
+
+  const creator = await DigitalCreatorProfile.findById(product.creatorId);
+  const subscription = creator?.currentSubscription
+    ? await Subscription.findById(creator.currentSubscription)
+    : null;
+
+  if (!creator?.isVerified || !subscription?.isActive()) {
+    res.status(404);
+    throw new Error("Digital product not found");
+  }
+
+  if (creator.userId.toString() === requester.id) {
+    res.status(400);
+    throw new Error("You can't buy your own product");
+  }
+
+  const existing = await DigitalPurchase.findOne({ product: product._id, buyer: requester._id });
+  if (existing) {
+    res.status(400);
+    throw new Error(
+      existing.status === DIGITAL_PURCHASE_STATUS.SUCCESS
+        ? "You already own this product"
+        : "You already have a pending purchase for this product",
+    );
+  }
+
+  const purchase = await DigitalPurchase.create({
+    product: product._id,
+    buyer: requester._id,
+    creator: creator._id,
+    priceSnapshot: product.price,
+    currency: product.currency,
+    status: DIGITAL_PURCHASE_STATUS.PENDING,
+  });
+
+  const payment = await Payment.create({
+    targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+    targetId: purchase._id,
+    user: requester._id,
+    userEmail: requester.email,
+    amount: product.price,
+    currency: product.currency,
+    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    status: PAYMENT_STATUS.PENDING,
+  });
+
+  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+  const { providerPaymentId, clientSecret } = await provider.createIntent({
+    amount: product.price,
+    currency: product.currency,
+    receiptEmail: requester.email,
+    metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
+  });
+
+  payment.providerPaymentId = providerPaymentId;
+  await payment.save();
+
+  res.status(201).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id });
+};
+
+// @desc    Create a Stripe PaymentIntent to fund a job's escrow, purchase a
+//          subscription, or buy a digital product. Only creates the
+//          intent — nothing is confirmed paid until the webhook says so.
 // @route   POST /api/payments/intent
 // @access  Private
 export const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
@@ -168,8 +253,12 @@ export const createPaymentIntent = asyncHandler(async (req: Request, res: Respon
     return handleSubscriptionPaymentIntent(req, res);
   }
 
+  if (targetType === PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE) {
+    return handleDigitalPurchasePaymentIntent(req, res);
+  }
+
   res.status(400);
-  throw new Error("targetType must be 'Job' or 'Subscription'");
+  throw new Error("targetType must be 'Job', 'Subscription', or 'DigitalPurchase'");
 });
 
 // @desc    Stripe webhook — on payment_intent.succeeded, marks the Payment
@@ -237,6 +326,19 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
 
   if (payment.targetType === PAYMENT_TARGET_TYPE.JOB) {
     await Job.updateOne({ _id: payment.targetId }, { $inc: { amountPaid: payment.amount } });
+    return;
+  }
+
+  if (payment.targetType === PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE) {
+    // Flips permanently — this grant is never revoked by anything that
+    // happens later (the creator's subscription lapsing, the product
+    // going inactive). A completed purchase stays a completed purchase;
+    // subscription status only ever gates *discovery*, not access
+    // someone already paid for. See digitalProductController.getDownloadLink.
+    await DigitalPurchase.updateOne(
+      { _id: payment.targetId, status: DIGITAL_PURCHASE_STATUS.PENDING },
+      { status: DIGITAL_PURCHASE_STATUS.SUCCESS },
+    );
     return;
   }
 

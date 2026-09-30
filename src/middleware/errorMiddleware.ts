@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { Request, Response, NextFunction } from "express";
 
 export interface AppError extends Error {
@@ -22,6 +23,25 @@ export const errorHandler = (
   // exactly what Express's own docs recommend for this case.
   if (res.headersSent) {
     return next(err);
+  }
+
+  // A raw Mongoose ValidationError (thrown by `.save()` when a schema
+  // `validate` fails — e.g. the country/state/currency reference checks
+  // in countryReference.ts/currencyReference.ts, or the portfolio-item
+  // limits, or expiresAt-after-periodStarted) has no `statusCode` of its
+  // own, so without this it falls through to the generic 500 branch below
+  // — a client-input problem reported as a server failure. Applies to
+  // every schema validator across the app, not just new ones; a route
+  // that wants its own cleaner message still checks before `.save()` and
+  // never reaches this path.
+  if (err instanceof mongoose.Error.ValidationError) {
+    res.status(400).json({
+      message: Object.values(err.errors)
+        .map((fieldError) => fieldError.message)
+        .join(", "),
+      code: "VALIDATION_ERROR",
+    });
+    return;
   }
 
   const statusCode =

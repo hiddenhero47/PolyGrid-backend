@@ -679,7 +679,11 @@ export const changeUserRole = asyncHandler(async (req: Request, res: Response) =
 
   user.systemRole = systemRole;
 
-  if (systemRole === SYSTEM_ROLE.ADMIN || systemRole === SYSTEM_ROLE.SUPER_ADMIN) {
+  if (
+    systemRole === SYSTEM_ROLE.ADMIN ||
+    systemRole === SYSTEM_ROLE.SUPER_ADMIN ||
+    systemRole === SYSTEM_ROLE.CUSTOMER_CARE
+  ) {
     user._adminCreation = true;
   }
 

@@ -12,6 +12,15 @@ import paymentRoutes from "./routes/paymentRoutes";
 import consultancyProfileRoutes from "./routes/consultancyProfileRoutes";
 import verificationRoutes from "./routes/verificationRoutes";
 import verificationTemplateRoutes from "./routes/verificationTemplateRoutes";
+import referenceRoutes from "./routes/referenceRoutes";
+import conversationRoutes from "./routes/conversationRoutes";
+import messageRoutes from "./routes/messageRoutes";
+import storeProfileRoutes from "./routes/storeProfileRoutes";
+import productRoutes from "./routes/productRoutes";
+import storeOrderRoutes from "./routes/storeOrderRoutes";
+import digitalCreatorProfileRoutes from "./routes/digitalCreatorProfileRoutes";
+import digitalProductRoutes from "./routes/digitalProductRoutes";
+import digitalPurchaseRoutes from "./routes/digitalPurchaseRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
@@ -60,6 +69,15 @@ const createApp = (): Express => {
   app.use("/api/consultancy-profiles", consultancyProfileRoutes);
   app.use("/api/verifications", verificationRoutes);
   app.use("/api/verification-templates", verificationTemplateRoutes);
+  app.use("/api/reference", referenceRoutes);
+  app.use("/api/conversations", conversationRoutes);
+  app.use("/api/messages", messageRoutes);
+  app.use("/api/store-profiles", storeProfileRoutes);
+  app.use("/api/products", productRoutes);
+  app.use("/api/store-orders", storeOrderRoutes);
+  app.use("/api/digital-creator-profiles", digitalCreatorProfileRoutes);
+  app.use("/api/digital-products", digitalProductRoutes);
+  app.use("/api/digital-purchases", digitalPurchaseRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

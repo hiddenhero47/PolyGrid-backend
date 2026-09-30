@@ -1,4 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { isValidCurrencyCode } from "../helpers/currencyReference";
 
 export const JOB_TYPE = {
   ENGINEERING: "engineering",
@@ -53,6 +54,21 @@ export interface IDisputeResolution {
   note: string;
 }
 
+// A job's price can change pre-confirmation (updateJob, creator-only) —
+// e.g. a store-checkout job the shop owner adjusts before the buyer
+// confirms. This is what lets either party actually see that a change
+// happened and to what, rather than just a totalAmount that silently
+// became a different number. Same "history, not silent mutation" instinct
+// as oldStages; the buyer still only ever confirms once, on whatever the
+// final number is at that moment, which is what actually keeps both sides
+// "comfortable with the price" — this array is the paper trail, not the
+// enforcement.
+export interface IAmountChange {
+  previousAmount: number;
+  changedBy: Types.ObjectId;
+  changedAt: Date;
+}
+
 export interface IJobParty {
   userId: Types.ObjectId;
   isConfirmed: boolean;
@@ -78,6 +94,7 @@ export interface IJob extends Document {
   // Subscription's history-over-mutation approach.
   oldStages: IJobStage[][];
   totalAmount: number;
+  amountHistory: IAmountChange[];
   currency: string;
   // Client's total paid in (escrow), provider's total released out, and
   // PolyGrid's total collected — amountDisposed + platformFeeCollected is
@@ -145,6 +162,15 @@ const disputeResolutionSchema = new Schema<IDisputeResolution>(
   { _id: false },
 );
 
+const amountChangeSchema = new Schema<IAmountChange>(
+  {
+    previousAmount: { type: Number, required: true, min: 0 },
+    changedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    changedAt: { type: Date, default: () => new Date() },
+  },
+  { _id: false },
+);
+
 const jobPartySchema = new Schema<IJobParty>(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -170,7 +196,17 @@ const jobSchema = new Schema<IJob>(
     proposedStages: { type: proposedStagesSchema },
     oldStages: { type: [[jobStageSnapshotSchema]], default: [] },
     totalAmount: { type: Number, required: true, min: 0 },
-    currency: { type: String, default: "USD", uppercase: true, trim: true },
+    amountHistory: { type: [amountChangeSchema], default: [] },
+    currency: {
+      type: String,
+      default: "USD",
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: isValidCurrencyCode,
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
+      },
+    },
     amountPaid: { type: Number, default: 0, min: 0 },
     amountDisposed: { type: Number, default: 0, min: 0 },
     platformFeeCollected: { type: Number, default: 0, min: 0 },

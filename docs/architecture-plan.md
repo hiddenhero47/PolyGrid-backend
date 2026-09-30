@@ -3,10 +3,15 @@
 Status: **Phase 1 (setup + base User), Phase 1.5 (Plan/Subscription split),
 Phase 1.6 (public/private file uploads), Phase 1.7 (Jobs & Contacts),
 Phase 1.8 (unified Payment model), Phase 2 (live Stripe integration),
-Phase 3 (ConsultancyProfile + generic Verification pipeline), and Phase 3.1
-(Yup request validation + template-driven Verification) shipped.** This
-doc is updated as each phase lands — see the checklist at the bottom for
-current state.
+Phase 3 (ConsultancyProfile + generic Verification pipeline), Phase 3.1
+(Yup request validation + template-driven Verification), Phase 3.2
+(country/state/city/currency reference data), Phase 3.3 (1:1 chat over
+Socket.IO), Phase 3.4 (customer_care role), Phase 4 (StoreProfile —
+PolyGrid Store's Physical Materials Marketplace), and Phase 4.1
+(DigitalCreatorProfile — PolyGrid Store's Digital Storefront) shipped.**
+This doc is
+updated as each phase lands — see the checklist at the bottom for current
+state.
 
 Structure and conventions are deliberately carried over from
 [house-maduekwe-backend](https://github.com/hiddenhero47/house-maduekwe-backend)
@@ -333,6 +338,189 @@ Structure and conventions are deliberately carried over from
     `addPortfolioMedia` for appending to an existing item later, plus hard
     caps (`MAX_PORTFOLIO_ITEMS`, `MAX_MEDIA_PER_ITEM`) enforced both in the
     controller and as a Mongoose array `validate`.
+- Reference data — every `country`/`state`/`currency` field across the app
+  (`ConsultancyProfile`, `VerificationTemplate`, `Verification.location`,
+  `Job`, `Payment`, `Plan`, `User.phoneNumber`) was previously just an
+  uppercased free string with no check against reality. Full design
+  (library choice, validation strictness per field type, the real
+  Mongoose-`ValidationError`-was-a-500 bug this surfaced and fixed) is in
+  [reference-data-plan.md](reference-data-plan.md):
+  - `src/helpers/countryReference.ts` / `currencyReference.ts` — the only
+    files that import `country-state-city`/`currency-codes`; everything
+    else validates through these. Country and currency are hard-validated
+    everywhere (complete, unambiguous ISO lists); state is validated only
+    when the country has states listed in this dataset; city is
+    deliberately never hard-validated (coverage is too uneven) but still
+    has a lookup route for a frontend autocomplete.
+  - `src/controllers/referenceController.ts` +
+    `routes/referenceRoutes.ts` (`GET /api/reference/{countries,
+    countries/:code/states, countries/:code/cities, currencies}`) —
+    public, no auth, pure in-memory lookups, the same data every
+    validator checks against.
+  - `errorMiddleware.ts`'s `errorHandler` now converts a raw
+    `mongoose.Error.ValidationError` into a clean `400` — previously it
+    had no `statusCode` of its own and fell through to the generic 500
+    branch, meaning *every* schema validation failure across the whole
+    app (not just these new checks) surfaced as a server error instead of
+    a client-input one.
+- 1:1 chat between connected users, deliberately minimal (no group chat,
+  no presence/typing indicators, no moderation dashboard) — scoped that
+  way on purpose after weighing build-vs-third-party (Stream/Sendbird)
+  earlier. Full design in [chat-plan.md](chat-plan.md):
+  - `src/models/conversationModel.ts` (`Conversation`) — keyed by the
+    unordered pair of participants (`sortParticipants`), one conversation
+    per pair reused across every Job/contact context, found via an atomic
+    `findOneAndUpdate(upsert: true)`. `lastReadAt` is a two-entry
+    `Map<userId, Date>`, not per-message read state.
+  - `src/models/messageModel.ts` / `messageReportModel.ts` — plain text
+    messages (no attachments/editing), and a deliberately minimal
+    admin-visible report record (no moderation workflow) for the one case
+    PolyGrid does need to know about a chat: something genuinely reported.
+  - `src/socket/index.ts` (`initSocket`, `emitToUser`) — the *only* file
+    that imports `socket.io`. Authenticates a connecting socket through
+    `getAuthenticatedUser` (exported from `authMiddleware.ts` for exactly
+    this reuse), joins room `user:<id>`. Has no business logic of its
+    own: **sending a message is a normal REST call**
+    (`POST /api/conversations/:id/messages`, validated/persisted exactly
+    like every other write in this app), and the controller calls
+    `emitToUser` once afterward as a best-effort live push — the socket
+    layer never receives or validates a chat event from the client.
+  - `src/controllers/conversationController.ts` +
+    `routes/{conversation,message}Routes.ts` — starting a conversation
+    requires the two users to already be Contacts (chat isn't an open DM
+    to a stranger); a conversation looked up by id that isn't mine 404s
+    (never 403), so a guessed/foreign id can't confirm a conversation
+    exists between two other people.
+  - `src/server.ts` now builds an explicit `http.Server` (`initSocket`
+    needs the raw server, not just the Express app) instead of calling
+    `app.listen()` directly.
+  - `tests/integration/chatSocket.test.ts` — a real `http.Server` +
+    `socket.io-client`, narrowly scoped to what only the socket layer can
+    prove (auth rejects a missing/garbled token; a REST-sent message
+    delivers live to the recipient's room specifically, not the sender's).
+- `customer_care` system role — read-only access to the admin review
+  queues (`GET /api/jobs/disputes`, `GET /api/verifications`,
+  `GET /api/messages/reports`), never the routes that actually change
+  something (`.../dispute/resolve`, `.../approve`, `.../reject`, which
+  stay `secureRole([ADMIN, SUPER_ADMIN])`, deliberately excluding it).
+  `REVIEW_ROLES` (`userModel.ts`) is the one constant both kinds of route
+  read from, so a mutating route never accidentally includes it by reusing
+  the wrong list. Requires the same `_adminCreation` trusted-flag gate as
+  `admin` (userModel.ts's `pre('save')` hook, `changeUserRole`) — never
+  self-assignable, only a Super Admin can grant it. Phase 1 of a
+  future workflow where customer_care pushes reviewed findings to a queue
+  an admin confirms; that queue doesn't exist yet, only the role does.
+- StoreProfile — PolyGrid Store's Physical Materials Marketplace, the
+  second pillar business profile (jumped ahead of Tenders on request) and
+  a real stress test of the patterns ConsultancyProfile established. Full
+  design in [store-plan.md](store-plan.md):
+  - `src/models/storeProfileModel.ts` (`StoreProfile`) — `categories[]`
+    (`MaterialCategory` enum) is the store-level source of truth for what
+    it's allowed to sell; a `Product`'s own `category` must be one of
+    these. `currentSubscription`/`isVerified`/`verification` denormalized
+    and synced exactly like ConsultancyProfile — registering `StoreProfile`
+    in `PROFILE_MODEL_REGISTRY` (`constants/profileTypes.ts`) is the
+    entire cost of Verification/KYC working for stores, zero pillar-
+    specific code needed.
+  - `src/models/productModel.ts` (`Product`) — deliberately carries **no**
+    subscription/verification field of its own at all. A store can own
+    many products, unlike ConsultancyProfile (one document per user), so
+    denormalizing subscription onto every one would mean re-syncing every
+    product a store owns on every subscription change; instead, every
+    path a product is reached through (`storeProfileController.getStore`,
+    `productController.getProduct`) checks the *owning store's*
+    subscription live, the same one-extra-query pattern
+    `ConsultancyProfile.getProfile` already uses. `shippingLocations[]`
+    (`{country, state?, price}`) lives here, not on `StoreProfile` — a
+    shop's different products can have completely different shipping
+    realities. `state` omitted means "nationwide at this price," the same
+    fallback shape `VerificationTemplate` already uses for
+    country+state; `resolveShippingPrice()` returns `null` when a
+    destination matches neither a state-specific nor a nationwide entry —
+    "can't ship there," not a guessed price.
+  - `src/models/storeOrderModel.ts` (`StoreOrder`) — "checkout"
+    (`storeOrderController.createOrder`) resolves each item's shipping
+    price for the buyer's destination (rejecting the whole order if any
+    item can't ship there), snapshots the products/shipping split
+    (`itemsTotalSnapshot`/`shippingTotalSnapshot`/`totalSnapshot`, same
+    "snapshot, don't reference a mutable live value" instinct as
+    `Subscription` snapshotting `Plan`), and — unlike the first pass at
+    this feature — **spins up a real `Job`** (`jobType: 'store'`,
+    already in `JOB_TYPE`, unused until now) directly via `Job.create()`
+    rather than going through `POST /api/jobs` (which always makes
+    whoever calls it a confirmed party — here the roles are deliberately
+    asymmetric: the **shop owner is `createdBy` and the already-confirmed
+    provider**, so they keep the existing creator-only pre-confirmation
+    edit/cancel rights, while the **buyer is the not-yet-confirmed
+    client** who reviews and confirms). `connectUsers` (the same side
+    effect Job creation always triggers through its own endpoint) is
+    replicated manually since this Job bypasses that endpoint. Payment
+    visibility and an optional attached invoice (`Job.contractFile`) both
+    come for free once the Job exists — zero new code either place.
+  - `Job.amountHistory[]` (`jobModel.ts`) — a new *generic* field (every
+    job type gets it, not just store checkout), pushed to by
+    `updateJob` whenever a creator-only pre-confirmation edit actually
+    changes `totalAmount`. What "track price changes so both sides stay
+    comfortable" cashes out to: a paper trail of what changed and who
+    changed it, on top of a guarantee that was already structural (the
+    other party only ever confirms once, on the number at that moment).
+  - `src/models/{profileLink,mediaFile}.ts` — `IProfileLink` and the
+    "real detected metadata, deletable" media shape were extracted out of
+    `consultancyProfileModel.ts` once StoreProfile needed the exact same
+    two things, rather than a third copy later.
+  - `src/controllers/storeProfileController.ts`'s `searchStores` —
+    discovery is store-first, never a flat cross-store product search:
+    matches stores by category (verified + currently-subscribed, checked
+    live via `$lookup`, same as `searchConsultants`), then a `$lookup`
+    sub-pipeline previews each matching store's first few products in
+    that category — the only place subscription status is ever checked
+    for a *set* of products, and it's checked once per store, not once
+    per product.
+  - `updateMyStoreProfile`'s category-removal cascade delete — removing a
+    category from a store's list deletes every `Product` under it
+    (and their image files) before the profile itself saves its new list,
+    so a store can never end up claiming a category while still quietly
+    owning products under one it just said it doesn't sell.
+  - `tests/integration/{storeProfile,product,storeOrder}.test.ts`.
+- DigitalCreatorProfile — PolyGrid Store's Digital Storefront, the other
+  half of the pillar StoreProfile started. Full design in
+  [digital-storefront-plan.md](digital-storefront-plan.md):
+  - `src/models/digitalCreatorProfileModel.ts` — a deliberately *separate*
+    profile type from `StoreProfile` even though both are "PolyGrid
+    Store": Digital's discovery is a flat cross-creator feed, Physical's
+    is store-first — incompatible enough that unifying them would mean
+    one model carrying fields that make no sense for half its rows.
+    Registered in `PROFILE_MODEL_REGISTRY` like every other pillar
+    profile.
+  - `src/models/digitalProductModel.ts` (`DigitalProduct`) — carries **no**
+    subscription field, same reasoning as `Product`, but the fix isn't
+    store-level filtering (Digital has no store-first step to hide
+    behind): `listDigitalProductFeed` runs a **two-hop `$lookup`**
+    anchored directly on the product collection (`DigitalProduct` ->
+    its creator's `DigitalCreatorProfile` -> `Subscription`) — still one
+    query per page regardless of hop count, so an unsubscribed or
+    unverified creator's whole catalog drops out of the feed live, with
+    zero writes. Media splits into `previewImages` (public) and `files`
+    (private deliverables, required non-empty) by multipart field name;
+    `isActive` is the only removal mechanism a creator ever gets — no
+    hard delete, so a past buyer's access never depends on the listing
+    still existing exactly as it was.
+  - `src/models/digitalPurchaseModel.ts` (`DigitalPurchase`) — unlike
+    every other paid interaction, **no Job involved** — a direct
+    purchase plugging into the existing generic `Payment`/Stripe flow as
+    a third `PAYMENT_TARGET_TYPE`. Created `pending` at checkout,
+    flipped to `success` only by the webhook — same interim-state
+    instinct as `SUBSCRIPTION_STATUS.PENDING`. Once `success`, access is
+    permanent: `getDigitalProductDownloadLink` (`digitalProductController.ts`)
+    checks only for that record (or being the product's own creator) and
+    mints signed links via `signFileUrl()` directly, bypassing
+    `FileGrant` — the first real example of the "domain calls
+    `signFileUrl()` directly" pattern `docs/file-uploads-plan.md`
+    described but hadn't been used yet. Deliberately never re-checks the
+    creator's live subscription or the product's `isActive` — those only
+    ever gate discovery, never a download someone already paid for.
+  - `tests/integration/{digitalCreatorProfile,digitalProduct}.test.ts`,
+    plus `DigitalPurchase` coverage added to `payment.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): transactional email delivery for password reset (currently
@@ -362,11 +550,51 @@ Phase 3.1  Yup request-validation convention + VerificationTemplate        <- do
            catalog data — what a profile needs to verify is now
            data-driven per profileType+location, not hardcoded per
            country.
-Phase 4  Remaining three pillars' business profiles (Contractor/Tenders,
-         Store, Labor/SiteForce), following consultancy-profile-plan.md's
-         shape and registering in PROFILE_MODEL_REGISTRY
-Phase 5  Cross-pillar aggregation queries (active + verified + subscribed)
-         and geo-spatial queries (Store physical goods, SiteForce jobs)
+Phase 3.2  country/state/city/currency reference data, applied to every   <- done
+           existing free-text field of that kind app-wide + a public
+           GET /api/reference/* lookup API + fixed a latent bug where
+           every Mongoose ValidationError surfaced as a 500.
+Phase 3.3  1:1 chat over Socket.IO — deliberately minimal (no group      <- done
+           chat, no moderation dashboard); REST does all the writes,
+           the socket only pushes; gated on an existing Contact
+           connection, not an open DM to a stranger.
+Phase 3.4  customer_care system role — read-only access to admin review    <- done
+           queues (disputes, verifications, message reports); every
+           mutating route on those same queues stays admin-only. Phase 1
+           of a future review-then-admin-confirms workflow, which
+           doesn't exist yet.
+Phase 4    StoreProfile — PolyGrid Store's Physical Materials             <- done
+           Marketplace, jumped ahead of Tenders on request. Subscription
+           gating happens entirely at the store level (never
+           denormalized onto Product, unlike ConsultancyProfile
+           denormalizing onto itself) since a store can own many
+           products; category is a strict taxonomy a product must
+           belong to, removing one cascades to delete every product
+           under it; shipping is a per-product location/price list, not
+           a store-level setting; checkout resolves shipping, snapshots
+           the order, and spins up a real Job (jobType: 'store', shop
+           owner as creator) for escrow/price-negotiation/an optional
+           invoice — all reusing existing Job infrastructure, plus one
+           small *generic* Job addition (`amountHistory`, tracking
+           creator-only price edits) every job type benefits from. Full
+           design in [store-plan.md](store-plan.md).
+Phase 4.1  DigitalCreatorProfile — PolyGrid Store's Digital Storefront,   <- done
+           the other half of the pillar. Direct purchase-and-download,
+           no Job, no shipping. Subscription gating solved with a
+           two-hop `$lookup` anchored directly on DigitalProduct
+           (-> DigitalCreatorProfile -> Subscription) since Digital's
+           flat cross-creator feed has no store-first step to hide
+           behind, unlike Physical — same one-query-per-page cost
+           regardless of hop count. DigitalPurchase is a direct Payment
+           target (no Job), permanent once its status flips to success —
+           decoupled from the creator's later subscription/isActive
+           status, which only ever gates discovery. Full design in
+           [digital-storefront-plan.md](digital-storefront-plan.md).
+Phase 5  Remaining two pillars' business profiles (Contractor/Tenders,
+         Labor/SiteForce), following consultancy-profile-plan.md's or
+         store-plan.md's shape and registering in PROFILE_MODEL_REGISTRY
+Phase 6  Cross-pillar aggregation queries (active + verified + subscribed)
+         and geo-spatial queries (SiteForce jobs)
 ```
 
 Each pillar's profile schema, controllers, and routes should get their own
