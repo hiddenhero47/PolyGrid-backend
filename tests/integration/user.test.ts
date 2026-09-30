@@ -385,4 +385,18 @@ describe("admin-only user management", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("promotes a user to customer_care", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+    const user = await createUser();
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/role`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ systemRole: SYSTEM_ROLE.CUSTOMER_CARE });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.systemRole).toBe(SYSTEM_ROLE.CUSTOMER_CARE);
+  });
 });

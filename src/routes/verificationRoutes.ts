@@ -7,7 +7,7 @@ import {
   rejectVerification,
 } from "../controllers/verificationController";
 import { protect, secureRole } from "../middleware/authMiddleware";
-import { SYSTEM_ROLE } from "../models/userModel";
+import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 import { validateBody } from "../validators/validate";
 import { rejectVerificationSchema } from "../validators/verificationValidator";
 
@@ -17,7 +17,9 @@ const router = express.Router();
 // exact shape. forms.any() (multer) is already mounted globally in app.ts.
 router.post("/", protect, submitVerification);
 router.get("/me", protect, getMyVerifications);
-router.get("/", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), getVerifications);
+// Read-only queue — customer_care can see it too; approve/reject below stay
+// admin-only since those actually flip a profile's isVerified.
+router.get("/", secureRole([...REVIEW_ROLES]), getVerifications);
 router.patch(
   "/:id/approve",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),

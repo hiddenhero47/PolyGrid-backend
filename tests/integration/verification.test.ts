@@ -4,6 +4,7 @@ import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
   createAdmin,
+  createCustomerCare,
   createConsultancyProfile,
   createVerificationTemplate,
   generateToken,
@@ -376,6 +377,22 @@ describe("admin review", () => {
     const approve = await request(app)
       .patch(`/api/verifications/${submitted.body._id}/approve`)
       .set("Authorization", `Bearer ${generateToken(user)}`);
+    expect(approve.status).toBe(401);
+  });
+
+  it("lets customer_care view the queue but not approve/reject", async () => {
+    const { submitted } = await setupSubmission();
+    const customerCare = await createCustomerCare();
+
+    const list = await request(app)
+      .get("/api/verifications?status=pending")
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+    expect(list.status).toBe(200);
+    expect(list.body.data).toHaveLength(1);
+
+    const approve = await request(app)
+      .patch(`/api/verifications/${submitted.body._id}/approve`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
     expect(approve.status).toBe(401);
   });
 

@@ -1,7 +1,13 @@
 import request from "supertest";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
+import {
+  createUser,
+  createAdmin,
+  createCustomerCare,
+  generateToken,
+  TEST_PNG_BUFFER,
+} from "../setup/fixtures";
 import { Contact } from "../../src/models/contactModel";
 import { FileGrant } from "../../src/models/fileGrantModel";
 import { Payment } from "../../src/models/paymentModel";
@@ -233,6 +239,29 @@ describe("PATCH /api/jobs/:id", () => {
     expect(res.status).toBe(200);
     expect(res.body.jobTitle).toBe("new title");
     expect(res.body.totalAmount).toBe(2000);
+    expect(res.body.amountHistory).toHaveLength(1);
+    expect(res.body.amountHistory[0].previousAmount).toBe(1000);
+    expect(res.body.amountHistory[0].changedBy).toBe(clientUser.id);
+  });
+
+  it("does not record a price-history entry when totalAmount doesn't actually change", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+
+    const created = await createJobAs(generateToken(clientUser), {
+      counterpartyUserId: providerUser.id,
+      myRole: "client",
+      jobTitle: "t",
+      jobDescription: "d",
+      totalAmount: 1000,
+    });
+
+    const res = await request(app)
+      .patch(`/api/jobs/${created.body._id}`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ totalAmount: 1000 });
+
+    expect(res.body.amountHistory).toHaveLength(0);
   });
 
   it("blocks the non-creator from editing", async () => {
@@ -544,6 +573,30 @@ describe("GET /api/jobs/disputes", () => {
       .set("Authorization", `Bearer ${generateToken(clientUser)}`);
 
     expect(res.status).toBe(401);
+  });
+
+  it("lets customer_care view the queue but not resolve a dispute", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const customerCare = await createCustomerCare();
+    const disputedJob = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .patch(`/api/jobs/${disputedJob._id}/dispute`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "Work not as described" });
+
+    const list = await request(app)
+      .get("/api/jobs/disputes")
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+    expect(list.status).toBe(200);
+    expect(list.body.data).toHaveLength(1);
+
+    const resolve = await request(app)
+      .patch(`/api/jobs/${disputedJob._id}/dispute/resolve`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`)
+      .send({ note: "Refunded per agreement" });
+    expect(resolve.status).toBe(401);
   });
 });
 

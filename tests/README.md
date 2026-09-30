@@ -34,12 +34,15 @@ tests/
     db.ts               connect/disconnect/clear the test DB
     globalSetup.ts      starts the in-memory replica set (once, whole run)
     globalTeardown.ts   stops it
-    fixtures.ts         factories: users (basic/admin/super admin), plans,
-                         subscriptions (incl. a user with an active one),
-                         private files, an active job, a contact
-                         connection, a consultancy profile, a verification
-                         template + JWT token generation + a real tiny PNG
-                         (base64 + Buffer) for upload tests
+    fixtures.ts         factories: users (basic/admin/super admin/
+                         customer care), plans, subscriptions (incl. a
+                         user with an active one), private files, an
+                         active job, a contact connection, a consultancy
+                         profile, a verification template, a store
+                         profile, a product, a digital creator profile, a
+                         digital product, a digital purchase + JWT token
+                         generation + a real tiny PNG (base64 + Buffer)
+                         for upload tests
   unit/          pure functions/methods/middleware, no HTTP, DB used only
                  where the thing under test needs a real document
   integration/   real HTTP requests via supertest against src/app.ts
@@ -50,6 +53,13 @@ tests can get an app instance without connecting to the real DB or calling
 `.listen()`.
 
 ## What's covered
+
+`customer_care` read-only-queue access is covered inline, once per queue
+it applies to, rather than its own file: `job.test.ts` (can view
+`/disputes`, blocked from `/dispute/resolve`), `verification.test.ts`
+(can view the queue, blocked from `/approve`), `conversation.test.ts`
+(can view `/api/messages/reports`) — plus `user.test.ts` covering the
+role promotion itself.
 
 - **Unit**:
   - `subscription.test.ts` — `Subscription.isActive()` status/expiry logic,
@@ -135,7 +145,9 @@ tests can get an app instance without connecting to the real DB or calling
     over 100%, rejects a made-up `currency` as a clean `400`); confirm
     (activates once both sides are in, blocks a
     non-party, rejects double-confirm); creator-only pre-confirmation edit
-    (blocked once active); view/list access (party or admin only);
+    (blocked once active; changing `totalAmount` records
+    `{previousAmount, changedBy}` on `amountHistory`, an unchanged value
+    doesn't); view/list access (party or admin only);
     stage propose/accept/reject (only the *other* party can
     accept/reject); the done→verify sequence (provider-only done,
     client-only verify, verify requires done first, releases the correct
@@ -246,6 +258,86 @@ tests can get an app instance without connecting to the real DB or calling
     list with its real currency, Lagos is a real Nigerian state, JPY
     really has 0 decimal digits); an unknown country code 404s on the
     states/cities routes; cities can be scoped to a state via `?state=`.
+  - `storeProfile.test.ts` — create (requires at least one valid
+    category), one-per-user; the category-removal cascade delete
+    (removing a category from `PATCH /me` deletes every product under
+    it **and their image files from disk**, keeps products under
+    categories that weren't removed), rejecting removing every category
+    down to zero; the store page (`GET /:idOrSlug`) withholds content
+    unless currently subscribed and drops back to unavailable the moment
+    a subscription expires — same live-check pattern as
+    `consultancyProfile.test.ts`; search (verified + currently-subscribed
+    only, filterable by category, **each result includes a preview of
+    matching products** via the aggregation sub-pipeline); logo upload
+    replaces (and deletes) the previous one.
+  - `product.test.ts` — creating a product with a category the store
+    didn't declare it sells is rejected; a valid create snapshots real
+    image metadata (magic-byte-detected mime, not a client guess);
+    attaching more than `MAX_PRODUCT_IMAGES` is rejected; updating/
+    deleting a product that belongs to someone else's store 404s (even
+    when the caller has their own, different store); deleting a product
+    deletes its image files too; the add/remove single-image sub-
+    resource routes; `shippingLocations` requires at least one entry, a
+    made-up country or an out-of-country state (e.g. a US state for a
+    Nigerian shipping entry) is rejected, and a state-specific entry can
+    coexist with a nationwide default for the same product;
+    `GET /api/products/:id` — the one place a product needs a live
+    subscription check on its own behalf — withholds the product unless
+    its *owning store* is currently subscribed, and drops back to
+    unavailable the moment that store's subscription expires.
+  - `storeOrder.test.ts` — placing an order 404s for a store that isn't
+    currently subscribed (same as it being unreachable through search/the
+    store page), blocks ordering from your own store, requires a
+    shipping destination, rejects a product that doesn't belong to the
+    given store, a destination none of the order's products ship to, and
+    a quantity under 1; a state-specific shipping price is resolved over
+    a product's nationwide default when both exist; a valid order
+    snapshots `titleSnapshot`/`unitPriceSnapshot` plus the products/
+    shipping split (`itemsTotalSnapshot`/`shippingTotalSnapshot`/
+    `totalSnapshot`), **spins up a real `Job`** with the shop owner as
+    `createdBy` and the already-confirmed provider and the buyer as the
+    not-yet-confirmed client (`jobType: 'store'`, `totalAmount` matching
+    the order), and **connects buyer and store owner as Contacts**
+    (verified via a real `Contact` document); the shop owner can adjust
+    that Job's price pre-confirmation via the existing creator-only
+    `PATCH /api/jobs/:id` (recorded in `amountHistory`) and the buyer
+    still confirms afterward to activate it; `GET /mine` (buyer) and
+    `GET /store` (owner, populated with the buyer's name/email) each
+    scope correctly, and `/store` 404s for a caller with no store
+    profile.
+  - `digitalCreatorProfile.test.ts` — create (one-per-user); update mine;
+    avatar upload/replace; the creator page (`GET /:idOrSlug`) withholds
+    products unless currently subscribed and drops back to unavailable
+    the moment the subscription expires, same live-check pattern as
+    `storeProfile.test.ts`; 404s for an unknown slug.
+  - `digitalProduct.test.ts` — creating a product distinguishes
+    `previewImages` (public) from `files` (private deliverables) **by
+    multipart field name**, not multer config; rejects an invalid
+    category or zero deliverable files; rejects more than
+    `MAX_PREVIEW_IMAGES` preview images; updating/deleting a product that
+    belongs to someone else's profile 404s; the `isActive` toggle with no
+    hard-delete endpoint anywhere; preview-images add/remove sub-resource;
+    the deliverable-files sub-resource is **append-only, no remove route**
+    (verified by checking the download link's file count grows);
+    `GET /api/digital-products/feed` — **the centerpiece two-hop
+    `$lookup`** (`DigitalProduct` -> `DigitalCreatorProfile` ->
+    `Subscription`) — excludes an unsubscribed *or* unverified creator's
+    products, includes a verified+subscribed creator's active products
+    with the creator's info attached, filters by category, and drops out
+    of the feed live the instant a subscription expires, no write needed;
+    `GET /api/digital-products/:id` withholds a product unless its
+    creator is verified+subscribed; `GET /.../:id/download` blocks a
+    stranger and a buyer whose purchase is still pending, allows the
+    product's own creator, and — the key guarantee —**a successful
+    buyer's download access survives the creator's subscription later
+    lapsing and the product going inactive**.
+  - `payment.test.ts` also covers `targetType: "DigitalPurchase"` —
+    requires a valid `targetId`; 404s for an unknown/inactive/unverified/
+    unsubscribed product; blocks a creator buying their own product;
+    blocks a duplicate purchase whether the existing one is pending or
+    already successful; the live-Stripe round trip (skipped without a
+    real key) flips a `DigitalPurchase` to `success` via the webhook and
+    confirms the download link works immediately afterward.
 
 ## Stripe is tested for real — unlike OAuth
 

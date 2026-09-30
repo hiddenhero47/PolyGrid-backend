@@ -59,6 +59,11 @@ jobs-and-contacts-plan.md). Full design in [chat-plan.md](chat-plan.md).
   full platform control.
 - `admin` — verification approval, dispute management, moderation. Created
   only by a Super Admin (or by promotion), never by public registration.
+- `customer_care` — read-only access to the same review queues an admin
+  sees (disputes, verifications, message reports); can't act on any of
+  them. Same trusted-creation restriction as `admin`. Phase 1 of a future
+  workflow where customer_care pushes what they've reviewed to a queue an
+  admin confirms — see [architecture-plan.md](architecture-plan.md).
 - `user` — every regular account, regardless of which pillars they use.
 
 ### Dual-persona toggle (not a role)
@@ -99,12 +104,23 @@ separate signup.
 ## Business profiles
 
 Each pillar's provider-side data lives in its own document, 1-to-1 with
-`User` via `userId`. **`ConsultancyProfile` (PolyGrid Engineering) is
-built** — see [consultancy-profile-plan.md](consultancy-profile-plan.md)
-for the full design and [architecture-plan.md](architecture-plan.md) for
-what shipped. The remaining three — `ContractorProfile` (Tenders),
-`StoreProfile`, `LaborProfile` (SiteForce) — are not modeled yet, and
-should follow the same shape.
+`User` via `userId`. **`ConsultancyProfile` (PolyGrid Engineering),
+`StoreProfile` (PolyGrid Store, Physical Materials Marketplace), and
+`DigitalCreatorProfile` (PolyGrid Store, Digital Storefront) are all
+built** — see [consultancy-profile-plan.md](consultancy-profile-plan.md) /
+[store-plan.md](store-plan.md) / [digital-storefront-plan.md](digital-storefront-plan.md)
+for the full designs and [architecture-plan.md](architecture-plan.md) for
+what shipped. The remaining two — `ContractorProfile` (Tenders),
+`LaborProfile` (SiteForce) — are not modeled yet, and should follow the
+same shape. StoreProfile and DigitalCreatorProfile are the ones to look at
+first: neither can reuse ConsultancyProfile's
+denormalize-subscription-onto-the-profile pattern unmodified — StoreProfile
+because a store owns many `Product` documents, not one piece of content
+(see store-plan.md's "core problem" section); DigitalCreatorProfile
+because Digital's discovery is a flat cross-creator feed with no
+store-first step to hide behind, solved with a two-hop `$lookup` anchored
+directly on the product collection instead (see digital-storefront-plan.md's
+"core problem" section).
 
 Every pillar profile shares `userId`, a denormalized-but-live-checked
 `currentSubscription`, `isVerified`, and a pointer at its latest

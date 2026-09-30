@@ -4,6 +4,7 @@ import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
   createAdmin,
+  createCustomerCare,
   createContactConnection,
   generateToken,
 } from "../setup/fixtures";
@@ -273,5 +274,33 @@ describe("POST /api/messages/:id/report and GET /api/messages/reports", () => {
     expect(adminRes.body.data[0].reason).toBe("This felt harassing");
 
     expect(await Message.countDocuments()).toBe(1); // reporting never deletes the message
+  });
+
+  it("lets customer_care view the report queue", async () => {
+    const me = await createUser();
+    const contact = await createUser();
+    await createContactConnection(me, contact);
+    const token = generateToken(me);
+    const customerCare = await createCustomerCare();
+
+    const started = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ userId: contact.id });
+    const sent = await request(app)
+      .post(`/api/conversations/${started.body.id}/messages`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ body: "something reportable" });
+    await request(app)
+      .post(`/api/messages/${sent.body._id}/report`)
+      .set("Authorization", `Bearer ${generateToken(contact)}`)
+      .send({ reason: "This felt harassing" });
+
+    const res = await request(app)
+      .get("/api/messages/reports")
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
   });
 });

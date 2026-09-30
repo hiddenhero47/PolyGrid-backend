@@ -3,13 +3,24 @@ import mongoose from "mongoose";
 import Stripe from "stripe";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createAdmin, createActiveJob, createPlan, generateToken } from "../setup/fixtures";
+import {
+  createUser,
+  createAdmin,
+  createActiveJob,
+  createPlan,
+  createUserWithActiveSubscription,
+  createDigitalCreatorProfile,
+  createDigitalProduct,
+  createDigitalPurchase,
+  generateToken,
+} from "../setup/fixtures";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../../src/models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { Job } from "../../src/models/jobModel";
 import { Subscription } from "../../src/models/subscriptionModel";
 import { User } from "../../src/models/userModel";
 import { PLAN_TIER } from "../../src/models/planModel";
+import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
 
 const app = createApp();
 
@@ -251,6 +262,69 @@ describe("POST /api/payments/intent — validation (no Stripe network calls)", (
       expect(res.status).toBe(400);
     });
   });
+
+  describe("targetType: DigitalPurchase", () => {
+    it("requires a valid targetId", async () => {
+      const user = await createUser();
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .send({ targetType: "DigitalPurchase", targetId: "not-an-id" });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("404s for an unknown, inactive, unverified, or unsubscribed product", async () => {
+      const user = await createUser();
+      const creatorUser = await createUser();
+      const profile = await createDigitalCreatorProfile({ user: creatorUser });
+      const product = await createDigitalProduct({ creator: profile }); // creator has no subscription
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+      expect(res.status).toBe(404);
+    });
+
+    it("blocks a creator from buying their own product", async () => {
+      const creatorUser = await createUserWithActiveSubscription();
+      const profile = await createDigitalCreatorProfile({
+        user: creatorUser,
+        currentSubscription: creatorUser.currentSubscription,
+        isVerified: true,
+      });
+      const product = await createDigitalProduct({ creator: profile });
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(creatorUser)}`)
+        .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("blocks a duplicate purchase, whether the first is pending or already successful", async () => {
+      const creatorUser = await createUserWithActiveSubscription();
+      const profile = await createDigitalCreatorProfile({
+        user: creatorUser,
+        currentSubscription: creatorUser.currentSubscription,
+        isVerified: true,
+      });
+      const product = await createDigitalProduct({ creator: profile });
+      const buyer = await createUser();
+      await createDigitalPurchase({ product, buyer, creator: profile, status: DIGITAL_PURCHASE_STATUS.SUCCESS });
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(buyer)}`)
+        .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+      expect(res.status).toBe(400);
+    });
+  });
 });
 
 // generateTestHeaderString is pure local HMAC signing (no network) — this
@@ -409,5 +483,52 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
 
     const updatedUser = await User.findById(user.id);
     expect(updatedUser?.currentSubscription?.toString()).toBe(subscriptionId);
+  });
+
+  maybeIt("buys a digital product end-to-end", async () => {
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    const intentRes = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(intentRes.status).toBe(201);
+    const purchaseId = intentRes.body.purchaseId;
+
+    let purchase = await DigitalPurchase.findById(purchaseId);
+    expect(purchase?.status).toBe("pending");
+
+    const payment = await Payment.findById(intentRes.body.paymentId);
+
+    const liveStripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+    const confirmed = await liveStripe.paymentIntents.confirm(payment!.providerPaymentId as string, {
+      payment_method: "pm_card_visa",
+    });
+    expect(confirmed.status).toBe("succeeded");
+
+    const webhookRes = await signedWebhookRequest({
+      type: "payment_intent.succeeded",
+      data: { object: { id: confirmed.id, metadata: { paymentId: payment!.id } } },
+    });
+    expect(webhookRes.status).toBe(200);
+
+    await waitFor(async () => (await DigitalPurchase.findById(purchaseId))?.status === "success");
+
+    purchase = await DigitalPurchase.findById(purchaseId);
+    expect(purchase?.status).toBe("success");
+
+    // The grant this just produced downloads immediately.
+    const download = await request(app)
+      .get(`/api/digital-products/${product.id}/download`)
+      .set("Authorization", `Bearer ${generateToken(buyer)}`);
+    expect(download.status).toBe(200);
   });
 });
