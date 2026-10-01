@@ -43,6 +43,8 @@ export const toPublicDigitalCreatorProfile = (profile: IDigitalCreatorProfile) =
   city: profile.city,
   links: profile.links,
   avatar: profile.avatar ? toPublicMediaFile(profile.avatar) : undefined,
+  ratingAverage: profile.ratingAverage,
+  ratingCount: profile.ratingCount,
   createdAt: profile.createdAt,
 });
 

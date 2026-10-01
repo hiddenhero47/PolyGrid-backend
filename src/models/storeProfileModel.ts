@@ -55,6 +55,10 @@ export interface IStoreProfile extends Document {
   city?: string;
   links: IProfileLink[];
   logo?: IMediaFile;
+  // Running totals maintained by reviewController.applyReviewToProfile —
+  // see reviewModel.ts. Never written to directly anywhere else.
+  ratingAverage: number;
+  ratingCount: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -95,6 +99,8 @@ const storeProfileSchema = new Schema<IStoreProfile>(
       validate: { validator: validateLinkCount, message: `A profile can have at most ${MAX_PROFILE_LINKS} links` },
     },
     logo: { type: mediaFileSchema },
+    ratingAverage: { type: Number, default: 0, min: 0, max: 5 },
+    ratingCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true },
 );

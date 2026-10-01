@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { ConsultancyProfile } from "../models/consultancyProfileModel";
 import { StoreProfile } from "../models/storeProfileModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
+import { ContractorProfile } from "../models/contractorProfileModel";
 
 // Every pillar business profile model, keyed by the string Verification's
 // polymorphic profileType/refPath uses to identify it. Add the next pillar
@@ -17,6 +18,7 @@ export const PROFILE_TYPE = {
   CONSULTANCY: "ConsultancyProfile",
   STORE: "StoreProfile",
   DIGITAL_CREATOR: "DigitalCreatorProfile",
+  CONTRACTOR: "ContractorProfile",
 } as const;
 export type ProfileType = (typeof PROFILE_TYPE)[keyof typeof PROFILE_TYPE];
 
@@ -25,7 +27,30 @@ export const PROFILE_MODEL_REGISTRY: Record<ProfileType, mongoose.Model<any>> = 
   [PROFILE_TYPE.CONSULTANCY]: ConsultancyProfile,
   [PROFILE_TYPE.STORE]: StoreProfile,
   [PROFILE_TYPE.DIGITAL_CREATOR]: DigitalCreatorProfile,
+  [PROFILE_TYPE.CONTRACTOR]: ContractorProfile,
 };
 
 export const isKnownProfileType = (value: unknown): value is ProfileType =>
   typeof value === "string" && Object.values(PROFILE_TYPE).includes(value as ProfileType);
+
+// Which pillar profile (if any) a given userId owns — reviewController
+// uses this to figure out who actually earns a review coming from a
+// completed Job, without the Job itself needing to know or trust a
+// client-supplied profileId. Checks every registry entry rather than
+// trusting Job.jobType, since nothing currently guarantees a Job created
+// through the generic POST /api/jobs (Direct Hire has no dedicated
+// "hire" endpoint of its own) actually has the right jobType set.
+export const findProfileByUserId = async (
+  userId: mongoose.Types.ObjectId | string,
+): Promise<{ profileType: ProfileType; profileId: mongoose.Types.ObjectId } | null> => {
+  for (const [profileType, Model] of Object.entries(PROFILE_MODEL_REGISTRY) as [
+    ProfileType,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mongoose.Model<any>,
+  ][]) {
+    const profile = await Model.findOne({ userId }).select("_id");
+    if (profile) return { profileType, profileId: profile._id as mongoose.Types.ObjectId };
+  }
+
+  return null;
+};

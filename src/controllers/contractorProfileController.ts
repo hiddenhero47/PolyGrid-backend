@@ -2,17 +2,17 @@ import mongoose from "mongoose";
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import {
-  ConsultancyProfile,
-  IConsultancyProfile,
+  ContractorProfile,
+  IContractorProfile,
   IPortfolioItem,
-  IPortfolioMedia,
   IProfileLink,
-  SPECIALIZATION,
-  Specialization,
+  CONTRACTOR_SPECIALTY,
+  ContractorSpecialty,
   MAX_PORTFOLIO_ITEMS,
   MAX_MEDIA_PER_ITEM,
   MAX_PROFILE_LINKS,
-} from "../models/consultancyProfileModel";
+} from "../models/contractorProfileModel";
+import { IPortfolioMedia } from "../models/portfolioItem";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
@@ -25,22 +25,17 @@ const slugify = (value: string): string =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
 
-// Appends a short random suffix on collision rather than failing the
-// request outright — two "John Smith"s are a certainty at any real scale.
 const generateUniqueSlug = async (base: string): Promise<string> => {
-  const root = slugify(base) || "consultant";
+  const root = slugify(base) || "contractor";
   let slug = root;
 
-  while (await ConsultancyProfile.exists({ slug })) {
+  while (await ContractorProfile.exists({ slug })) {
     slug = `${root}-${Math.random().toString(36).slice(2, 6)}`;
   }
 
   return slug;
 };
 
-// storagePath is a server filesystem detail (needed internally to delete a
-// file later — see deleteStoredFile calls below) with no business leaving
-// the server, same reasoning toPublicUser already applies to User.avatar.
 const toPublicMedia = (media: IPortfolioMedia) => ({
   fileName: media.fileName,
   mime: media.mime,
@@ -58,32 +53,24 @@ const toPublicPortfolioItem = (item: IPortfolioItem) => ({
   completedAt: item.completedAt,
 });
 
-const toPublicProfile = (profile: IConsultancyProfile) => ({
+export const toPublicContractorProfile = (profile: IContractorProfile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
   slug: profile.slug,
   headline: profile.headline,
   bio: profile.bio,
-  specializations: profile.specializations,
+  specialties: profile.specialties,
   country: profile.country,
   city: profile.city,
   yearsOfExperience: profile.yearsOfExperience,
   links: profile.links,
   portfolio: profile.portfolio.map(toPublicPortfolioItem),
-  services: profile.services,
-  mentorship: profile.mentorship,
   ratingAverage: profile.ratingAverage,
   ratingCount: profile.ratingCount,
   createdAt: profile.createdAt,
 });
 
-// External links only — see IProfileLink's own comment in the model for
-// why raw contact details are deliberately never a field here at all.
-// Malformed entries (missing label, or a url that doesn't look like one)
-// are silently dropped rather than failing the whole request, same
-// "filter, don't hard-reject" instinct already used for `specializations`
-// in this same controller.
 const filterValidLinks = (input: unknown): IProfileLink[] => {
   if (!Array.isArray(input)) return [];
 
@@ -102,29 +89,27 @@ const filterValidLinks = (input: unknown): IProfileLink[] => {
     .map((link) => ({ label: (link.label as string).trim(), url: (link.url as string).trim() }));
 };
 
-// @desc    Create my PolyGrid Engineering profile
-// @route   POST /api/consultancy-profiles
+// @desc    Create my PolyGrid Tenders contractor profile
+// @route   POST /api/contractor-profiles
 // @access  Private — one per user
-export const createProfile = asyncHandler(async (req: Request, res: Response) => {
+export const createContractorProfile = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
 
-  const existing = await ConsultancyProfile.findOne({ userId: requester._id });
+  const existing = await ContractorProfile.findOne({ userId: requester._id });
   if (existing) {
     res.status(400);
-    throw new Error("You already have a consultancy profile");
+    throw new Error("You already have a contractor profile");
   }
 
-  const { headline, bio, specializations, country, city, yearsOfExperience, links } = req.body;
+  const { headline, bio, specialties, country, city, yearsOfExperience, links } = req.body;
 
   if (!headline || !country) {
     res.status(400);
     throw new Error("Please add a headline and country");
   }
 
-  const resolvedSpecializations = Array.isArray(specializations)
-    ? specializations.filter((s): s is Specialization =>
-        Object.values(SPECIALIZATION).includes(s),
-      )
+  const resolvedSpecialties = Array.isArray(specialties)
+    ? specialties.filter((s): s is ContractorSpecialty => Object.values(CONTRACTOR_SPECIALTY).includes(s))
     : [];
 
   const resolvedLinks = filterValidLinks(links);
@@ -133,58 +118,48 @@ export const createProfile = asyncHandler(async (req: Request, res: Response) =>
     throw new Error(`You can have at most ${MAX_PROFILE_LINKS} links`);
   }
 
-  const profile = await ConsultancyProfile.create({
+  const profile = await ContractorProfile.create({
     userId: requester._id,
     currentSubscription: requester.currentSubscription,
     slug: await generateUniqueSlug(requester.fullName),
     headline,
     bio,
-    specializations: resolvedSpecializations,
+    specialties: resolvedSpecialties,
     country,
     city,
     yearsOfExperience,
     links: resolvedLinks,
   });
 
-  res.status(201).json(toPublicProfile(profile));
+  res.status(201).json(toPublicContractorProfile(profile));
 });
 
 // @desc    Get my own profile (full detail regardless of verified/subscribed)
-// @route   GET /api/consultancy-profiles/me
+// @route   GET /api/contractor-profiles/me
 // @access  Private
-export const getMyProfile = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+export const getMyContractorProfile = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
 
   if (!profile) {
     res.status(404);
-    throw new Error("You don't have a consultancy profile yet");
+    throw new Error("You don't have a contractor profile yet");
   }
 
-  res.status(200).json(toPublicProfile(profile));
+  res.status(200).json(toPublicContractorProfile(profile));
 });
 
 // @desc    Update my profile
-// @route   PATCH /api/consultancy-profiles/me
+// @route   PATCH /api/contractor-profiles/me
 // @access  Private
-export const updateMyProfile = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+export const updateMyContractorProfile = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
 
   if (!profile) {
     res.status(404);
-    throw new Error("You don't have a consultancy profile yet");
+    throw new Error("You don't have a contractor profile yet");
   }
 
-  const {
-    headline,
-    bio,
-    specializations,
-    country,
-    city,
-    yearsOfExperience,
-    links,
-    services,
-    mentorship,
-  } = req.body;
+  const { headline, bio, specialties, country, city, yearsOfExperience, links } = req.body;
 
   if (headline) profile.headline = headline;
   if (bio !== undefined) profile.bio = bio;
@@ -192,9 +167,9 @@ export const updateMyProfile = asyncHandler(async (req: Request, res: Response) 
   if (city !== undefined) profile.city = city;
   if (yearsOfExperience !== undefined) profile.yearsOfExperience = yearsOfExperience;
 
-  if (Array.isArray(specializations)) {
-    profile.specializations = specializations.filter((s): s is Specialization =>
-      Object.values(SPECIALIZATION).includes(s),
+  if (Array.isArray(specialties)) {
+    profile.specialties = specialties.filter((s): s is ContractorSpecialty =>
+      Object.values(CONTRACTOR_SPECIALTY).includes(s),
     );
   }
 
@@ -207,47 +182,34 @@ export const updateMyProfile = asyncHandler(async (req: Request, res: Response) 
     profile.links = resolvedLinks;
   }
 
-  if (Array.isArray(services)) {
-    profile.services = services as unknown as typeof profile.services;
-  }
-
-  if (mentorship && typeof mentorship === "object") {
-    profile.mentorship = { ...profile.mentorship, ...mentorship };
-  }
-
   await profile.save();
 
-  res.status(200).json(toPublicProfile(profile));
+  res.status(200).json(toPublicContractorProfile(profile));
 });
 
-// @desc    Search/list consultants — only those verified AND currently
-//          subscribed show up here (product-overview.md's global
-//          subscription rule), even though a profile page itself is always
-//          directly reachable by id/slug once created.
-// @route   GET /api/consultancy-profiles
+// @desc    Search/list contractors — only those verified AND currently
+//          subscribed show up here, even though a profile page itself is
+//          always directly reachable by id/slug once created. Same rule
+//          as searchConsultants.
+// @route   GET /api/contractor-profiles
 // @access  Public
-export const searchConsultants = asyncHandler(async (req: Request, res: Response) => {
+export const searchContractors = asyncHandler(async (req: Request, res: Response) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const skip = (page - 1) * limit;
 
-  const { specialization, country } = req.query as { specialization?: string; country?: string };
+  const { specialty, country } = req.query as { specialty?: string; country?: string };
 
   const match: Record<string, unknown> = { isVerified: true, currentSubscription: { $ne: null } };
 
-  if (specialization && Object.values(SPECIALIZATION).includes(specialization as Specialization)) {
-    match.specializations = specialization;
+  if (specialty && Object.values(CONTRACTOR_SPECIALTY).includes(specialty as ContractorSpecialty)) {
+    match.specialties = specialty;
   }
 
   if (country) {
     match.country = String(country).toUpperCase();
   }
 
-  // A single $lookup against Subscription directly (currentSubscription is
-  // denormalized onto the profile for exactly this) rather than a two-hop
-  // join through User — subscription active-ness is time-based
-  // (expiresAt), so it's checked fresh here, never from a stored boolean
-  // that could go stale as time passes with no write to trigger it.
   const pipeline = [
     { $match: match },
     {
@@ -269,38 +231,29 @@ export const searchConsultants = asyncHandler(async (req: Request, res: Response
   ];
 
   const [data, totalResult] = await Promise.all([
-    ConsultancyProfile.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
-    ConsultancyProfile.aggregate([...pipeline, { $count: "total" }]),
+    ContractorProfile.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
+    ContractorProfile.aggregate([...pipeline, { $count: "total" }]),
   ]);
 
   const total = totalResult[0]?.total ?? 0;
 
   res.status(200).json({
-    data: data.map((doc) => toPublicProfile(doc as IConsultancyProfile)),
+    data: data.map((doc) => toPublicContractorProfile(doc as IContractorProfile)),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
 
-// @desc    View a single consultant's profile (their "mini-site") — the URL
-//          itself always resolves (a 404 would make an old bookmarked/
-//          shared link look like the consultant never existed), but the
-//          actual profile content is only served while they're currently
-//          subscribed — checked live against Subscription, same as
-//          searchConsultants, never from the denormalized boolean, so this
-//          flips the instant a subscription lapses with no write needed.
-//          Otherwise it's the same gap searchConsultants already closes:
-//          a direct link would let an unsubscribed consultant stay fully
-//          visible to anyone who already has the URL, with no incentive
-//          left to resubscribe. `getMyProfile` (GET /me) is unaffected —
-//          an owner always sees their own full profile regardless.
-// @route   GET /api/consultancy-profiles/:idOrSlug
+// @desc    View a single contractor's profile — the URL always resolves,
+//          but content is only served while they're currently subscribed,
+//          checked live. Same reasoning as getProfile (ConsultancyProfile).
+// @route   GET /api/contractor-profiles/:idOrSlug
 // @access  Public
-export const getProfile = asyncHandler(async (req: Request, res: Response) => {
+export const getContractor = asyncHandler(async (req: Request, res: Response) => {
   const idOrSlug = req.params.idOrSlug as string;
 
   const profile = mongoose.Types.ObjectId.isValid(idOrSlug)
-    ? await ConsultancyProfile.findById(idOrSlug)
-    : await ConsultancyProfile.findOne({ slug: idOrSlug });
+    ? await ContractorProfile.findById(idOrSlug)
+    : await ContractorProfile.findOne({ slug: idOrSlug });
 
   if (!profile) {
     res.status(404);
@@ -316,7 +269,7 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  res.status(200).json(toPublicProfile(profile));
+  res.status(200).json(toPublicContractorProfile(profile));
 });
 
 interface PortfolioItemPayload {
@@ -327,12 +280,6 @@ interface PortfolioItemPayload {
   completedAt?: string;
 }
 
-// Portfolio images are public — the whole point is a shareable mini-site —
-// so an individual bad file is never fatal to the request, same as avatar
-// uploads elsewhere: whatever's savable gets saved, and errorLogs come back
-// as a non-blocking `mediaWarnings` field instead of being silently
-// dropped, so the caller actually knows if some of what they attached
-// didn't make it in.
 const saveMediaFiles = async (
   req: Request,
 ): Promise<{ media: IPortfolioMedia[]; warnings: string[] }> => {
@@ -351,14 +298,14 @@ const saveMediaFiles = async (
 };
 
 // @desc    Add a new portfolio item (with its initial media, if any)
-// @route   POST /api/consultancy-profiles/me/portfolio
+// @route   POST /api/contractor-profiles/me/portfolio
 // @access  Private
 export const addPortfolioItem = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
 
   if (!profile) {
     res.status(404);
-    throw new Error("You don't have a consultancy profile yet");
+    throw new Error("You don't have a contractor profile yet");
   }
 
   if (profile.portfolio.length >= MAX_PORTFOLIO_ITEMS) {
@@ -380,11 +327,6 @@ export const addPortfolioItem = asyncHandler(async (req: Request, res: Response)
     throw new Error(`You can attach at most ${MAX_MEDIA_PER_ITEM} images to a single portfolio item`);
   }
 
-  // Checked here, not just left to the schema's own `completedAt`
-  // validator — that one only runs at `profile.save()`, by which point a
-  // rejection would surface as an uncaught Mongoose ValidationError (a
-  // 500) rather than a clean 400, and any files already saved above would
-  // need rolling back. Caught early instead, before anything touches disk.
   if (startedAt && completedAt && new Date(startedAt) > new Date(completedAt)) {
     res.status(400);
     throw new Error("completedAt must be on or after startedAt");
@@ -404,20 +346,20 @@ export const addPortfolioItem = asyncHandler(async (req: Request, res: Response)
   await profile.save();
 
   res.status(201).json({
-    ...toPublicProfile(profile),
+    ...toPublicContractorProfile(profile),
     ...(mediaWarnings.length > 0 ? { mediaWarnings } : {}),
   });
 });
 
 // @desc    Add more media to an existing portfolio item
-// @route   POST /api/consultancy-profiles/me/portfolio/:itemId/media
+// @route   POST /api/contractor-profiles/me/portfolio/:itemId/media
 // @access  Private
 export const addPortfolioMedia = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
 
   if (!profile) {
     res.status(404);
-    throw new Error("You don't have a consultancy profile yet");
+    throw new Error("You don't have a contractor profile yet");
   }
 
   const item = profile.portfolio.id(req.params.itemId as string);
@@ -445,21 +387,20 @@ export const addPortfolioMedia = asyncHandler(async (req: Request, res: Response
   await profile.save();
 
   res.status(201).json({
-    ...toPublicProfile(profile),
+    ...toPublicContractorProfile(profile),
     ...(mediaWarnings.length > 0 ? { mediaWarnings } : {}),
   });
 });
 
-// @desc    Remove one media file from a portfolio item (keeps the item
-//          itself, unlike removePortfolioItem below)
-// @route   DELETE /api/consultancy-profiles/me/portfolio/:itemId/media/:fileName
+// @desc    Remove one media file from a portfolio item
+// @route   DELETE /api/contractor-profiles/me/portfolio/:itemId/media/:fileName
 // @access  Private
 export const removePortfolioMedia = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
 
   if (!profile) {
     res.status(404);
-    throw new Error("You don't have a consultancy profile yet");
+    throw new Error("You don't have a contractor profile yet");
   }
 
   const item = profile.portfolio.id(req.params.itemId as string);
@@ -481,18 +422,18 @@ export const removePortfolioMedia = asyncHandler(async (req: Request, res: Respo
   item.media = item.media.filter((m) => m.fileName !== fileName) as typeof item.media;
   await profile.save();
 
-  res.status(200).json(toPublicProfile(profile));
+  res.status(200).json(toPublicContractorProfile(profile));
 });
 
 // @desc    Remove a portfolio item and every media file it owns
-// @route   DELETE /api/consultancy-profiles/me/portfolio/:itemId
+// @route   DELETE /api/contractor-profiles/me/portfolio/:itemId
 // @access  Private
 export const removePortfolioItem = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
 
   if (!profile) {
     res.status(404);
-    throw new Error("You don't have a consultancy profile yet");
+    throw new Error("You don't have a contractor profile yet");
   }
 
   const item = profile.portfolio.id(req.params.itemId as string);
@@ -502,12 +443,10 @@ export const removePortfolioItem = asyncHandler(async (req: Request, res: Respon
     throw new Error("Portfolio item not found");
   }
 
-  // Without this, deleting the item would leave every one of its images
-  // orphaned on disk forever — nothing else ever cleans up a public file.
   await Promise.all(item.media.map((media) => deleteStoredFile(media.storagePath)));
 
   item.deleteOne();
   await profile.save();
 
-  res.status(200).json(toPublicProfile(profile));
+  res.status(200).json(toPublicContractorProfile(profile));
 });

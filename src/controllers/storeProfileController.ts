@@ -46,6 +46,8 @@ export const toPublicStoreProfile = (profile: IStoreProfile) => ({
   city: profile.city,
   links: profile.links,
   logo: profile.logo ? toPublicMediaFile(profile.logo) : undefined,
+  ratingAverage: profile.ratingAverage,
+  ratingCount: profile.ratingCount,
   createdAt: profile.createdAt,
 });
 
