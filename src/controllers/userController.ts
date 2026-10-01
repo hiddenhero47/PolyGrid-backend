@@ -16,6 +16,7 @@ import {
   TOKENS,
 } from "../models/userModel";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import { sendTemplatedEmail } from "../helpers/emailSender";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -500,11 +501,17 @@ export const requestReset = asyncHandler(async (req: Request, res: Response) => 
     { expiresIn: "10m" },
   );
 
-  // TODO: wire up transactional email once an email provider is chosen —
-  // for now the reset link/token is returned in non-production responses so
-  // the flow can be exercised end-to-end without one.
   const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${token}`;
 
+  await sendTemplatedEmail({
+    to: user.email,
+    subject: "Reset Your Password",
+    template: "forgotPassword",
+    variables: { name: user.fullName, resetUrl, expiresIn: "10 minutes" },
+  });
+
+  // Still included outside production — lets the flow be exercised
+  // end-to-end without real Mailgun credentials configured locally.
   res.status(200).json(
     process.env.NODE_ENV === "production"
       ? genericResponse

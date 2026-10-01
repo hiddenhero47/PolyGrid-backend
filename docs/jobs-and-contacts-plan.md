@@ -71,13 +71,13 @@ visible.
 `PATCH /:id/stages/:stageId/done` — provider only. `.../verify` — client
 only, and only once `isDone` — the client verifies *completed* work, not a
 promise. Verifying a stage is the only thing that moves money in the
-model: `amountDisposed` (released to the provider) and
+model: `amountDisbursed` (released to the provider) and
 `platformFeeCollected` (PolyGrid's cut) both increment by that stage's
 share of `totalAmount`, split by `platformFeePercent` — which is
 **snapshotted onto the job at creation**, so changing the platform's
 default fee later doesn't retroactively change an existing job's math. Once
 every stage is verified, `status` auto-flips to `completed`. `amountPaid`
-(the client's total *into* escrow, as opposed to `amountDisposed` *out of*
+(the client's total *into* escrow, as opposed to `amountDisbursed` *out of*
 it) isn't touched by verification at all — see payments below.
 
 ### Contract files — reuses the file-upload system as-is
@@ -94,7 +94,7 @@ to check access and mint a signed link, then `GET /private/view/...`.
 
 ### Payments — a ledger, not (yet) a payment gateway
 
-`amountPaid`/`amountDisposed`/`platformFeeCollected` on the job are the
+`amountPaid`/`amountDisbursed`/`platformFeeCollected` on the job are the
 running totals; the actual line-item history now lives in the unified
 `Payment` model (see [payments-plan.md](payments-plan.md)) — every job
 payment, however it's eventually collected, is `targetType: 'Job'`. The
@@ -102,6 +102,81 @@ interim admin-only `POST /:id/payments` both bumps `amountPaid` and writes
 a `Payment` record (`provider: 'manual'`) — same stand-in pattern as
 `subscriptionController.grantSubscription`, to be replaced by a real
 gateway webhook doing the same two things once one is wired up.
+`GET /:id/payments` (admin/customer_care) is the admin's "every payment
+made toward this job" view — not a field on `Job` at all, since
+`Payment`'s `{targetType, targetId}` is already a compound index, so this
+is one indexed query rather than something denormalized that could drift.
+
+### Refunds and payouts — the requesting party asks, an admin decides
+
+Neither has a real gateway behind it yet (no Stripe refund API call, no
+Stripe Connect/bank-transfer payout rail) — approving either is an admin
+logging money that already moved outside the system some other way (bank
+transfer, the Stripe dashboard directly), exactly like `POST /:id/payments`
+already does for money coming in. What's new here is the *shape*: this
+isn't an admin unilaterally recording an action — it's the party who'd
+actually receive the money (client for a refund, provider for a payout)
+asking for it, sitting `PAYMENT_REQUEST_STATUS.PENDING` until an admin
+approves or declines. Nothing about the job's balance or status changes
+on request — only a decision does.
+
+- `POST /:id/refund-requests` — `{amount, reason}`, **client-only**.
+  Fails at the "is there even anything to refund" level *first* — before
+  looking at the requested amount at all — if `amountPaid - totalRefunded
+  <= 0`, then rejects a specific request that would push `totalRefunded`
+  past `amountPaid`, and blocks a second request while one is already
+  pending. Appends `{amount, reason, status: 'pending', requestedBy,
+  requestedAt}` to `Job.refunds[]` — nothing else changes yet.
+- `GET /api/jobs/refund-requests` (admin/customer_care, read-only) — every
+  job with a pending refund request, flattened to just that entry, same
+  shape as `GET /api/jobs/disputes`.
+- `PATCH /:id/refund-requests/:refundId/approve` (admin-only) — re-checks
+  the same amount-vs-`amountPaid` bound at decision time (other refunds
+  may have been approved in between), then bumps `totalRefunded` and
+  **closes the job** (`status: 'closed'`, `closedAt` set) — but only the
+  *first* approved refund does that transition; a later, corrective
+  request on an already-closed job just appends a second entry without
+  re-closing it or resetting `closedAt`. `refunds[]` stays a history for
+  exactly this reason — the brief's own example is "the admin messed up,
+  so we add another entry instead of overwriting the first." Emails the
+  client (`paymentRequestDecision` template — see
+  [email-plan.md](email-plan.md)).
+- `PATCH /:id/refund-requests/:refundId/decline` (admin-only) — requires a
+  `declineReason`, so the client isn't left guessing why. Changes nothing
+  about the job's balance or status; the request itself becomes the
+  client's own record of what happened (their "payment request log" —
+  visible on the job they can already read via `GET /api/jobs/:id`, no
+  separate endpoint needed) — and they're emailed the decline reason
+  directly too, not just left to go check.
+- `POST /:id/payout-requests` — `{amount?, note?}`, **provider-only**.
+  `amount` is optional — omit it to ask for whatever's available, resolved
+  to a concrete number only once approved. Available is computed as
+  `min(amountDisbursed, amountPaid) - amountPaidOut`, not `amountDisbursed`
+  alone: `verifyStage` releases a stage's share of `totalAmount` regardless
+  of how much has actually been paid into escrow yet (a real gap — flagged
+  here, not silently patched, since fixing it properly means deciding
+  whether `verifyStage` itself should block on `amountPaid`), so taking the
+  smaller of the two is a defensive floor on what this will ever claim is
+  payable. Fails at the "is anything even available" level *first* — if
+  `available <= 0` — before ever looking at a specific requested amount,
+  same as the refund-request check above. Also blocked outright on a
+  disputed, cancelled, or closed job, and while a request is already
+  pending.
+- `GET /api/jobs/payout-requests` (admin/customer_care, read-only) — same
+  shape as the refund queue, plus a freshly recomputed `available` per job
+  (not just what was true at request time — another payout may have been
+  approved since).
+- `PATCH /:id/payout-requests/:payoutId/approve` (admin-only) — re-checks
+  `available` at decision time, resolves the final `amount` (the admin's
+  own `amount` in the body, else the request's, else everything available)
+  and writes it back onto the request itself, then bumps `amountPaidOut`.
+  Unlike a refund, **never changes the job's status** — a job can be paid
+  out stage by stage while still active. Emails the provider.
+- `PATCH /:id/payout-requests/:payoutId/decline` (admin-only) — same
+  `declineReason` requirement as a refund decline.
+- `JOB_STATUS.CLOSED` is a terminal status, distinct from `cancelled`
+  (never confirmed, no money ever moved) and `completed` (every stage paid
+  out as planned).
 
 ## Deliberately simplified for v1
 
@@ -120,8 +195,9 @@ gateway webhook doing the same two things once one is wired up.
   per agreement over email") and appends it to `disputeHistory` — a job can
   be disputed more than once over its life, so this is a history, not a
   single latest-resolution field, same instinct as `oldStages`. Still no
-  in-app mediation/evidence/refund *workflow* — that's a real feature of
-  its own, not a field on this model.
+  in-app mediation/evidence workflow — refunds/payouts (above) give an
+  admin a bookkeeping tool to act on what a dispute resolution decided,
+  but nothing here automates that decision or moves real money on its own.
 - **Cancellation only works pre-confirmation.** Once both parties have
   confirmed (and possibly put money in escrow), a unilateral cancel isn't
   safe — a dispute is the mechanism for problems on an active job instead.

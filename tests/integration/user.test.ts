@@ -1,8 +1,17 @@
+// Mocked exactly like house-maduekwe-backend's own test suite mocks its
+// emailSender — no real Mailgun call is ever made here, and requestReset's
+// (only) send is asserted against the mock directly below.
+jest.mock("../../src/helpers/emailSender", () => ({
+  sendTemplatedEmail: jest.fn().mockResolvedValue({}),
+  loadTemplates: jest.fn().mockResolvedValue(undefined),
+}));
+
 import request from "supertest";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import { createUser, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
+import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 import bcrypt from "bcryptjs";
 
 const app = createApp();
@@ -13,6 +22,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await clearTestDB();
+  jest.clearAllMocks();
 });
 
 afterAll(async () => {
@@ -289,6 +299,9 @@ describe("password reset flow", () => {
       .send({ email: user.email });
     expect(requestRes.status).toBe(200);
     expect(requestRes.body.token).toEqual(expect.any(String));
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: user.email, template: "forgotPassword" }),
+    );
 
     const resetRes = await request(app)
       .post("/api/users/reset-password")
@@ -301,13 +314,14 @@ describe("password reset flow", () => {
     expect(loginRes.status).toBe(200);
   });
 
-  it("does not reveal whether an account exists", async () => {
+  it("does not reveal whether an account exists, and never emails a non-account", async () => {
     const res = await request(app)
       .post("/api/users/request-reset")
       .send({ email: "nobody@example.com" });
 
     expect(res.status).toBe(200);
     expect(res.body.token).toBeUndefined();
+    expect(sendTemplatedEmail).not.toHaveBeenCalled();
   });
 
   it("rejects an invalid reset token", async () => {

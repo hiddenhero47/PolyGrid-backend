@@ -16,6 +16,12 @@ export const JOB_STATUS = {
   COMPLETED: "completed",
   DISPUTED: "disputed",
   CANCELLED: "cancelled",
+  // Distinct from CANCELLED (never confirmed, no money moved) and
+  // COMPLETED (every stage paid out as planned) — CLOSED is what a job
+  // becomes once an admin issues a refund on it (applyForRefund). A
+  // refunded job shouldn't keep accepting stage verification/payment
+  // activity as if nothing happened.
+  CLOSED: "closed",
 } as const;
 export type JobStatus = (typeof JOB_STATUS)[keyof typeof JOB_STATUS];
 
@@ -69,6 +75,54 @@ export interface IAmountChange {
   changedAt: Date;
 }
 
+// Shared by IRefund/IPayout — both are a request the requesting party
+// makes, sitting PENDING until an admin actually decides it. No real
+// Stripe refund API call or Stripe Connect/bank-transfer payout rail
+// exists yet, so "approved" means the admin did it some other way
+// (bank transfer, the Stripe dashboard directly) and this now reflects
+// that; "declined" always carries why, so the requester isn't just left
+// guessing.
+export const PAYMENT_REQUEST_STATUS = {
+  PENDING: "pending",
+  APPROVED: "approved",
+  DECLINED: "declined",
+} as const;
+export type PaymentRequestStatus = (typeof PAYMENT_REQUEST_STATUS)[keyof typeof PAYMENT_REQUEST_STATUS];
+
+// The client asking for money back. Kept as a history array, never a
+// single overwritten field — same "never overwrite" instinct as
+// oldStages/disputeHistory. A second, corrective request (or a second
+// legitimate ask later) gets a second entry, not an edit to the first.
+export interface IRefund {
+  _id: Types.ObjectId;
+  amount: number;
+  reason: string;
+  status: PaymentRequestStatus;
+  requestedBy: Types.ObjectId;
+  requestedAt: Date;
+  decidedBy?: Types.ObjectId;
+  decidedAt?: Date;
+  declineReason?: string;
+}
+
+// The provider asking to be paid their earned-but-undisbursed funds
+// (amountDisbursed minus amountPaidOut). `amount` is optional at request
+// time — "pay out whatever's available" — and gets resolved to a
+// concrete number the moment it's approved (see approvePayoutRequest),
+// so an approved entry always has a real number even if the request
+// itself didn't specify one.
+export interface IPayout {
+  _id: Types.ObjectId;
+  amount?: number;
+  note?: string;
+  status: PaymentRequestStatus;
+  requestedBy: Types.ObjectId;
+  requestedAt: Date;
+  decidedBy?: Types.ObjectId;
+  decidedAt?: Date;
+  declineReason?: string;
+}
+
 export interface IJobParty {
   userId: Types.ObjectId;
   isConfirmed: boolean;
@@ -97,11 +151,21 @@ export interface IJob extends Document {
   amountHistory: IAmountChange[];
   currency: string;
   // Client's total paid in (escrow), provider's total released out, and
-  // PolyGrid's total collected — amountDisposed + platformFeeCollected is
+  // PolyGrid's total collected — amountDisbursed + platformFeeCollected is
   // always the total released from escrow across all verified stages.
   amountPaid: number;
-  amountDisposed: number;
+  amountDisbursed: number;
   platformFeeCollected: number;
+  // Running totals, same "live field alongside a pure audit array" split
+  // amountDisbursed/platformFeeCollected already use — only an *approved*
+  // refund/payout ever touches these, never the act of requesting one.
+  totalRefunded: number;
+  amountPaidOut: number;
+  // DocumentArray (not a plain array) so jobController can look a
+  // specific request up by id with `.id(refundId)`/`.id(payoutId)` to
+  // approve/decline it — same reason `stages` is typed this way.
+  refunds: Types.DocumentArray<IRefund>;
+  payouts: Types.DocumentArray<IPayout>;
   // Snapshotted at creation — a later change to the platform's default fee
   // doesn't retroactively change an existing job's math.
   platformFeePercent: number;
@@ -113,6 +177,7 @@ export interface IJob extends Document {
   isCancelled: boolean;
   cancelledBy?: Types.ObjectId;
   cancelledAt?: Date;
+  closedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -171,6 +236,36 @@ const amountChangeSchema = new Schema<IAmountChange>(
   { _id: false },
 );
 
+const refundSchema = new Schema<IRefund>({
+  amount: { type: Number, required: true, min: 0 },
+  reason: { type: String, required: true },
+  status: {
+    type: String,
+    enum: Object.values(PAYMENT_REQUEST_STATUS),
+    default: PAYMENT_REQUEST_STATUS.PENDING,
+  },
+  requestedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+  requestedAt: { type: Date, default: () => new Date() },
+  decidedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  decidedAt: { type: Date },
+  declineReason: { type: String },
+});
+
+const payoutSchema = new Schema<IPayout>({
+  amount: { type: Number, min: 0 },
+  note: { type: String },
+  status: {
+    type: String,
+    enum: Object.values(PAYMENT_REQUEST_STATUS),
+    default: PAYMENT_REQUEST_STATUS.PENDING,
+  },
+  requestedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+  requestedAt: { type: Date, default: () => new Date() },
+  decidedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  decidedAt: { type: Date },
+  declineReason: { type: String },
+});
+
 const jobPartySchema = new Schema<IJobParty>(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -208,8 +303,12 @@ const jobSchema = new Schema<IJob>(
       },
     },
     amountPaid: { type: Number, default: 0, min: 0 },
-    amountDisposed: { type: Number, default: 0, min: 0 },
+    amountDisbursed: { type: Number, default: 0, min: 0 },
     platformFeeCollected: { type: Number, default: 0, min: 0 },
+    totalRefunded: { type: Number, default: 0, min: 0 },
+    amountPaidOut: { type: Number, default: 0, min: 0 },
+    refunds: { type: [refundSchema], default: [] },
+    payouts: { type: [payoutSchema], default: [] },
     platformFeePercent: { type: Number, required: true, min: 0, max: 100 },
     status: {
       type: String,
@@ -223,6 +322,7 @@ const jobSchema = new Schema<IJob>(
     isCancelled: { type: Boolean, default: false },
     cancelledBy: { type: Schema.Types.ObjectId, ref: "User" },
     cancelledAt: { type: Date },
+    closedAt: { type: Date },
   },
   { timestamps: true },
 );
@@ -231,5 +331,10 @@ jobSchema.index({ "client.userId": 1, status: 1 });
 jobSchema.index({ "provider.userId": 1, status: 1 });
 jobSchema.index({ createdBy: 1 });
 jobSchema.index({ isDispute: 1, createdAt: -1 });
+// The admin queues — every job with at least one pending refund/payout
+// request, same "flag to index, not the whole sub-document" shape as the
+// isDispute index above.
+jobSchema.index({ "refunds.status": 1 });
+jobSchema.index({ "payouts.status": 1 });
 
 export const Job: Model<IJob> = mongoose.model<IJob>("Job", jobSchema);

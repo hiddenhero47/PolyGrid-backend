@@ -7,8 +7,10 @@ Phase 3 (ConsultancyProfile + generic Verification pipeline), Phase 3.1
 (Yup request validation + template-driven Verification), Phase 3.2
 (country/state/city/currency reference data), Phase 3.3 (1:1 chat over
 Socket.IO), Phase 3.4 (customer_care role), Phase 4 (StoreProfile —
-PolyGrid Store's Physical Materials Marketplace), and Phase 4.1
-(DigitalCreatorProfile — PolyGrid Store's Digital Storefront) shipped.**
+PolyGrid Store's Physical Materials Marketplace), Phase 4.1
+(DigitalCreatorProfile — PolyGrid Store's Digital Storefront), and
+Phase 4.2 (Job refunds/payouts + admin payment-history lookup), and
+Phase 4.3 (transactional email via Mailgun) shipped.**
 This doc is
 updated as each phase lands — see the checklist at the bottom for current
 state.
@@ -154,9 +156,14 @@ Structure and conventions are deliberately carried over from
     one — a no-stages job gets one implicit 100%-payment stage, so there's
     only one completion code path), `proposedStages` (a pending revision
     once active — the *other* party must accept), `oldStages` (history,
-    never overwritten), `totalAmount`/`amountPaid`/`amountDisposed`/
+    never overwritten), `totalAmount`/`amountPaid`/`amountDisbursed`/
     `platformFeeCollected`/`platformFeePercent` (snapshotted at creation),
-    `status`, dispute/cancel fields.
+    `totalRefunded`/`amountPaidOut` (running totals, same dual pattern as
+    `amountDisbursed` — only an *approved* request ever moves these, never
+    the act of requesting one) backing `refunds[]`/`payouts[]`
+    (`Types.DocumentArray`, append-only, each entry carrying its own
+    `status: 'pending'|'approved'|'declined'`), `status` (now including
+    `closed`, +`closedAt`), dispute/cancel fields.
   - `src/controllers/jobController.ts` + `routes/jobRoutes.ts` — create,
     confirm, creator-only pre-confirmation edit, stage propose/accept/
     reject, provider-only mark-done, client-only verify (the only thing
@@ -169,7 +176,49 @@ Structure and conventions are deliberately carried over from
     happens by email, deliberately not an in-app chat, see the plan doc),
     creator-only pre-confirmation cancel, admin-only interim
     `POST /:id/payments` (writes to the job ledger *and* a `Payment`
-    record — see below).
+    record — see below), `GET /:id/payments` (admin/customer_care — every
+    `Payment` for this job, off the existing `{targetType, targetId}`
+    index, nothing denormalized). Refunds/payouts are a request-then-
+    decide flow, not a direct admin action: `POST /:id/refund-requests`
+    (client-only) / `POST /:id/payout-requests` (provider-only) each
+    create a `pending` entry with no balance/status effect yet;
+    `GET /api/jobs/refund-requests` / `GET /api/jobs/payout-requests`
+    (admin/customer_care, read-only, same shape as `GET /disputes`) are
+    the admin's working queues; `PATCH .../approve` (admin-only) is the
+    only thing that actually moves `totalRefunded`/`amountPaidOut` — a
+    refund's first approval also closes the job (a later corrective
+    request just appends without re-closing it), a payout never changes
+    job status and resolves `amount` to a concrete number if the request
+    itself omitted one; `PATCH .../decline` (admin-only) requires a
+    `declineReason` and changes nothing else. Payout availability is
+    `min(amountDisbursed, amountPaid) - amountPaidOut`, not
+    `amountDisbursed` alone, since `verifyStage` can release a stage's
+    share regardless of how much has actually been paid into escrow yet —
+    a real gap, flagged not patched. Both `requestRefund`/`requestPayout`
+    fail at the "is there even anything to request" level first — before
+    looking at the specific requested amount at all — if nothing is
+    refundable/available. Every approve/decline emails the requester
+    (see Email below).
+- Email — transactional email via Mailgun, mirroring house-maduekwe-
+  backend's own `emailSender.js` shape exactly. Full design in
+  [email-plan.md](email-plan.md):
+  - `src/config/mailgun.ts` — lazy, memoized client, same fix as
+    `config/stripe.ts`'s `getStripeClient` for the same bug class
+    (constructing eagerly at import time would fail the *entire app* to
+    boot whenever `MAILGUN_API_KEY` isn't set).
+  - `src/helpers/emailSender.ts` — `loadTemplates()` (called once at
+    server boot), `sendEmail`, `renderTemplate`, `sendTemplatedEmail`.
+    Templates are plain Handlebars `.html` files under `src/emails/`,
+    copied into `dist/emails/` by the build script (`tsc` alone doesn't
+    touch non-`.ts` files).
+  - Two callers so far: `userController.requestReset` (replacing its old
+    TODO — the non-production response still also returns the token
+    directly, so the flow works without real Mailgun credentials
+    locally), and the four job refund/payout approve/decline controllers
+    (one shared `paymentRequestDecision` template for all four).
+  - Every test file exercising a caller mocks the whole module
+    (`jest.mock("../../src/helpers/emailSender", ...)`), identical to
+    HM's own test suite — no real Mailgun call is ever made in tests.
 - Payments — one unified, polymorphic ledger across jobs and subscriptions,
   now including live Stripe integration. Full design (the real uniqueness-
   index bug the test suite caught, the lazy-Stripe-client boot-crash bug,
@@ -523,10 +572,10 @@ Structure and conventions are deliberately carried over from
     plus `DigitalPurchase` coverage added to `payment.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
-consumer): transactional email delivery for password reset (currently
-returns the token directly in non-production responses instead), 2FA —
-house-maduekwe-backend has these but PolyGrid's brief didn't ask for them
-yet. Add if/when actually needed.
+consumer): 2FA — house-maduekwe-backend has this but PolyGrid's brief
+didn't ask for it yet. Add if/when actually needed. (Transactional email
+*was* speculative here until Phase 4.3 gave it two concrete callers — see
+[email-plan.md](email-plan.md).)
 
 ## Phasing (forward-looking)
 
@@ -590,6 +639,35 @@ Phase 4.1  DigitalCreatorProfile — PolyGrid Store's Digital Storefront,   <- d
            decoupled from the creator's later subscription/isActive
            status, which only ever gates discovery. Full design in
            [digital-storefront-plan.md](digital-storefront-plan.md).
+Phase 4.2  Job refunds/payouts (request-then-admin-decides) + an admin    <- done
+           payment-history lookup — not tied to any one pillar, since
+           every pillar checkout (Physical Store, future Tenders/
+           SiteForce) ultimately settles through a Job. The requesting
+           party (client for a refund, provider for a payout) asks;
+           nothing about the job's balance/status changes until an admin
+           approves or declines (`PATCH .../approve|decline`) — same
+           "party raises, admin decides" shape disputes already use.
+           `JOB_STATUS.CLOSED` (+`closedAt`) is new; `refunds[]`/
+           `payouts[]` are append-only `DocumentArray`s, each entry
+           carrying its own `pending`/`approved`/`declined` status,
+           alongside running totals (`totalRefunded`/`amountPaidOut`)
+           only an approval ever touches. Approving is still
+           bookkeeping-only — no Stripe refund API call, no Stripe
+           Connect/payout rail exists — same interim-admin-tool role
+           `POST /:id/payments` already plays; declining always requires
+           a reason. The payment-history lookup is a plain indexed
+           `Payment.find({targetType, targetId})` query, not a new Job
+           field, since that index already exists. Full design in
+           [jobs-and-contacts-plan.md](jobs-and-contacts-plan.md).
+Phase 4.3  Transactional email via Mailgun — mirrors house-maduekwe-      <- done
+           backend's own emailSender.js shape exactly (same Mailgun +
+           Handlebars setup, same loadTemplates/sendEmail/renderTemplate/
+           sendTemplatedEmail surface). Replaces requestReset's old TODO,
+           and notifies the requester on every refund/payout approve/
+           decline from Phase 4.2. Every test file exercising a caller
+           mocks the module, same as HM's own test suite — no real
+           Mailgun call happens in tests. Full design in
+           [email-plan.md](email-plan.md).
 Phase 5  Remaining two pillars' business profiles (Contractor/Tenders,
          Labor/SiteForce), following consultancy-profile-plan.md's or
          store-plan.md's shape and registering in PROFILE_MODEL_REGISTRY

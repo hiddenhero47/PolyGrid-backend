@@ -13,12 +13,19 @@ dotenv.config();
 import connectDB from "./config/db";
 import createApp from "./app";
 import { initSocket } from "./socket";
+import { loadTemplates } from "./helpers/emailSender";
 
 const port = process.env.PORT || 4000;
 
 const startServer = async (): Promise<void> => {
   try {
     await connectDB();
+
+    // Same reasoning as house-maduekwe-backend's server.js: compile every
+    // email template once at boot, so a broken/missing template file fails
+    // loudly at startup instead of the first time something tries to send
+    // it mid-request.
+    await loadTemplates();
 
     const app = createApp();
     // Socket.IO attaches to the raw http.Server, not the Express app

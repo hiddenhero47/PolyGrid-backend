@@ -2,14 +2,59 @@ import path from "path";
 import mongoose, { FilterQuery } from "mongoose";
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
-import { Job, IJob, IJobStage, JOB_TYPE, JobType, JOB_STATUS, JobStatus } from "../models/jobModel";
+import {
+  Job,
+  IJob,
+  IJobStage,
+  JOB_TYPE,
+  JobType,
+  JOB_STATUS,
+  JobStatus,
+  PAYMENT_REQUEST_STATUS,
+} from "../models/jobModel";
 import { User, IUser, SYSTEM_ROLE } from "../models/userModel";
 import { FileGrant } from "../models/fileGrantModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY, PRIVATE_DIR } from "../helpers/fileStorage";
+import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { connectUsers } from "./contactController";
+
+// Fire-and-forget from the requester's point of view, but awaited here so
+// a Mailgun failure surfaces in this request rather than racing the
+// response — same non-blocking-of-the-core-action spirit as every other
+// notification in this codebase, just not wrapped in try/catch: the
+// approve/decline itself has already saved by the time this runs, so a
+// failed email never undoes a real decision, it just doesn't get told to
+// the requester (visible to them anyway via GET /api/jobs/:id).
+const notifyPaymentRequestDecision = async (
+  job: IJob,
+  requestType: "refund" | "payout",
+  requestedBy: mongoose.Types.ObjectId,
+  amount: number | undefined,
+  currency: string,
+  approved: boolean,
+  declineReason?: string,
+): Promise<void> => {
+  const requesterUser = await User.findById(requestedBy).select("email fullName");
+  if (!requesterUser) return;
+
+  await sendTemplatedEmail({
+    to: requesterUser.email,
+    subject: `Your ${requestType} request was ${approved ? "approved" : "declined"}`,
+    template: "paymentRequestDecision",
+    variables: {
+      name: requesterUser.fullName,
+      jobTitle: job.jobTitle,
+      requestType,
+      approved,
+      amount: amount !== undefined ? amount : "the full available amount",
+      currency,
+      declineReason,
+    },
+  });
+};
 
 // Exported for storeOrderController.ts — a store checkout creates a Job
 // directly (not through the HTTP createJob endpoint below, since the shop
@@ -450,7 +495,7 @@ export const verifyStage = asyncHandler(async (req: Request, res: Response) => {
   const stageAmount = (job.totalAmount * stage.payment) / 100;
   const feeAmount = (stageAmount * job.platformFeePercent) / 100;
 
-  job.amountDisposed += stageAmount - feeAmount;
+  job.amountDisbursed += stageAmount - feeAmount;
   job.platformFeeCollected += feeAmount;
 
   if (job.stages.every((s) => s.isVerified)) {
@@ -703,6 +748,449 @@ export const recordPayment = asyncHandler(async (req: Request, res: Response) =>
     status: PAYMENT_STATUS.SUCCESS,
     recordedBy: admin._id,
   });
+
+  res.status(200).json(job);
+});
+
+// @desc    Every payment ever made toward this job, newest first — the
+//          admin working view of a job's payment history. Not a field on
+//          Job at all: Payment already carries {targetType, targetId} on
+//          a compound index, so this is one indexed query, nothing to
+//          denormalize or keep in sync.
+// @route   GET /api/jobs/:id/payments
+// @access  Private (Admin / Super Admin / Customer Care — read-only)
+export const getJobPayments = asyncHandler(async (req: Request, res: Response) => {
+  const job = await Job.findById(req.params.id).select("_id");
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const payments = await Payment.find({
+    targetType: PAYMENT_TARGET_TYPE.JOB,
+    targetId: job._id,
+  }).sort({ createdAt: -1 });
+
+  res.status(200).json(payments);
+});
+
+// @desc    The client asks for money back on this job. Sits PENDING until
+//          an admin decides it — nothing about the job's balance or
+//          status changes yet, that only happens on approval.
+// @route   POST /api/jobs/:id/refund-requests
+// @access  Private (the job's client only)
+export const requestRefund = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  if (job.client.userId.toString() !== requester.id) {
+    res.status(403);
+    throw new Error("Only this job's client can request a refund");
+  }
+
+  if (job.refunds.some((r) => r.status === PAYMENT_REQUEST_STATUS.PENDING)) {
+    res.status(400);
+    throw new Error("You already have a pending refund request on this job");
+  }
+
+  // Fails at this level first, before even looking at the requested
+  // amount — asking for anything at all makes no sense once every dollar
+  // paid in has already been refunded.
+  if (job.amountPaid - job.totalRefunded <= 0) {
+    res.status(400);
+    throw new Error("There's nothing left to refund on this job");
+  }
+
+  const { amount, reason } = req.body;
+
+  if (!amount || amount <= 0) {
+    res.status(400);
+    throw new Error("A positive amount is required");
+  }
+
+  if (!reason) {
+    res.status(400);
+    throw new Error("A refund reason is required");
+  }
+
+  if (job.totalRefunded + amount > job.amountPaid) {
+    res.status(400);
+    throw new Error(
+      `Requesting ${amount} would exceed what's actually been paid into this job (${job.amountPaid - job.totalRefunded} refundable)`,
+    );
+  }
+
+  job.refunds.push({
+    amount,
+    reason,
+    status: PAYMENT_REQUEST_STATUS.PENDING,
+    requestedBy: requester._id as mongoose.Types.ObjectId,
+    requestedAt: new Date(),
+  } as never);
+
+  await job.save();
+
+  res.status(201).json(job);
+});
+
+// @desc    Every pending refund request across every job — the admin's
+//          working queue.
+// @route   GET /api/jobs/refund-requests
+// @access  Private (Admin / Super Admin / Customer Care — read-only)
+export const getPendingRefundRequests = asyncHandler(async (req: Request, res: Response) => {
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const skip = (page - 1) * limit;
+
+  const filter: FilterQuery<IJob> = { "refunds.status": PAYMENT_REQUEST_STATUS.PENDING };
+
+  const [jobs, total] = await Promise.all([
+    Job.find(filter)
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("client.userId", "fullName email")
+      .populate("provider.userId", "fullName email"),
+    Job.countDocuments(filter),
+  ]);
+
+  const data = jobs.map((job) => ({
+    jobId: job._id,
+    jobTitle: job.jobTitle,
+    client: job.client,
+    provider: job.provider,
+    refund: job.refunds.find((r) => r.status === PAYMENT_REQUEST_STATUS.PENDING),
+  }));
+
+  res.status(200).json({ data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+});
+
+// @desc    Approve a pending refund request — the only thing that actually
+//          moves totalRefunded and closes the job. Closing is a one-time
+//          transition: it's what the *first* approved refund on a job
+//          does; a later, corrective request just adds to the history
+//          without re-closing an already-closed job or moving closedAt.
+// @route   PATCH /api/jobs/:id/refund-requests/:refundId/approve
+// @access  Private (Admin / Super Admin only)
+export const approveRefundRequest = asyncHandler(async (req: Request, res: Response) => {
+  const admin = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const refund = job.refunds.id(req.params.refundId as string);
+
+  if (!refund) {
+    res.status(404);
+    throw new Error("Refund request not found");
+  }
+
+  if (refund.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This refund request has already been ${refund.status}`);
+  }
+
+  // Re-checked at decision time, not just at request time — other
+  // refunds may have been approved in between.
+  if (job.totalRefunded + refund.amount > job.amountPaid) {
+    res.status(400);
+    throw new Error(
+      `Approving ${refund.amount} would exceed what's actually been paid into this job (${job.amountPaid - job.totalRefunded} refundable)`,
+    );
+  }
+
+  refund.status = PAYMENT_REQUEST_STATUS.APPROVED;
+  refund.decidedBy = admin._id as mongoose.Types.ObjectId;
+  refund.decidedAt = new Date();
+  job.totalRefunded += refund.amount;
+
+  if (job.status !== JOB_STATUS.CLOSED) {
+    job.status = JOB_STATUS.CLOSED;
+    job.closedAt = new Date();
+  }
+
+  await job.save();
+  await notifyPaymentRequestDecision(job, "refund", refund.requestedBy, refund.amount, job.currency, true);
+
+  res.status(200).json(job);
+});
+
+// @desc    Decline a pending refund request — always with a reason, so the
+//          client isn't just left guessing why.
+// @route   PATCH /api/jobs/:id/refund-requests/:refundId/decline
+// @access  Private (Admin / Super Admin only)
+export const declineRefundRequest = asyncHandler(async (req: Request, res: Response) => {
+  const admin = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const refund = job.refunds.id(req.params.refundId as string);
+
+  if (!refund) {
+    res.status(404);
+    throw new Error("Refund request not found");
+  }
+
+  if (refund.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This refund request has already been ${refund.status}`);
+  }
+
+  const { declineReason } = req.body;
+
+  if (!declineReason) {
+    res.status(400);
+    throw new Error("A decline reason is required");
+  }
+
+  refund.status = PAYMENT_REQUEST_STATUS.DECLINED;
+  refund.decidedBy = admin._id as mongoose.Types.ObjectId;
+  refund.decidedAt = new Date();
+  refund.declineReason = declineReason;
+
+  await job.save();
+  await notifyPaymentRequestDecision(
+    job,
+    "refund",
+    refund.requestedBy,
+    refund.amount,
+    job.currency,
+    false,
+    declineReason,
+  );
+
+  res.status(200).json(job);
+});
+
+// @desc    The provider asks to be paid their earned-but-undisbursed
+//          funds. `amount` is optional — omit it to ask for whatever's
+//          available. Sits PENDING until an admin decides it.
+// @route   POST /api/jobs/:id/payout-requests
+// @access  Private (the job's provider only)
+export const requestPayout = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  if (job.provider.userId.toString() !== requester.id) {
+    res.status(403);
+    throw new Error("Only this job's provider can request a payout");
+  }
+
+  if (job.payouts.some((p) => p.status === PAYMENT_REQUEST_STATUS.PENDING)) {
+    res.status(400);
+    throw new Error("You already have a pending payout request on this job");
+  }
+
+  if (job.isDispute) {
+    res.status(400);
+    throw new Error("This job is disputed — it can't be paid out until that's resolved");
+  }
+
+  if (job.status === JOB_STATUS.CANCELLED || job.status === JOB_STATUS.CLOSED) {
+    res.status(400);
+    throw new Error(`A ${job.status} job has nothing left to pay out`);
+  }
+
+  // amountDisbursed is what verified stages have released from escrow —
+  // but verifyStage releases against totalAmount regardless of how much
+  // has actually been paid in yet, so this takes the smaller of the two
+  // rather than trusting amountDisbursed on its own.
+  const available = Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut;
+
+  if (available <= 0) {
+    res.status(400);
+    throw new Error("Nothing is currently available to request a payout on");
+  }
+
+  // req.body is undefined, not {}, when a request sends no body at all —
+  // legitimate here, since `amount` is meant to be entirely optional.
+  const { amount, note } = req.body ?? {};
+
+  if (amount !== undefined && (!Number(amount) || Number(amount) <= 0)) {
+    res.status(400);
+    throw new Error("amount must be a positive number");
+  }
+
+  if (amount !== undefined && Number(amount) > available) {
+    res.status(400);
+    throw new Error(`Requesting ${amount} would exceed the ${available} currently available`);
+  }
+
+  job.payouts.push({
+    amount: amount !== undefined ? Number(amount) : undefined,
+    note,
+    status: PAYMENT_REQUEST_STATUS.PENDING,
+    requestedBy: requester._id as mongoose.Types.ObjectId,
+    requestedAt: new Date(),
+  } as never);
+
+  await job.save();
+
+  res.status(201).json(job);
+});
+
+// @desc    Every pending payout request across every job — the admin's
+//          working queue.
+// @route   GET /api/jobs/payout-requests
+// @access  Private (Admin / Super Admin / Customer Care — read-only)
+export const getPendingPayoutRequests = asyncHandler(async (req: Request, res: Response) => {
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const skip = (page - 1) * limit;
+
+  const filter: FilterQuery<IJob> = { "payouts.status": PAYMENT_REQUEST_STATUS.PENDING };
+
+  const [jobs, total] = await Promise.all([
+    Job.find(filter)
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("client.userId", "fullName email")
+      .populate("provider.userId", "fullName email"),
+    Job.countDocuments(filter),
+  ]);
+
+  const data = jobs.map((job) => ({
+    jobId: job._id,
+    jobTitle: job.jobTitle,
+    client: job.client,
+    provider: job.provider,
+    // Available is recomputed fresh, not read off the request — it may
+    // have shrunk (another payout approved in the meantime) since this
+    // was requested.
+    available: Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut,
+    payout: job.payouts.find((p) => p.status === PAYMENT_REQUEST_STATUS.PENDING),
+  }));
+
+  res.status(200).json({ data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+});
+
+// @desc    Approve a pending payout request — the only thing that actually
+//          moves amountPaidOut. Resolves `amount` to a concrete number if
+//          the request itself omitted one (admin may also override the
+//          requested number outright via its own `amount` in the body).
+//          Unlike a refund, never changes the job's status.
+// @route   PATCH /api/jobs/:id/payout-requests/:payoutId/approve
+// @access  Private (Admin / Super Admin only)
+export const approvePayoutRequest = asyncHandler(async (req: Request, res: Response) => {
+  const admin = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const payout = job.payouts.id(req.params.payoutId as string);
+
+  if (!payout) {
+    res.status(404);
+    throw new Error("Payout request not found");
+  }
+
+  if (payout.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This payout request has already been ${payout.status}`);
+  }
+
+  // Re-checked at decision time, not just at request time — other
+  // payouts may have been approved in between, shrinking what's left.
+  const available = Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut;
+
+  if (available <= 0) {
+    res.status(400);
+    throw new Error("Nothing is currently available to pay out");
+  }
+
+  const { amount } = req.body ?? {};
+  const resolvedAmount = amount !== undefined ? Number(amount) : payout.amount ?? available;
+
+  if (!resolvedAmount || resolvedAmount <= 0) {
+    res.status(400);
+    throw new Error("A positive amount is required");
+  }
+
+  if (resolvedAmount > available) {
+    res.status(400);
+    throw new Error(`Approving ${resolvedAmount} would exceed the ${available} currently available`);
+  }
+
+  payout.amount = resolvedAmount;
+  payout.status = PAYMENT_REQUEST_STATUS.APPROVED;
+  payout.decidedBy = admin._id as mongoose.Types.ObjectId;
+  payout.decidedAt = new Date();
+  job.amountPaidOut += resolvedAmount;
+
+  await job.save();
+  await notifyPaymentRequestDecision(job, "payout", payout.requestedBy, resolvedAmount, job.currency, true);
+
+  res.status(200).json(job);
+});
+
+// @desc    Decline a pending payout request — always with a reason.
+// @route   PATCH /api/jobs/:id/payout-requests/:payoutId/decline
+// @access  Private (Admin / Super Admin only)
+export const declinePayoutRequest = asyncHandler(async (req: Request, res: Response) => {
+  const admin = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const payout = job.payouts.id(req.params.payoutId as string);
+
+  if (!payout) {
+    res.status(404);
+    throw new Error("Payout request not found");
+  }
+
+  if (payout.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This payout request has already been ${payout.status}`);
+  }
+
+  const { declineReason } = req.body;
+
+  if (!declineReason) {
+    res.status(400);
+    throw new Error("A decline reason is required");
+  }
+
+  payout.status = PAYMENT_REQUEST_STATUS.DECLINED;
+  payout.decidedBy = admin._id as mongoose.Types.ObjectId;
+  payout.decidedAt = new Date();
+  payout.declineReason = declineReason;
+
+  await job.save();
+  await notifyPaymentRequestDecision(
+    job,
+    "payout",
+    payout.requestedBy,
+    payout.amount,
+    job.currency,
+    false,
+    declineReason,
+  );
 
   res.status(200).json(job);
 });
