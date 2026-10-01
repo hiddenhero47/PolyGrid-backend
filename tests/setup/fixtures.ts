@@ -43,6 +43,18 @@ import {
   IDigitalPurchase,
   DIGITAL_PURCHASE_STATUS,
 } from "../../src/models/digitalPurchaseModel";
+import {
+  ContractorProfile,
+  IContractorProfile,
+  CONTRACTOR_SPECIALTY,
+} from "../../src/models/contractorProfileModel";
+import {
+  TenderProject,
+  ITenderProject,
+  TENDER_CATEGORY,
+} from "../../src/models/tenderProjectModel";
+import { Bid, IBid, BID_STATUS } from "../../src/models/bidModel";
+import { Review, IReview, REVIEW_SOURCE_TYPE } from "../../src/models/reviewModel";
 
 let counter = 0;
 const next = (): number => {
@@ -448,5 +460,104 @@ export const createDigitalPurchase = async ({
     priceSnapshot: product.price,
     currency: product.currency,
     status,
+    ...overrides,
+  });
+
+interface CreateContractorProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createContractorProfile = async ({
+  user,
+  ...overrides
+}: CreateContractorProfileOptions): Promise<IContractorProfile> => {
+  const n = next();
+
+  return ContractorProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    slug: `test-contractor-${n}`,
+    headline: `Test Contractor ${n}`,
+    specialties: [CONTRACTOR_SPECIALTY.GENERAL_CONTRACTING],
+    country: "NG",
+    ...overrides,
+  });
+};
+
+interface CreateTenderProjectOptions {
+  postedBy: IUser;
+  [key: string]: unknown;
+}
+
+export const createTenderProject = async ({
+  postedBy,
+  ...overrides
+}: CreateTenderProjectOptions): Promise<ITenderProject> => {
+  const n = next();
+
+  return TenderProject.create({
+    postedBy: postedBy._id,
+    title: `Test Project ${n}`,
+    description: "A test project description",
+    category: TENDER_CATEGORY.GENERAL_CONTRACTING,
+    location: { country: "NG" },
+    bidDeadline: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    ...overrides,
+  });
+};
+
+interface CreateBidOptions {
+  project: ITenderProject;
+  contractor: IContractorProfile;
+  bidder: IUser;
+  status?: string;
+  [key: string]: unknown;
+}
+
+export const createBid = async ({
+  project,
+  contractor,
+  bidder,
+  status = BID_STATUS.PENDING,
+  ...overrides
+}: CreateBidOptions): Promise<IBid> =>
+  Bid.create({
+    project: project._id,
+    contractorId: contractor._id,
+    bidder: bidder._id,
+    amount: 5000,
+    currency: "USD",
+    proposal: "A test proposal",
+    status,
+    ...overrides,
+  });
+
+interface CreateReviewOptions {
+  profileType: string;
+  profileId: mongoose.Types.ObjectId | string;
+  reviewer: IUser;
+  sourceType?: string;
+  sourceId: mongoose.Types.ObjectId | string;
+  rating?: number;
+  [key: string]: unknown;
+}
+
+export const createReview = async ({
+  profileType,
+  profileId,
+  reviewer,
+  sourceType = REVIEW_SOURCE_TYPE.JOB,
+  sourceId,
+  rating = 5,
+  ...overrides
+}: CreateReviewOptions): Promise<IReview> =>
+  Review.create({
+    profileType,
+    profileId,
+    reviewer: reviewer._id,
+    sourceType,
+    sourceId,
+    rating,
     ...overrides,
   });

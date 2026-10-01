@@ -9,8 +9,9 @@ Phase 3 (ConsultancyProfile + generic Verification pipeline), Phase 3.1
 Socket.IO), Phase 3.4 (customer_care role), Phase 4 (StoreProfile —
 PolyGrid Store's Physical Materials Marketplace), Phase 4.1
 (DigitalCreatorProfile — PolyGrid Store's Digital Storefront), and
-Phase 4.2 (Job refunds/payouts + admin payment-history lookup), and
-Phase 4.3 (transactional email via Mailgun) shipped.**
+Phase 4.2 (Job refunds/payouts + admin payment-history lookup),
+Phase 4.3 (transactional email via Mailgun), Phase 5 (ContractorProfile +
+Reviews + the Project Bidding Board — PolyGrid Tenders) shipped.**
 This doc is
 updated as each phase lands — see the checklist at the bottom for current
 state.
@@ -570,6 +571,66 @@ Structure and conventions are deliberately carried over from
     ever gate discovery, never a download someone already paid for.
   - `tests/integration/{digitalCreatorProfile,digitalProduct}.test.ts`,
     plus `DigitalPurchase` coverage added to `payment.test.ts`.
+- Reviews — cross-cutting, not scoped to one pillar. Full design in
+  [reviews-plan.md](reviews-plan.md):
+  - `src/models/reviewModel.ts` (`Review`) — targets a *profile*
+    (`profileType`/`profileId`, refPath, same polymorphic shape
+    Verification already uses), never a job/item — "is this profile
+    reliable" is what another client actually cares about. Only
+    reachable from a real completed transaction: `sourceType`/`sourceId`
+    (refPath) points at either a completed `Job` or a successful
+    `DigitalPurchase` — the same polymorphic trick `Payment.targetType`/
+    `targetId` already uses. Unique on `{sourceType, sourceId}` — one
+    review per completed transaction, not per reviewer+profile, so a
+    repeat client gets to say something new each time.
+  - `ratingAverage`/`ratingCount` added to all four existing pillar
+    profiles (`ConsultancyProfile`, `StoreProfile`,
+    `DigitalCreatorProfile`, `ContractorProfile`) — plain running totals,
+    same pattern as `Job.amountDisbursed`; `reviewController.applyReviewToProfile`
+    is the only thing that ever writes them.
+  - `constants/profileTypes.findProfileByUserId` — new generic helper,
+    checks every `PROFILE_MODEL_REGISTRY` entry for one owned by a given
+    userId. `createReview` uses this to resolve a Job-sourced review's
+    target from `job.provider.userId`, deliberately *not* trusting
+    `Job.jobType` — nothing guarantees a Direct-Hire job (no dedicated
+    "hire" endpoint of its own) actually has the right `jobType` set.
+  - `src/controllers/reviewController.ts` + `routes/reviewRoutes.ts` —
+    `POST /api/reviews` (`{sourceType, sourceId, rating, comment?}`,
+    profileId never supplied by the caller) + `GET /api/reviews` (public,
+    by `profileType`+`profileId`).
+  - `tests/integration/review.test.ts`.
+- ContractorProfile + the Project Bidding Board — PolyGrid Tenders. Full
+  design (the sealed-bidding research, why Direct Hire needed zero new
+  code) in [tenders-plan.md](tenders-plan.md):
+  - `src/models/contractorProfileModel.ts` — a deliberate near-copy of
+    `ConsultancyProfile` (Direct Hire mirrors it exactly, per the brief),
+    sharing the newly-extracted `src/models/portfolioItem.ts`
+    (`IPortfolioItem`/`portfolioItemSchema`) rather than a second copy —
+    extracted the moment a second real consumer needed the identical
+    shape, same instinct as `profileLink.ts`/`mediaFile.ts`.
+  - `src/models/tenderProjectModel.ts` (`TenderProject`) /
+    `src/models/bidModel.ts` (`Bid`) — posting requires any active
+    subscription (`authMiddleware.requireActiveSubscription`, built in
+    Phase 1.5, never wired into a route until now); bidding requires a
+    verified+subscribed `ContractorProfile`. No public teaser — a
+    project's full detail (description, private file attachments) is
+    the browsing surface itself, gated to the poster/eligible
+    contractor/admin, since there's no browse-then-buy moment the way
+    Digital/Physical products have one.
+  - Sealed bidding, enforced structurally, not just by convention: `Bid`
+    is unique on `{project, contractorId}` (revise via `updateMyBid`
+    instead of a second bid), and `getProjectBids` (the only endpoint
+    listing every bid) is poster-only — no route a competing contractor
+    could call ever returns someone else's bid. `TenderProject.bidCount`
+    (a running total, incremented/decremented on submit/withdraw) is the
+    one thing a competitor is allowed to see about the competition.
+  - `awardBid` accepts one bid, rejects the rest, and creates a `Job`
+    (`jobType: 'tenders'`) with `Job.create()`'s *default* role
+    assignment (poster = confirmed client, contractor = unconfirmed
+    provider) — unlike Store checkout's asymmetric-roles trick, no
+    workaround needed here since the poster is the party actually
+    calling `award`.
+  - `tests/integration/{contractorProfile,tenderProject}.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): 2FA — house-maduekwe-backend has this but PolyGrid's brief
@@ -668,10 +729,31 @@ Phase 4.3  Transactional email via Mailgun — mirrors house-maduekwe-      <- d
            mocks the module, same as HM's own test suite — no real
            Mailgun call happens in tests. Full design in
            [email-plan.md](email-plan.md).
-Phase 5  Remaining two pillars' business profiles (Contractor/Tenders,
-         Labor/SiteForce), following consultancy-profile-plan.md's or
-         store-plan.md's shape and registering in PROFILE_MODEL_REGISTRY
-Phase 6  Cross-pillar aggregation queries (active + verified + subscribed)
+Phase 5    ContractorProfile (PolyGrid Tenders) + Reviews (cross-pillar) +  <- done
+           the Project Bidding Board. Direct Hire mirrors
+           ConsultancyProfile exactly, including extracting
+           IPortfolioItem into its own file once ContractorProfile needed
+           the identical shape. Reviews target a *profile* (reputation),
+           not a job/item, but only a completed Job or successful
+           DigitalPurchase can create one — the caller never names a
+           profileId directly. The Bidding Board is sealed-bid (grounded
+           in how real construction tendering works): posting requires
+           any active subscription (authMiddleware.requireActiveSubscription,
+           unused since Phase 1.5, finally gets a route), bidding
+           requires a verified+subscribed ContractorProfile, and only the
+           poster ever sees more than one bid at a time — competitors see
+           only a running bidCount. Awarding reuses Job with its default
+           role assignment (poster = confirmed client, contractor =
+           unconfirmed provider), no asymmetric-roles trick needed since
+           the poster is the one calling award. Full design in
+           [tenders-plan.md](tenders-plan.md) and
+           [reviews-plan.md](reviews-plan.md).
+Phase 6  Labor/SiteForce's business profile, following
+         consultancy-profile-plan.md's shape and registering in
+         PROFILE_MODEL_REGISTRY — plus, per architecture-plan.md's own
+         open question, deciding whether its posting model shares
+         anything with TenderProject once its actual shape is known
+Phase 7  Cross-pillar aggregation queries (active + verified + subscribed)
          and geo-spatial queries (SiteForce jobs)
 ```
 

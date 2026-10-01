@@ -2,10 +2,19 @@ import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { isValidCountryCode } from "../helpers/countryReference";
 import { isValidCurrencyCode } from "../helpers/currencyReference";
 import { IProfileLink, profileLinkSchema, validateLinkCount, MAX_PROFILE_LINKS } from "./profileLink";
-import { IMediaFile, mediaFileSchema } from "./mediaFile";
+import {
+  IPortfolioItem,
+  IPortfolioMedia,
+  portfolioItemSchema,
+  validatePortfolioItemCount,
+  MAX_PORTFOLIO_ITEMS,
+  MAX_MEDIA_PER_ITEM,
+} from "./portfolioItem";
 
 export type { IProfileLink };
 export { MAX_PROFILE_LINKS };
+export type { IPortfolioItem, IPortfolioMedia };
+export { MAX_PORTFOLIO_ITEMS, MAX_MEDIA_PER_ITEM };
 
 // PolyGrid Engineering's profile — the discovery/presence layer only
 // ("a personal mini-site"). Actually *engaging* a consultant — booking a
@@ -32,28 +41,6 @@ export const SERVICE_PRICING_MODE = {
 } as const;
 export type ServicePricingMode =
   (typeof SERVICE_PRICING_MODE)[keyof typeof SERVICE_PRICING_MODE];
-
-// A profile can have at most this many portfolio items, and each item at
-// most this many media files — unbounded arrays here would mean unbounded
-// disk usage and DB document growth per profile, with no real ceiling.
-// Deliberately generous for a legitimate portfolio, not a hard product
-// constraint — revisit the numbers if a real user's usage says otherwise.
-export const MAX_PORTFOLIO_ITEMS = 20;
-export const MAX_MEDIA_PER_ITEM = 6;
-
-// See src/models/mediaFile.ts for why this shape (storagePath for real
-// deletion, real detected mime/size, stripped before a public response).
-export type IPortfolioMedia = IMediaFile;
-
-export interface IPortfolioItem {
-  _id: Types.ObjectId;
-  title: string;
-  description?: string;
-  media: IPortfolioMedia[];
-  tags: string[];
-  startedAt?: Date;
-  completedAt?: Date;
-}
 
 export interface IServiceListing {
   _id: Types.ObjectId;
@@ -102,41 +89,13 @@ export interface IConsultancyProfile extends Document {
   portfolio: Types.DocumentArray<IPortfolioItem>;
   services: Types.DocumentArray<IServiceListing>;
   mentorship: IMentorship;
+  // Running totals maintained by reviewController.applyReviewToProfile —
+  // see reviewModel.ts. Never written to directly anywhere else.
+  ratingAverage: number;
+  ratingCount: number;
   createdAt: Date;
   updatedAt: Date;
 }
-
-const portfolioItemSchema = new Schema<IPortfolioItem>({
-  title: { type: String, required: true, trim: true },
-  description: { type: String },
-  media: {
-    type: [mediaFileSchema],
-    default: [],
-    // Defense in depth alongside the controller-level checks in
-    // consultancyProfileController.ts, which is what actually produces a
-    // clean 400 before any file touches disk — this just guarantees the
-    // limit holds even if a future code path ever bypasses the controller.
-    validate: {
-      validator: (media: IPortfolioMedia[]) => media.length <= MAX_MEDIA_PER_ITEM,
-      message: `A portfolio item can have at most ${MAX_MEDIA_PER_ITEM} media files`,
-    },
-  },
-  tags: { type: [String], default: [] },
-  startedAt: { type: Date },
-  completedAt: {
-    type: Date,
-    validate: {
-      // `this` is the portfolio item subdocument here (a plain function,
-      // not an arrow, specifically so Mongoose can bind it) — a project's
-      // completion can't be dated before its own start.
-      validator: function (this: IPortfolioItem, value: Date) {
-        if (!value || !this.startedAt) return true;
-        return this.startedAt <= value;
-      },
-      message: "completedAt must be on or after startedAt",
-    },
-  },
-});
 
 const serviceListingSchema = new Schema<IServiceListing>({
   title: { type: String, required: true, trim: true },
@@ -217,12 +176,14 @@ const consultancyProfileSchema = new Schema<IConsultancyProfile>(
       type: [portfolioItemSchema],
       default: [],
       validate: {
-        validator: (items: IPortfolioItem[]) => items.length <= MAX_PORTFOLIO_ITEMS,
+        validator: validatePortfolioItemCount,
         message: `A profile can have at most ${MAX_PORTFOLIO_ITEMS} portfolio items`,
       },
     },
     services: { type: [serviceListingSchema], default: [] },
     mentorship: { type: mentorshipSchema, default: () => ({}) },
+    ratingAverage: { type: Number, default: 0, min: 0, max: 5 },
+    ratingCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true },
 );

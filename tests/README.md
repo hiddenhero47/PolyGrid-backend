@@ -40,9 +40,10 @@ tests/
                          active job, a contact connection, a consultancy
                          profile, a verification template, a store
                          profile, a product, a digital creator profile, a
-                         digital product, a digital purchase + JWT token
-                         generation + a real tiny PNG (base64 + Buffer)
-                         for upload tests
+                         digital product, a digital purchase, a
+                         contractor profile, a tender project, a bid, a
+                         review + JWT token generation + a real tiny PNG
+                         (base64 + Buffer) for upload tests
   unit/          pure functions/methods/middleware, no HTTP, DB used only
                  where the thing under test needs a real document
   integration/   real HTTP requests via supertest against src/app.ts
@@ -374,6 +375,40 @@ role promotion itself.
     already successful; the live-Stripe round trip (skipped without a
     real key) flips a `DigitalPurchase` to `success` via the webhook and
     confirms the download link works immediately afterward.
+  - `contractorProfile.test.ts` — create (unique slug, filters invalid
+    `specialties`, one-per-user, `MAX_PROFILE_LINKS`); update mine; the
+    contractor page withholds content unless currently subscribed and
+    drops back to unavailable the moment the subscription expires; search
+    (verified + subscribed only, filterable by `specialty`); the
+    portfolio sub-resource (shared schema with `consultancyProfileModel.ts`'s
+    own portfolio — media upload/delete round-trips to disk the same way).
+  - `tenderProject.test.ts` — posting requires an active subscription
+    (`402` — `requireActiveSubscription`'s first real exercise), rejects
+    a past `bidDeadline` or an invalid `category`; the bidding board
+    (`GET /`) 403s a non-eligible browser (no contractor profile, or
+    unverified/unsubscribed), filters by category, excludes a project
+    past its own deadline; `GET /:id` withholds full detail from a
+    non-eligible viewer and shows it to the poster/an eligible
+    contractor; **sealed bidding** — submitting blocks a non-eligible
+    contractor and a self-bid, increments `bidCount`, blocks a second
+    bid from the same contractor, and — the core guarantee — a competing
+    contractor's `GET /:id/bids` 404s (poster-only) while the poster's
+    own call sees every bid; revising/withdrawing my own bid
+    (withdrawal decrements `bidCount`); awarding accepts the chosen bid,
+    rejects every other pending bid, and spins up a real `Job`
+    (`jobType: 'tenders'`, poster as confirmed client, contractor as
+    unconfirmed provider); cancelling an open project rejects its
+    pending bids too; `GET /me` and `GET /bids/mine` each scope to the
+    caller correctly.
+  - `review.test.ts` — requires a valid `sourceType`/`sourceId`/rating;
+    Job-sourced: blocks reviewing a job that isn't completed, blocks
+    anyone but the job's own client, resolves the target profile from
+    the job's provider (not a client-supplied id), updates the running
+    `ratingAverage`/`ratingCount` correctly across multiple reviews, and
+    blocks a second review of the same job; DigitalPurchase-sourced:
+    resolves the target directly from `purchase.creator` (no lookup),
+    blocks anyone but the buyer; `GET /api/reviews` lists a profile's
+    reviews newest-first and validates `profileType`/`profileId`.
 
 ## Stripe is tested for real — unlike OAuth
 
