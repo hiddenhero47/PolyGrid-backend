@@ -11,7 +11,9 @@ PolyGrid Store's Physical Materials Marketplace), Phase 4.1
 (DigitalCreatorProfile — PolyGrid Store's Digital Storefront), and
 Phase 4.2 (Job refunds/payouts + admin payment-history lookup),
 Phase 4.3 (transactional email via Mailgun), Phase 5 (ContractorProfile +
-Reviews + the Project Bidding Board — PolyGrid Tenders) shipped.**
+Reviews + the Project Bidding Board — PolyGrid Tenders), and Phase 6
+(LaborProfile + ClientProfile + the Location-Based Job Board — PolyGrid
+SiteForce, the fourth and final pillar) shipped.**
 This doc is
 updated as each phase lands — see the checklist at the bottom for current
 state.
@@ -580,20 +582,33 @@ Structure and conventions are deliberately carried over from
     reachable from a real completed transaction: `sourceType`/`sourceId`
     (refPath) points at either a completed `Job` or a successful
     `DigitalPurchase` — the same polymorphic trick `Payment.targetType`/
-    `targetId` already uses. Unique on `{sourceType, sourceId}` — one
-    review per completed transaction, not per reviewer+profile, so a
-    repeat client gets to say something new each time.
-  - `ratingAverage`/`ratingCount` added to all four existing pillar
-    profiles (`ConsultancyProfile`, `StoreProfile`,
-    `DigitalCreatorProfile`, `ContractorProfile`) — plain running totals,
-    same pattern as `Job.amountDisbursed`; `reviewController.applyReviewToProfile`
-    is the only thing that ever writes them.
-  - `constants/profileTypes.findProfileByUserId` — new generic helper,
-    checks every `PROFILE_MODEL_REGISTRY` entry for one owned by a given
-    userId. `createReview` uses this to resolve a Job-sourced review's
-    target from `job.provider.userId`, deliberately *not* trusting
-    `Job.jobType` — nothing guarantees a Direct-Hire job (no dedicated
-    "hire" endpoint of its own) actually has the right `jobType` set.
+    `targetId` already uses. Unique on `{sourceType, sourceId, reviewer}`
+    — one review per *reviewer* per completed transaction (not per
+    transaction alone, since a Job-sourced review is now two-way — see
+    below — so the same job can carry up to two reviews, one from each
+    side), and not per reviewer+profile either, so a repeat client gets
+    to say something new on each separate job.
+  - `ratingAverage`/`ratingCount` added to every pillar profile
+    (`ConsultancyProfile`, `StoreProfile`, `DigitalCreatorProfile`,
+    `ContractorProfile`, `ClientProfile`, `LaborProfile`) — plain running
+    totals, same pattern as `Job.amountDisbursed`;
+    `reviewController.applyReviewToProfile` is the only thing that ever
+    writes them.
+  - `constants/profileTypes.findProfileByUserId` — generic helper, checks
+    every `PROFILE_MODEL_REGISTRY` entry for one owned by a given userId.
+    `createReview` uses this to resolve a Job-sourced review's target
+    from whichever party the reviewer *isn't*, deliberately *not*
+    trusting `Job.jobType` — nothing guarantees a Direct-Hire job (no
+    dedicated "hire" endpoint of its own) actually has the right
+    `jobType` set.
+  - **Two-way, generalized rather than SiteForce-special-cased**: once
+    `ClientProfile` (Phase 6) gave posters a real profile, the
+    Job-sourced branch started resolving the target from either
+    direction — client reviews provider, or provider reviews client —
+    with the other direction 404ing cleanly wherever no profile exists
+    on that side (an ordinary Direct Hire client, say). Nothing about
+    Engineering/Consultancy or Store Physical's existing reviews had to
+    change for this.
   - `src/controllers/reviewController.ts` + `routes/reviewRoutes.ts` —
     `POST /api/reviews` (`{sourceType, sourceId, rating, comment?}`,
     profileId never supplied by the caller) + `GET /api/reviews` (public,
@@ -609,10 +624,11 @@ Structure and conventions are deliberately carried over from
     extracted the moment a second real consumer needed the identical
     shape, same instinct as `profileLink.ts`/`mediaFile.ts`.
   - `src/models/tenderProjectModel.ts` (`TenderProject`) /
-    `src/models/bidModel.ts` (`Bid`) — posting requires any active
-    subscription (`authMiddleware.requireActiveSubscription`, built in
-    Phase 1.5, never wired into a route until now); bidding requires a
-    verified+subscribed `ContractorProfile`. No public teaser — a
+    `src/models/bidModel.ts` (`Bid`) — posting requires a subscribed
+    `ClientProfile` (retrofitted in Phase 6 from an earlier bare
+    `authMiddleware.requireActiveSubscription` check, once posters got a
+    real profile); bidding requires a verified+subscribed
+    `ContractorProfile`. No public teaser — a
     project's full detail (description, private file attachments) is
     the browsing surface itself, gated to the poster/eligible
     contractor/admin, since there's no browse-then-buy moment the way
@@ -631,6 +647,43 @@ Structure and conventions are deliberately carried over from
     workaround needed here since the poster is the party actually
     calling `award`.
   - `tests/integration/{contractorProfile,tenderProject}.test.ts`.
+- LaborProfile + ClientProfile + the Location-Based Job Board — PolyGrid
+  SiteForce, the fourth and final pillar. Full design (the lone-worker
+  safety research, why location is two-tiered) in
+  [siteforce-plan.md](siteforce-plan.md):
+  - `src/models/laborProfileModel.ts` — a near-copy of `ContractorProfile`
+    for Direct Tradesperson Hiring, same zero-new-code hiring flow as
+    every prior pillar, and `portfolioItem.ts`'s third real consumer.
+    `isVerified` is the actual safety mechanism here, not a nice-to-have
+    — a worker needs to be verified *and* subscribed to apply to a job
+    opening at all, PolyGrid's equivalent of the background checks real
+    platforms (TaskRabbit, Handy) run on whoever is sent alone into a
+    stranger's property.
+  - `src/models/clientProfileModel.ts` (`ClientProfile`) — new, and
+    *not* SiteForce-specific: the shared poster identity for any pillar
+    with a "post something, others respond" flow (Tenders' projects,
+    SiteForce's job openings). `isVerified` is never required to post —
+    research showed no real platform background-checks the person
+    issuing the invitation, only the person walking into an unfamiliar
+    property — but having a profile at all is what lets Reviews target
+    a poster's reputation (see Reviews above).
+  - `src/models/jobOpeningModel.ts` (`JobOpening`) /
+    `src/models/jobApplicationModel.ts` (`JobApplication`) — deliberately
+    its own model, not a reuse of `TenderProject`, once its actual shape
+    was known: pay is fixed by the poster (workers apply, they don't
+    bid), and location is split into two tiers. `generalArea`
+    (country/state/city) is always visible to an eligible worker
+    browsing; `coordinates`/`address`/`googleMapsUrl`/`contactInfo`/
+    `files` are withheld until a worker's application is actually
+    *accepted* — stricter than Tenders' "any eligible contractor sees
+    full detail," because what's being withheld here is exactly where a
+    lone person would have to physically go. `workersNeeded` support —
+    each accepted application spins up its own `Job`
+    (`jobType: 'siteforce'`), and the opening only moves to `filled`
+    once accepted applications reach that count, auto-rejecting the
+    rest.
+  - `tests/integration/{laborProfile,clientProfile,jobOpening}.test.ts`,
+    plus two-way coverage added to `review.test.ts`.
 
 **Deliberately not built yet** (would be speculative without a concrete
 consumer): 2FA — house-maduekwe-backend has this but PolyGrid's brief
@@ -748,11 +801,23 @@ Phase 5    ContractorProfile (PolyGrid Tenders) + Reviews (cross-pillar) +  <- d
            the poster is the one calling award. Full design in
            [tenders-plan.md](tenders-plan.md) and
            [reviews-plan.md](reviews-plan.md).
-Phase 6  Labor/SiteForce's business profile, following
-         consultancy-profile-plan.md's shape and registering in
-         PROFILE_MODEL_REGISTRY — plus, per architecture-plan.md's own
-         open question, deciding whether its posting model shares
-         anything with TenderProject once its actual shape is known
+Phase 6    LaborProfile (PolyGrid SiteForce, Direct Tradesperson Hiring) <- done
+           + ClientProfile (new — shared poster identity for Tenders AND
+           SiteForce, registered in PROFILE_MODEL_REGISTRY) + the
+           Location-Based Job Board (JobOpening/JobApplication — a
+           distinct model from TenderProject once its actual shape was
+           known: fixed pay instead of bidding, a two-tier location
+           (generalArea always visible, exact coordinates/address/
+           Google Maps link/contact withheld until a worker's
+           application is accepted — not just eligible to browse), and
+           workersNeeded support (each accepted application spins up its
+           own Job). Workers must be verified+subscribed to apply — the
+           actual safety mechanism, grounded in how real platforms
+           (TaskRabbit, Handy) background-check whoever is sent alone
+           into a stranger's property, research-backed rather than
+           assumed. ClientProfile existing is also what let Reviews
+           become two-way (see Phase 5's entry and reviews-plan.md).
+           Full design in [siteforce-plan.md](siteforce-plan.md).
 Phase 7  Cross-pillar aggregation queries (active + verified + subscribed)
          and geo-spatial queries (SiteForce jobs)
 ```

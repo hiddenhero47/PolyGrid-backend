@@ -106,32 +106,37 @@ separate signup.
 Each pillar's provider-side data lives in its own document, 1-to-1 with
 `User` via `userId`. **`ConsultancyProfile` (PolyGrid Engineering),
 `StoreProfile` (PolyGrid Store, Physical Materials Marketplace),
-`DigitalCreatorProfile` (PolyGrid Store, Digital Storefront), and
-`ContractorProfile` (PolyGrid Tenders) are all built** — see
-[consultancy-profile-plan.md](consultancy-profile-plan.md) /
+`DigitalCreatorProfile` (PolyGrid Store, Digital Storefront),
+`ContractorProfile` (PolyGrid Tenders), and `LaborProfile` (PolyGrid
+SiteForce) — all four pillars — are now built**, plus `ClientProfile`, a
+fifth, cross-pillar profile for the poster side of Tenders/SiteForce —
+see [consultancy-profile-plan.md](consultancy-profile-plan.md) /
 [store-plan.md](store-plan.md) /
 [digital-storefront-plan.md](digital-storefront-plan.md) /
-[tenders-plan.md](tenders-plan.md) for the full designs and
-[architecture-plan.md](architecture-plan.md) for what shipped. The last
-one — `LaborProfile` (SiteForce) — isn't modeled yet, and should follow
-the same shape. StoreProfile and DigitalCreatorProfile are the ones to
-look at first for why *not* every profile can reuse ConsultancyProfile's
+[tenders-plan.md](tenders-plan.md) / [siteforce-plan.md](siteforce-plan.md)
+for the full designs and [architecture-plan.md](architecture-plan.md) for
+what shipped. StoreProfile and DigitalCreatorProfile are the ones to look
+at first for why *not* every profile can reuse ConsultancyProfile's
 denormalize-subscription-onto-the-profile pattern unmodified —
 StoreProfile because a store owns many `Product` documents, not one
 piece of content (see store-plan.md's "core problem" section);
 DigitalCreatorProfile because Digital's discovery is a flat cross-creator
 feed with no store-first step to hide behind, solved with a two-hop
 `$lookup` anchored directly on the product collection instead (see
-digital-storefront-plan.md's "core problem" section). ContractorProfile,
-by contrast, genuinely *is* a near-copy of ConsultancyProfile — Direct
-Hire and Engineering's own discovery model are the same shape — but
-Tenders' other half, the Project Bidding Board, has its own "core
-problem" (sealed bidding, dual subscription-gating) worth reading in
-tenders-plan.md.
+digital-storefront-plan.md's "core problem" section). ContractorProfile
+and LaborProfile, by contrast, genuinely *are* near-copies of
+ConsultancyProfile — Direct Hire's discovery model is the same shape
+everywhere — but each pillar's *other* half (Tenders' Project Bidding
+Board, SiteForce's Location-Based Job Board) has its own "core problem"
+worth reading about directly: sealed bidding for Tenders, and a
+two-tier location reveal (driven by real lone-worker-safety research,
+not assumed) for SiteForce.
 
 Reviews (`ratingAverage`/`ratingCount` on every profile above, backed by
 `src/models/reviewModel.ts`) are cross-cutting, not specific to any one
-pillar — see [reviews-plan.md](reviews-plan.md).
+pillar, and — since `ClientProfile` gave posters a real profile to
+target — two-way: a provider can review the client's profile, not just
+the other direction. See [reviews-plan.md](reviews-plan.md).
 
 Every pillar profile shares `userId`, a denormalized-but-live-checked
 `currentSubscription`, `isVerified`, and a pointer at its latest
@@ -153,6 +158,8 @@ required documents for that pillar/location combination, the same
 "catalog data, not a hardcoded enum" instinct `Plan` already uses. See
 [verification-templates-plan.md](verification-templates-plan.md).
 
-Physical-goods and labor pillars will additionally store location as a
-GeoJSON Point (plus plain `country`/`state`/`city` strings) and a
-`maxServiceRadiusKm`, for `$nearSphere`/`$geoWithin` queries.
+`JobOpening` (SiteForce) now stores real coordinates (`{lat, lng}`,
+gated — see siteforce-plan.md) alongside plain `country`/`state`/`city`
+strings, but as a plain subdocument, not yet a proper GeoJSON Point with
+a `2dsphere` index — proximity search (`$nearSphere`/`$geoWithin`,
+"jobs near me") is still Phase 7 work, not wired up yet.

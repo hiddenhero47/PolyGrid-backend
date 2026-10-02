@@ -3,6 +3,8 @@ import { ConsultancyProfile } from "../models/consultancyProfileModel";
 import { StoreProfile } from "../models/storeProfileModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { ContractorProfile } from "../models/contractorProfileModel";
+import { ClientProfile } from "../models/clientProfileModel";
+import { LaborProfile } from "../models/laborProfileModel";
 
 // Every pillar business profile model, keyed by the string Verification's
 // polymorphic profileType/refPath uses to identify it. Add the next pillar
@@ -19,6 +21,8 @@ export const PROFILE_TYPE = {
   STORE: "StoreProfile",
   DIGITAL_CREATOR: "DigitalCreatorProfile",
   CONTRACTOR: "ContractorProfile",
+  CLIENT: "ClientProfile",
+  LABOR: "LaborProfile",
 } as const;
 export type ProfileType = (typeof PROFILE_TYPE)[keyof typeof PROFILE_TYPE];
 
@@ -28,6 +32,8 @@ export const PROFILE_MODEL_REGISTRY: Record<ProfileType, mongoose.Model<any>> = 
   [PROFILE_TYPE.STORE]: StoreProfile,
   [PROFILE_TYPE.DIGITAL_CREATOR]: DigitalCreatorProfile,
   [PROFILE_TYPE.CONTRACTOR]: ContractorProfile,
+  [PROFILE_TYPE.CLIENT]: ClientProfile,
+  [PROFILE_TYPE.LABOR]: LaborProfile,
 };
 
 export const isKnownProfileType = (value: unknown): value is ProfileType =>

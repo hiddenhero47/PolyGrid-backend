@@ -42,8 +42,10 @@ tests/
                          profile, a product, a digital creator profile, a
                          digital product, a digital purchase, a
                          contractor profile, a tender project, a bid, a
-                         review + JWT token generation + a real tiny PNG
-                         (base64 + Buffer) for upload tests
+                         review, a client profile, a labor profile, a job
+                         opening, a job application + JWT token
+                         generation + a real tiny PNG (base64 + Buffer)
+                         for upload tests
   unit/          pure functions/methods/middleware, no HTTP, DB used only
                  where the thing under test needs a real document
   integration/   real HTTP requests via supertest against src/app.ts
@@ -402,13 +404,54 @@ role promotion itself.
     caller correctly.
   - `review.test.ts` — requires a valid `sourceType`/`sourceId`/rating;
     Job-sourced: blocks reviewing a job that isn't completed, blocks
-    anyone but the job's own client, resolves the target profile from
-    the job's provider (not a client-supplied id), updates the running
-    `ratingAverage`/`ratingCount` correctly across multiple reviews, and
-    blocks a second review of the same job; DigitalPurchase-sourced:
-    resolves the target directly from `purchase.creator` (no lookup),
-    blocks anyone but the buyer; `GET /api/reviews` lists a profile's
-    reviews newest-first and validates `profileType`/`profileId`.
+    anyone who wasn't a party to it, resolves the target profile from
+    whichever party the reviewer *isn't* (not a client-supplied id),
+    updates the running `ratingAverage`/`ratingCount` correctly across
+    multiple reviews, and blocks the same reviewer reviewing the same
+    job twice; DigitalPurchase-sourced: resolves the target directly from
+    `purchase.creator` (no lookup), blocks anyone but the buyer;
+    `GET /api/reviews` lists a profile's reviews newest-first and
+    validates `profileType`/`profileId`. Also covers **two-way
+    reviews**: a provider reviewing a client who has no `ClientProfile`
+    404s cleanly rather than erroring, a provider *can* review a
+    client's `ClientProfile` once one exists, both parties can
+    each leave their own review on the same job when both have profiles,
+    and a stranger to the job is still blocked outright.
+  - `clientProfile.test.ts` — create (one-per-user, requires
+    `displayName`/`country`); update mine; `GET /:id` is public and
+    explicitly **never** gated behind the poster's own subscription
+    status (unlike every provider profile's page), 404s for an unknown
+    id.
+  - `laborProfile.test.ts` — create (unique slug, filters invalid
+    `skills`, one-per-user, `MAX_PROFILE_LINKS`); the worker page
+    withholds content unless currently subscribed and drops back to
+    unavailable the moment the subscription expires; search (verified +
+    subscribed only, filterable by `skill`); the portfolio sub-resource
+    (shared schema, its third real consumer after Consultancy/Contractor
+    — media upload/delete round-trips to disk the same way).
+  - `jobOpening.test.ts` — posting requires a subscribed `ClientProfile`
+    (`402`); rejects an invalid `category`/`payType`/`employmentType` or
+    a non-positive `payRate`; the board (`GET /`) 403s a non-eligible
+    worker and never includes the gated location tier even for an
+    eligible one; **the location-reveal safety gate** (`GET /:id`) —
+    withholds the posting entirely from a non-eligible viewer, shows an
+    eligible worker the public tier only (`generalArea`, never
+    `coordinates`/`address`/`googleMapsUrl`/`contactInfo`/`files`), shows
+    the poster the full gated tier, **still withholds the gated tier
+    from a worker who has merely applied, not been accepted**, and
+    reveals it only once that worker's application is actually accepted
+    — the core guarantee this whole model exists for; applying blocks a
+    non-eligible worker, a self-application, and a second application
+    from the same worker; revising/withdrawing my own application;
+    applications are sealed from other applicants the same way Tenders'
+    bids are (`GET /:id/applications` 404s for a fellow applicant,
+    200s for the poster); accepting creates a real `Job`
+    (`jobType: 'siteforce'`, poster as confirmed client, worker as
+    unconfirmed provider) and auto-rejects the remaining pending
+    applications once `workersNeeded` is reached; explicit reject works
+    independently; cancelling an open posting rejects its pending
+    applications too; `GET /me` and `GET /applications/mine` each scope
+    to the caller correctly.
 
 ## Stripe is tested for real — unlike OAuth
 

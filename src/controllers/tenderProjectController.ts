@@ -14,6 +14,7 @@ import { ContractorProfile, IContractorProfile } from "../models/contractorProfi
 import { Subscription } from "../models/subscriptionModel";
 import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
+import { loadEligibleClientProfile } from "./clientProfileController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
 import { uploadHandler, FILE_VISIBILITY } from "../helpers/fileStorage";
@@ -79,15 +80,22 @@ interface ProjectPayload {
   bidDeadline?: string;
 }
 
-// @desc    Post a new project to the bidding board. Requires any active
-//          PolyGrid subscription — there's no dedicated "poster" business
-//          profile, just a subscribed account (see
-//          authMiddleware.requireActiveSubscription, getting its first
-//          real route here).
+// @desc    Post a new project to the bidding board. Requires a subscribed
+//          ClientProfile — posting doesn't require `isVerified` (see
+//          clientProfileModel.ts for why), but it does require the poster
+//          to actually have a profile now, not just a bare subscribed
+//          User — that's what lets a contractor review the poster's
+//          reputation after a job (see reviewController.createReview).
 // @route   POST /api/tender-projects
-// @access  Private — requires an active subscription
+// @access  Private — requires a subscribed client profile
 export const createTenderProject = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
+
+  const clientProfile = await loadEligibleClientProfile(requester._id);
+  if (!clientProfile) {
+    res.status(402);
+    throw new Error("You need a client profile with an active subscription to post a project");
+  }
 
   const { title, description, category, budgetMin, budgetMax, currency, location, bidDeadline } =
     parseMultipartData<ProjectPayload>(req);

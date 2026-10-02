@@ -1,11 +1,15 @@
 # PolyGrid Tenders — Contract Bidding & Direct Hire
 
-Status: **shipped**. The third pillar business profile, in two genuinely
-different halves: Direct Hire (easy — the same discovery shape
-ConsultancyProfile already established) and the Project Bidding Board
-(harder — sealed bidding, and the first real route for
-`requireActiveSubscription`, a generic gate that had sat unused since
-Phase 1.5).
+Status: **shipped**, retrofitted once. The third pillar business
+profile, in two genuinely different halves: Direct Hire (easy — the same
+discovery shape ConsultancyProfile already established) and the Project
+Bidding Board (harder — sealed bidding). Posting originally gated on
+`requireActiveSubscription` (a generic middleware that had sat unused
+since Phase 1.5); once PolyGrid SiteForce introduced `ClientProfile` — a
+real profile for posters, needed so a worker could review a poster's
+reputation — Tenders' posting gate moved to the same profile-based check,
+for consistency across both pillars that have a posting flow. See
+[siteforce-plan.md](siteforce-plan.md) for why.
 
 ## Research grounding the Bidding Board design
 
@@ -42,28 +46,34 @@ A contractor is hired exactly the same way.
 
 ## Reviews — tied to a real transaction, displayed on the profile
 
-Built now, generically, across **every** pillar profile
-(`ConsultancyProfile`, `StoreProfile`, `DigitalCreatorProfile`,
-`ContractorProfile`) — not scoped to Tenders alone. Full design in
-[reviews-plan.md](reviews-plan.md); the short version: a review targets a
-*profile* (reputation, which is what another prospective client actually
-cares about), but can only ever be created from a real completed
-transaction (a `Job` or a successful `DigitalPurchase`) — never by naming
-a profile directly.
+Built generically, across every pillar profile — not scoped to Tenders
+alone. Full design in [reviews-plan.md](reviews-plan.md); the short
+version: a review targets a *profile* (reputation, which is what another
+prospective client actually cares about), but can only ever be created
+from a real completed transaction (a `Job` or a successful `DigitalPurchase`)
+— never by naming a profile directly. Originally one-way (client reviews
+contractor); now two-way, since a contractor can also review the
+project's poster via their `ClientProfile` (see siteforce-plan.md for why
+that became possible).
 
 ## The Project Bidding Board
 
 `src/models/tenderProjectModel.ts` / `src/models/bidModel.ts`.
 
-### Who can do what — reusing `requireActiveSubscription` for real
+### Who can do what
 
-**Posting** a `TenderProject` requires any active PolyGrid subscription —
-checked on the poster's own `User`, via `authMiddleware.requireActiveSubscription`.
-This middleware has existed since Phase 1.5 (`src/middleware/authMiddleware.ts`)
-and had never been wired into a single route until `POST /api/tender-projects`.
-There's no dedicated "poster" business profile the way a contractor has
-`ContractorProfile` — the poster could be anyone with an active plan, so
-the gate lives on the base `User`, not a pillar profile.
+**Posting** a `TenderProject` requires a subscribed `ClientProfile`
+(`loadEligibleClientProfile`, `clientProfileController.ts`) — never
+`isVerified`, since posting doesn't carry the same physical-safety stakes
+bidding/applying does (see siteforce-plan.md's research). This replaced
+an earlier version gated on the bare `User` via `authMiddleware.requireActiveSubscription`
+(built in Phase 1.5, unused until Tenders first shipped) — once
+`ClientProfile` existed as a real profile posters could be reviewed
+through, checking it directly became the more consistent choice, the
+same shape every other pillar's eligibility check already uses.
+`requireActiveSubscription` itself is unused again now, but stays in
+`authMiddleware.ts` as general infrastructure for a future pillar that
+genuinely has no profile concept of its own.
 
 **Bidding** requires a verified + currently-subscribed `ContractorProfile`
 (`loadEligibleContractorProfile`, checked live against `Subscription`,
@@ -128,8 +138,8 @@ disclosed budget.
   `{available: false}` if not currently subscribed.
 - `POST .../me/portfolio` + sub-resource routes — same shape as
   ConsultancyProfile's.
-- `POST /api/tender-projects` — post a project; requires
-  `requireActiveSubscription`.
+- `POST /api/tender-projects` — post a project; requires a subscribed
+  `ClientProfile`.
 - `GET /api/tender-projects?category=&country=` — the bidding board;
   eligible-contractor only.
 - `GET /api/tender-projects/:id` — full detail with signed file links;

@@ -48,6 +48,17 @@ const toPublicReview = (review: IReview) => ({
 //          resolved from the source itself (see
 //          constants/profileTypes.findProfileByUserId), so there's no
 //          profileId in the request body to spoof.
+//
+//          A Job-sourced review is two-way: the client can review the
+//          provider's profile, *or* the provider can review the client's
+//          — whichever one the requester actually is. This matters most
+//          for PolyGrid Tenders/SiteForce, where the "client" is a
+//          ClientProfile (a real poster a worker/contractor can rate),
+//          but it costs nothing to leave on generically everywhere else:
+//          an ordinary Direct Hire client has no ClientProfile, so
+//          findProfileByUserId just returns null and that direction
+//          404s cleanly — nothing breaks, two-way reviews just don't
+//          exist where there's no profile to point them at.
 // @route   POST /api/reviews
 // @access  Private
 export const createReview = asyncHandler(async (req: Request, res: Response) => {
@@ -80,21 +91,27 @@ export const createReview = asyncHandler(async (req: Request, res: Response) => 
       throw new Error("Job not found");
     }
 
-    if (job.client.userId.toString() !== requester.id) {
-      res.status(403);
-      throw new Error("Only the job's client can leave a review for it");
-    }
-
     if (job.status !== JOB_STATUS.COMPLETED) {
       res.status(400);
       throw new Error("You can only review a completed job");
     }
 
-    const resolved = await findProfileByUserId(job.provider.userId);
+    let targetUserId: mongoose.Types.ObjectId;
+
+    if (job.client.userId.toString() === requester.id) {
+      targetUserId = job.provider.userId;
+    } else if (job.provider.userId.toString() === requester.id) {
+      targetUserId = job.client.userId;
+    } else {
+      res.status(403);
+      throw new Error("You weren't a party to this job");
+    }
+
+    const resolved = await findProfileByUserId(targetUserId);
 
     if (!resolved) {
       res.status(404);
-      throw new Error("No business profile found to review for this job");
+      throw new Error("The other party on this job has no reviewable profile");
     }
 
     profileType = resolved.profileType;
@@ -123,10 +140,10 @@ export const createReview = asyncHandler(async (req: Request, res: Response) => 
     profileId = purchase.creator;
   }
 
-  const existing = await Review.findOne({ sourceType, sourceId });
+  const existing = await Review.findOne({ sourceType, sourceId, reviewer: requester._id });
   if (existing) {
     res.status(400);
-    throw new Error("This transaction has already been reviewed");
+    throw new Error("You've already reviewed this transaction");
   }
 
   const review = await Review.create({

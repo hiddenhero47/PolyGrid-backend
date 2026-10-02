@@ -55,6 +55,15 @@ import {
 } from "../../src/models/tenderProjectModel";
 import { Bid, IBid, BID_STATUS } from "../../src/models/bidModel";
 import { Review, IReview, REVIEW_SOURCE_TYPE } from "../../src/models/reviewModel";
+import { ClientProfile, IClientProfile } from "../../src/models/clientProfileModel";
+import { LaborProfile, ILaborProfile, LABOR_SKILL } from "../../src/models/laborProfileModel";
+import {
+  JobOpening,
+  IJobOpening,
+  PAY_TYPE,
+  EMPLOYMENT_TYPE,
+} from "../../src/models/jobOpeningModel";
+import { JobApplication, IJobApplication, APPLICATION_STATUS } from "../../src/models/jobApplicationModel";
 
 let counter = 0;
 const next = (): number => {
@@ -559,5 +568,96 @@ export const createReview = async ({
     sourceType,
     sourceId,
     rating,
+    ...overrides,
+  });
+
+interface CreateClientProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createClientProfile = async ({
+  user,
+  ...overrides
+}: CreateClientProfileOptions): Promise<IClientProfile> =>
+  ClientProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    displayName: `Test Client ${next()}`,
+    country: "NG",
+    ...overrides,
+  });
+
+interface CreateLaborProfileOptions {
+  user: IUser;
+  [key: string]: unknown;
+}
+
+export const createLaborProfile = async ({
+  user,
+  ...overrides
+}: CreateLaborProfileOptions): Promise<ILaborProfile> => {
+  const n = next();
+
+  return LaborProfile.create({
+    userId: user._id,
+    currentSubscription: user.currentSubscription,
+    slug: `test-worker-${n}`,
+    headline: `Test Worker ${n}`,
+    skills: [LABOR_SKILL.GENERAL_LABOR],
+    country: "NG",
+    ...overrides,
+  });
+};
+
+interface CreateJobOpeningOptions {
+  postedBy: IUser;
+  [key: string]: unknown;
+}
+
+export const createJobOpening = async ({
+  postedBy,
+  ...overrides
+}: CreateJobOpeningOptions): Promise<IJobOpening> => {
+  const n = next();
+
+  return JobOpening.create({
+    postedBy: postedBy._id,
+    title: `Test Job Opening ${n}`,
+    description: "A test job opening description",
+    category: LABOR_SKILL.GENERAL_LABOR,
+    payRate: 50,
+    payType: PAY_TYPE.DAILY,
+    currency: "USD",
+    employmentType: EMPLOYMENT_TYPE.SHORT_TERM,
+    generalArea: { country: "NG" },
+    coordinates: { lat: 6.5244, lng: 3.3792 },
+    address: "123 Test Street, Lagos",
+    googleMapsUrl: "https://maps.google.com/?q=6.5244,3.3792",
+    contactInfo: "+234 000 0000",
+    ...overrides,
+  });
+};
+
+interface CreateJobApplicationOptions {
+  posting: IJobOpening;
+  worker: ILaborProfile;
+  applicant: IUser;
+  status?: string;
+  [key: string]: unknown;
+}
+
+export const createJobApplication = async ({
+  posting,
+  worker,
+  applicant,
+  status = APPLICATION_STATUS.PENDING,
+  ...overrides
+}: CreateJobApplicationOptions): Promise<IJobApplication> =>
+  JobApplication.create({
+    posting: posting._id,
+    workerId: worker._id,
+    applicant: applicant._id,
+    status,
     ...overrides,
   });

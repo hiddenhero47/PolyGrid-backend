@@ -24,6 +24,9 @@ import digitalPurchaseRoutes from "./routes/digitalPurchaseRoutes";
 import contractorProfileRoutes from "./routes/contractorProfileRoutes";
 import tenderProjectRoutes from "./routes/tenderProjectRoutes";
 import reviewRoutes from "./routes/reviewRoutes";
+import clientProfileRoutes from "./routes/clientProfileRoutes";
+import laborProfileRoutes from "./routes/laborProfileRoutes";
+import jobOpeningRoutes from "./routes/jobOpeningRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
@@ -84,6 +87,9 @@ const createApp = (): Express => {
   app.use("/api/contractor-profiles", contractorProfileRoutes);
   app.use("/api/tender-projects", tenderProjectRoutes);
   app.use("/api/reviews", reviewRoutes);
+  app.use("/api/client-profiles", clientProfileRoutes);
+  app.use("/api/labor-profiles", laborProfileRoutes);
+  app.use("/api/job-openings", jobOpeningRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

@@ -57,11 +57,16 @@ const reviewSchema = new Schema<IReview>(
 );
 
 reviewSchema.index({ profileType: 1, profileId: 1, createdAt: -1 });
-// One review per completed transaction — not per reviewer+profile, since a
-// repeat client with several separate jobs/purchases from the same profile
-// genuinely has a separate thing to say each time. Ownership of the source
-// (was *this* reviewer actually the paying party on it) is enforced in the
-// controller, not here.
-reviewSchema.index({ sourceType: 1, sourceId: 1 }, { unique: true });
+// One review per reviewer per completed transaction — not one review per
+// transaction, full stop: a Job-sourced review is two-way (the client
+// reviews the provider's profile, or the provider reviews the client's,
+// if the client has one — see reviewController.createReview), so the
+// same job can legitimately carry up to two reviews, one from each side.
+// Still at most one per direction: a repeat client with several separate
+// jobs/purchases from the same profile genuinely has a separate thing to
+// say each time, so this isn't per reviewer+profile either. Ownership of
+// the source (was *this* reviewer actually a real party on it) is
+// enforced in the controller, not here.
+reviewSchema.index({ sourceType: 1, sourceId: 1, reviewer: 1 }, { unique: true });
 
 export const Review: Model<IReview> = mongoose.model<IReview>("Review", reviewSchema);
