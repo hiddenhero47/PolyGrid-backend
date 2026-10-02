@@ -8,11 +8,13 @@ import {
   createDigitalCreatorProfile,
   createDigitalProduct,
   createDigitalPurchase,
+  createClientProfile,
   generateToken,
 } from "../setup/fixtures";
 import { JOB_STATUS } from "../../src/models/jobModel";
 import { ContractorProfile } from "../../src/models/contractorProfileModel";
 import { DigitalCreatorProfile } from "../../src/models/digitalCreatorProfileModel";
+import { ClientProfile } from "../../src/models/clientProfileModel";
 
 const app = createApp();
 
@@ -192,6 +194,93 @@ describe("POST /api/reviews — sourced from a successful DigitalPurchase", () =
       .post("/api/reviews")
       .set("Authorization", `Bearer ${generateToken(stranger)}`)
       .send({ sourceType: "DigitalPurchase", sourceId: purchase.id, rating: 5 });
+
+    expect(res.status).toBe(403);
+  });
+});
+
+describe("POST /api/reviews — two-way on a Job (PolyGrid Tenders/SiteForce safety motivation)", () => {
+  it("lets the provider review the client's ClientProfile too, not just the other direction", async () => {
+    const clientUser = await createUser();
+    const clientProfile = await createClientProfile({ user: clientUser });
+    const providerUser = await createUser();
+    const job = await createActiveJob({
+      client: clientUser,
+      provider: providerUser,
+      status: JOB_STATUS.COMPLETED,
+    });
+
+    // The client reviews the provider — but the provider has no
+    // business profile here, so this direction 404s cleanly rather than
+    // erroring.
+    const clientReviewing = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating: 4 });
+    expect(clientReviewing.status).toBe(404);
+
+    // The provider (e.g. a worker/contractor) reviews the client's
+    // ClientProfile — the actual safety-motivated direction.
+    const providerReviewing = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating: 2, comment: "Site was unsafe" });
+
+    expect(providerReviewing.status).toBe(201);
+    expect(providerReviewing.body.profileType).toBe("ClientProfile");
+    expect(providerReviewing.body.profileId).toBe(clientProfile.id);
+
+    const updatedClientProfile = await ClientProfile.findById(clientProfile.id);
+    expect(updatedClientProfile?.ratingAverage).toBe(2);
+    expect(updatedClientProfile?.ratingCount).toBe(1);
+  });
+
+  it("lets both parties each leave their own review on the same job when both have profiles", async () => {
+    const clientUser = await createUser();
+    await createClientProfile({ user: clientUser });
+    const providerUser = await createUser();
+    await createContractorProfile({ user: providerUser });
+    const job = await createActiveJob({
+      client: clientUser,
+      provider: providerUser,
+      status: JOB_STATUS.COMPLETED,
+    });
+
+    const fromClient = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating: 5 });
+    expect(fromClient.status).toBe(201);
+
+    const fromProvider = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating: 4 });
+    expect(fromProvider.status).toBe(201);
+
+    // Still blocks the SAME party reviewing the SAME job twice.
+    const duplicate = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating: 1 });
+    expect(duplicate.status).toBe(400);
+  });
+
+  it("blocks anyone who wasn't a party to the job at all", async () => {
+    const clientUser = await createUser();
+    await createClientProfile({ user: clientUser });
+    const providerUser = await createUser();
+    const stranger = await createUser();
+    const job = await createActiveJob({
+      client: clientUser,
+      provider: providerUser,
+      status: JOB_STATUS.COMPLETED,
+    });
+
+    const res = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(stranger)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating: 5 });
 
     expect(res.status).toBe(403);
   });

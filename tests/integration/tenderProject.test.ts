@@ -5,6 +5,7 @@ import {
   createUser,
   createUserWithActiveSubscription,
   createContractorProfile,
+  createClientProfile,
   createTenderProject,
   createBid,
   generateToken,
@@ -38,6 +39,14 @@ const createEligibleContractor = async () => {
   return { user, profile };
 };
 
+// A poster eligible to post a project: a subscribed ClientProfile — no
+// `isVerified` required (see clientProfileModel.ts).
+const createEligiblePoster = async () => {
+  const user = await createUserWithActiveSubscription();
+  await createClientProfile({ user, currentSubscription: user.currentSubscription });
+  return user;
+};
+
 const futureDeadline = () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
 describe("POST /api/tender-projects", () => {
@@ -46,28 +55,32 @@ describe("POST /api/tender-projects", () => {
     expect(res.status).toBe(401);
   });
 
-  it("requires an active subscription (requireActiveSubscription's first real route)", async () => {
-    const user = await createUser();
+  it("requires a subscribed client profile", async () => {
+    const userWithNoProfile = await createUserWithActiveSubscription();
+    const userWithNoSub = await createUser();
+    await createClientProfile({ user: userWithNoSub });
 
-    const res = await request(app)
-      .post("/api/tender-projects")
-      .set("Authorization", `Bearer ${generateToken(user)}`)
-      .field(
-        "data",
-        JSON.stringify({
-          title: "New roof",
-          description: "Replace the roof",
-          category: TENDER_CATEGORY.ROOFING,
-          location: { country: "NG" },
-          bidDeadline: futureDeadline(),
-        }),
-      );
+    for (const user of [userWithNoProfile, userWithNoSub]) {
+      const res = await request(app)
+        .post("/api/tender-projects")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .field(
+          "data",
+          JSON.stringify({
+            title: "New roof",
+            description: "Replace the roof",
+            category: TENDER_CATEGORY.ROOFING,
+            location: { country: "NG" },
+            bidDeadline: futureDeadline(),
+          }),
+        );
 
-    expect(res.status).toBe(402);
+      expect(res.status).toBe(402);
+    }
   });
 
-  it("posts a project once subscribed", async () => {
-    const user = await createUserWithActiveSubscription();
+  it("posts a project once I have a subscribed client profile", async () => {
+    const user = await createEligiblePoster();
 
     const res = await request(app)
       .post("/api/tender-projects")
@@ -90,7 +103,7 @@ describe("POST /api/tender-projects", () => {
   });
 
   it("rejects a bidDeadline in the past", async () => {
-    const user = await createUserWithActiveSubscription();
+    const user = await createEligiblePoster();
 
     const res = await request(app)
       .post("/api/tender-projects")
@@ -110,7 +123,7 @@ describe("POST /api/tender-projects", () => {
   });
 
   it("rejects an invalid category", async () => {
-    const user = await createUserWithActiveSubscription();
+    const user = await createEligiblePoster();
 
     const res = await request(app)
       .post("/api/tender-projects")

@@ -13,11 +13,15 @@ import {
   getProjectBids,
   awardBid,
 } from "../controllers/tenderProjectController";
-import { protect, requireActiveSubscription } from "../middleware/authMiddleware";
+import { protect } from "../middleware/authMiddleware";
 
 const router = express.Router();
 
-router.post("/", protect, requireActiveSubscription, createTenderProject);
+// createTenderProject checks for a subscribed ClientProfile itself
+// (same inline-check shape as contractor/worker eligibility elsewhere in
+// this file), replacing the bare requireActiveSubscription gate this used
+// before ClientProfile existed.
+router.post("/", protect, createTenderProject);
 router.get("/", protect, listTenderProjects);
 router.get("/me", protect, getMyTenderProjects);
 router.get("/bids/mine", protect, getMyBids);
