@@ -1,5 +1,5 @@
 import { detectFileSignature } from "../../src/helpers/fileSignature";
-import { TEST_PNG_BUFFER } from "../setup/fixtures";
+import { TEST_PNG_BUFFER, TEST_DOCX_BUFFER } from "../setup/fixtures";
 
 describe("detectFileSignature", () => {
   it("detects a real PNG by magic bytes", () => {
@@ -26,6 +26,23 @@ describe("detectFileSignature", () => {
   it("detects a PDF by its header", () => {
     const buffer = Buffer.from("%PDF-1.4\n%...", "ascii");
     expect(detectFileSignature(buffer)).toEqual({ mime: "application/pdf", ext: "pdf" });
+  });
+
+  it("detects a DOCX by its zip signature + word/document.xml part name", () => {
+    expect(detectFileSignature(TEST_DOCX_BUFFER)).toEqual({
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ext: "docx",
+    });
+  });
+
+  it("does not mistake a plain/other zip for a DOCX", () => {
+    // Same zip signature, but no word/document.xml part name anywhere —
+    // e.g. an .xlsx (xl/workbook.xml) or an ordinary .zip.
+    const buffer = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("xl/workbook.xml"),
+    ]);
+    expect(detectFileSignature(buffer)).toBeNull();
   });
 
   it("returns null for plain text / unrecognized content", () => {

@@ -15,21 +15,28 @@ import {
   rejectApplication,
 } from "../controllers/jobOpeningController";
 import { protect } from "../middleware/authMiddleware";
+import { validateBody } from "../validators/validate";
+import {
+  createJobOpeningSchema,
+  updateJobOpeningSchema,
+  applyToJobOpeningSchema,
+  updateMyApplicationSchema,
+} from "../validators/jobOpening/jobOpeningValidator";
 
 const router = express.Router();
 
-router.post("/", protect, createJobOpening);
+router.post("/", protect, validateBody(createJobOpeningSchema), createJobOpening);
 router.get("/", protect, listJobOpenings);
 router.get("/me", protect, getMyJobOpenings);
 router.get("/applications/mine", protect, getMyApplications);
 
 router.get("/:id", protect, getJobOpening);
-router.patch("/:id", protect, updateMyJobOpening);
+router.patch("/:id", protect, validateBody(updateJobOpeningSchema), updateMyJobOpening);
 router.patch("/:id/cancel", protect, cancelMyJobOpening);
 
-router.post("/:id/applications", protect, applyToJobOpening);
+router.post("/:id/applications", protect, validateBody(applyToJobOpeningSchema), applyToJobOpening);
 router.get("/:id/applications", protect, getOpeningApplications);
-router.patch("/:id/applications/mine", protect, updateMyApplication);
+router.patch("/:id/applications/mine", protect, validateBody(updateMyApplicationSchema), updateMyApplication);
 router.patch("/:id/applications/mine/withdraw", protect, withdrawMyApplication);
 router.patch("/:id/applications/:applicationId/accept", protect, acceptApplication);
 router.patch("/:id/applications/:applicationId/reject", protect, rejectApplication);

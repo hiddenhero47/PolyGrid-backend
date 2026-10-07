@@ -9,6 +9,7 @@ import {
   createPlan,
   generateToken,
   TEST_PNG_BUFFER,
+  TEST_PNG_BASE64,
 } from "../setup/fixtures";
 import {
   ConsultancyProfile,
@@ -508,6 +509,32 @@ describe("Portfolio", () => {
         .attach("file", TEST_PNG_BUFFER, "x.png");
 
       expect(res.status).toBe(404);
+    });
+
+    // Portfolio media is real multipart attachments only — base64/url
+    // (uploadHandler's two other input methods, meant for single-image
+    // avatar/logo-style uploads elsewhere) must not be silently accepted
+    // here: the request should be rejected the same as attaching nothing
+    // at all, not quietly saved as a media file.
+    it("rejects a base64/url-only request instead of silently saving it", async () => {
+      const user = await createUser();
+      await createConsultancyProfile({ user });
+      const token = generateToken(user);
+
+      const added = await addItem(token).attach("file", TEST_PNG_BUFFER, "project.png");
+      const itemId = added.body.portfolio[0]._id;
+
+      const res = await request(app)
+        .post(`/api/consultancy-profiles/me/portfolio/${itemId}/media`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ base64: TEST_PNG_BASE64 });
+
+      expect(res.status).toBe(400);
+
+      const unchanged = await request(app)
+        .get("/api/consultancy-profiles/me")
+        .set("Authorization", `Bearer ${token}`);
+      expect(unchanged.body.portfolio[0].media).toHaveLength(1);
     });
   });
 

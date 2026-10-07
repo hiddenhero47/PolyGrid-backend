@@ -46,6 +46,8 @@ export interface IProposedStages {
 
 export interface IJobContractFile {
   fileName: string;
+  mime: string;
+  size: number;
   uploadedAt: Date;
 }
 
@@ -106,14 +108,15 @@ export interface IRefund {
 }
 
 // The provider asking to be paid their earned-but-undisbursed funds
-// (amountDisbursed minus amountPaidOut). `amount` is optional at request
-// time — "pay out whatever's available" — and gets resolved to a
-// concrete number the moment it's approved (see approvePayoutRequest),
-// so an approved entry always has a real number even if the request
-// itself didn't specify one.
+// (amountDisbursed minus amountPaidOut). Neither this nor IRefund ever
+// takes a caller-supplied amount — requestPayout/requestRefund compute
+// "how much is actually available" themselves (see jobController.ts),
+// and approvePayoutRequest/approveRefundRequest recompute it fresh again
+// at decision time rather than trusting what was available when
+// requested, since another request may have been approved in between.
 export interface IPayout {
   _id: Types.ObjectId;
-  amount?: number;
+  amount: number;
   note?: string;
   status: PaymentRequestStatus;
   requestedBy: Types.ObjectId;
@@ -213,6 +216,8 @@ const proposedStagesSchema = new Schema<IProposedStages>(
 const contractFileSchema = new Schema<IJobContractFile>(
   {
     fileName: { type: String, required: true },
+    mime: { type: String, required: true },
+    size: { type: Number, required: true },
     uploadedAt: { type: Date, default: () => new Date() },
   },
   { _id: false },
@@ -252,7 +257,7 @@ const refundSchema = new Schema<IRefund>({
 });
 
 const payoutSchema = new Schema<IPayout>({
-  amount: { type: Number, min: 0 },
+  amount: { type: Number, required: true, min: 0 },
   note: { type: String },
   status: {
     type: String,

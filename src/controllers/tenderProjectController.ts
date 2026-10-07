@@ -9,7 +9,7 @@ import {
   TENDER_PROJECT_STATUS,
   MAX_PROJECT_FILES,
 } from "../models/tenderProjectModel";
-import { Bid, IBid, BID_STATUS, MAX_BID_FILES } from "../models/bidModel";
+import { Bid, IBid, BID_STATUS } from "../models/bidModel";
 import { ContractorProfile, IContractorProfile } from "../models/contractorProfileModel";
 import { Subscription } from "../models/subscriptionModel";
 import { Job, JOB_TYPE } from "../models/jobModel";
@@ -17,10 +17,33 @@ import { getPlatformFeePercent } from "./jobController";
 import { loadEligibleClientProfile } from "./clientProfileController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
-import { uploadHandler, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  DEFAULT_ALLOWED_MIME_TYPES,
+  DOCX_MIME,
+} from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
-import { parseMultipartData } from "../helpers/parseMultipartData";
 import { connectUsers } from "./contactController";
+
+// Project specs/drawings/site photos — a photo, a PDF spec sheet, or a
+// Word doc are all realistic ways a poster would actually have this
+// material sitting on their machine. Shared by createTenderProject and
+// addProjectFiles so a project's files are held to the same rule
+// regardless of which route attached them.
+const PROJECT_FILE_ALLOWED_MIME_TYPES = [...DEFAULT_ALLOWED_MIME_TYPES, DOCX_MIME];
+
+// The one place project.files gets turned into signed, servable links —
+// shared by getTenderProject/addProjectFiles/removeProjectFile so all
+// three return the exact same shape.
+const toFilesWithLinks = (project: ITenderProject) =>
+  project.files.map((file) => ({
+    fileName: file.fileName,
+    mime: file.mime,
+    size: file.size,
+    url: signFileUrl({ ownerId: project.postedBy.toString(), fileName: file.fileName, mode: FILE_URL_MODE.VIEW }),
+  }));
 
 export const toPublicTenderProject = (project: ITenderProject) => ({
   id: project.id,
@@ -69,17 +92,6 @@ const loadEligibleContractorProfile = async (
   return subscription?.isActive() ? profile : null;
 };
 
-interface ProjectPayload {
-  title?: string;
-  description?: string;
-  category?: string;
-  budgetMin?: number;
-  budgetMax?: number;
-  currency?: string;
-  location?: { country?: string; state?: string };
-  bidDeadline?: string;
-}
-
 // @desc    Post a new project to the bidding board. Requires a subscribed
 //          ClientProfile — posting doesn't require `isVerified` (see
 //          clientProfileModel.ts for why), but it does require the poster
@@ -97,23 +109,7 @@ export const createTenderProject = asyncHandler(async (req: Request, res: Respon
     throw new Error("You need a client profile with an active subscription to post a project");
   }
 
-  const { title, description, category, budgetMin, budgetMax, currency, location, bidDeadline } =
-    parseMultipartData<ProjectPayload>(req);
-
-  if (!title || !description || !location?.country) {
-    res.status(400);
-    throw new Error("Please add a title, description, and location.country");
-  }
-
-  if (!category || !Object.values(TENDER_CATEGORY).includes(category as TenderCategory)) {
-    res.status(400);
-    throw new Error("Please add a valid category");
-  }
-
-  if (!bidDeadline || new Date(bidDeadline) <= new Date()) {
-    res.status(400);
-    throw new Error("bidDeadline must be a date in the future");
-  }
+  const { title, description, category, budgetMin, budgetMax, currency, location, bidDeadline } = req.body;
 
   const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
   if (attachedCount > MAX_PROJECT_FILES) {
@@ -121,10 +117,13 @@ export const createTenderProject = asyncHandler(async (req: Request, res: Respon
     throw new Error(`You can attach at most ${MAX_PROJECT_FILES} files to a project`);
   }
 
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
+
   const { results, errorLogs } = await uploadHandler({
-    req,
+    req: shimReq,
     visibility: FILE_VISIBILITY.PRIVATE,
     ownerId: requester.id,
+    allowedMimeTypes: PROJECT_FILE_ALLOWED_MIME_TYPES,
   });
 
   const files: IMediaFile[] = results.map((r) => ({
@@ -141,7 +140,7 @@ export const createTenderProject = asyncHandler(async (req: Request, res: Respon
     category,
     budgetMin,
     budgetMax,
-    currency: currency || "USD",
+    currency,
     location,
     bidDeadline,
     files,
@@ -180,28 +179,112 @@ export const updateMyTenderProject = asyncHandler(async (req: Request, res: Resp
 
   if (title) project.title = title;
   if (description) project.description = description;
-  if (category !== undefined) {
-    if (!Object.values(TENDER_CATEGORY).includes(category)) {
-      res.status(400);
-      throw new Error("Please add a valid category");
-    }
-    project.category = category;
-  }
+  if (category !== undefined) project.category = category;
   if (budgetMin !== undefined) project.budgetMin = budgetMin;
   if (budgetMax !== undefined) project.budgetMax = budgetMax;
   if (currency) project.currency = currency;
   if (location !== undefined) project.location = location;
-  if (bidDeadline !== undefined) {
-    if (new Date(bidDeadline) <= new Date()) {
-      res.status(400);
-      throw new Error("bidDeadline must be a date in the future");
-    }
-    project.bidDeadline = new Date(bidDeadline);
-  }
+  if (bidDeadline !== undefined) project.bidDeadline = bidDeadline;
 
   await project.save();
 
   res.status(200).json(toPublicTenderProject(project));
+});
+
+// @desc    Add more files to my project (specs/drawings/site photos) —
+//          only while still open, same editing window as
+//          updateMyTenderProject. Real multipart attachments only —
+//          req.files, never req.body's base64/url alternatives (see
+//          jobOpeningController.ts's createJobOpening for the same
+//          shim and why it matters: passing the whole `req` to
+//          uploadHandler would let those through too, uncounted against
+//          MAX_PROJECT_FILES).
+// @route   POST /api/tender-projects/:id/files
+// @access  Private (poster only)
+export const addProjectFiles = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const project = await loadMyProject(requester.id, req.params.id as string);
+
+  if (!project) {
+    res.status(404);
+    throw new Error("Project not found");
+  }
+
+  if (project.status !== TENDER_PROJECT_STATUS.OPEN) {
+    res.status(400);
+    throw new Error("This project can no longer be edited");
+  }
+
+  const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
+  if (attachedCount === 0) {
+    res.status(400);
+    throw new Error("Attach at least one file");
+  }
+
+  if (project.files.length + attachedCount > MAX_PROJECT_FILES) {
+    res.status(400);
+    throw new Error(
+      `This project already has ${project.files.length} of ${MAX_PROJECT_FILES} files allowed — attach fewer`,
+    );
+  }
+
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
+
+  const { results, errorLogs } = await uploadHandler({
+    req: shimReq,
+    visibility: FILE_VISIBILITY.PRIVATE,
+    ownerId: requester.id,
+    allowedMimeTypes: PROJECT_FILE_ALLOWED_MIME_TYPES,
+  });
+
+  const newFiles: IMediaFile[] = results.map((r) => ({
+    fileName: r.fileName,
+    storagePath: r.storagePath,
+    mime: r.mime,
+    size: r.size,
+  }));
+
+  project.files.push(...newFiles);
+  await project.save();
+
+  res.status(201).json({
+    ...toPublicTenderProject(project),
+    files: toFilesWithLinks(project),
+    ...(errorLogs.length > 0 ? { fileWarnings: errorLogs } : {}),
+  });
+});
+
+// @desc    Remove one file from my project — only while still open, same
+//          editing window as updateMyTenderProject.
+// @route   DELETE /api/tender-projects/:id/files/:fileName
+// @access  Private (poster only)
+export const removeProjectFile = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const project = await loadMyProject(requester.id, req.params.id as string);
+
+  if (!project) {
+    res.status(404);
+    throw new Error("Project not found");
+  }
+
+  if (project.status !== TENDER_PROJECT_STATUS.OPEN) {
+    res.status(400);
+    throw new Error("This project can no longer be edited");
+  }
+
+  const fileName = req.params.fileName as string;
+  const file = project.files.find((f) => f.fileName === fileName);
+
+  if (!file) {
+    res.status(404);
+    throw new Error("File not found on this project");
+  }
+
+  await deleteStoredFile(file.storagePath);
+  project.files = project.files.filter((f) => f.fileName !== fileName) as typeof project.files;
+  await project.save();
+
+  res.status(200).json({ ...toPublicTenderProject(project), files: toFilesWithLinks(project) });
 });
 
 // @desc    Cancel my project while still open — every pending bid on it
@@ -332,22 +415,8 @@ export const getTenderProject = asyncHandler(async (req: Request, res: Response)
     return;
   }
 
-  const files = project.files.map((file) => ({
-    fileName: file.fileName,
-    mime: file.mime,
-    size: file.size,
-    url: signFileUrl({ ownerId: project.postedBy.toString(), fileName: file.fileName, mode: FILE_URL_MODE.VIEW }),
-  }));
-
-  res.status(200).json({ ...toPublicTenderProject(project), files });
+  res.status(200).json({ ...toPublicTenderProject(project), files: toFilesWithLinks(project) });
 });
-
-interface BidPayload {
-  amount?: number;
-  currency?: string;
-  proposal?: string;
-  estimatedDurationDays?: number;
-}
 
 // @desc    Submit a bid on an open project — sealed from every other
 //          contractor; only the poster ever sees the full list.
@@ -390,52 +459,22 @@ export const submitBid = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("You already have a bid on this project — update it instead");
   }
 
-  const { amount, currency, proposal, estimatedDurationDays } = parseMultipartData<BidPayload>(req);
-
-  if (!amount || amount <= 0) {
-    res.status(400);
-    throw new Error("A positive amount is required");
-  }
-
-  if (!proposal) {
-    res.status(400);
-    throw new Error("Please add a proposal");
-  }
-
-  const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
-  if (attachedCount > MAX_BID_FILES) {
-    res.status(400);
-    throw new Error(`You can attach at most ${MAX_BID_FILES} files to a bid`);
-  }
-
-  const { results, errorLogs } = await uploadHandler({
-    req,
-    visibility: FILE_VISIBILITY.PRIVATE,
-    ownerId: requester.id,
-  });
-
-  const files: IMediaFile[] = results.map((r) => ({
-    fileName: r.fileName,
-    storagePath: r.storagePath,
-    mime: r.mime,
-    size: r.size,
-  }));
+  const { amount, currency, proposal, estimatedDurationDays } = req.body;
 
   const bid = await Bid.create({
     project: project._id,
     contractorId: contractor._id,
     bidder: requester._id,
     amount,
-    currency: currency || "USD",
+    currency,
     proposal,
     estimatedDurationDays,
-    files,
   });
 
   project.bidCount += 1;
   await project.save();
 
-  res.status(201).json({ ...toPublicBid(bid), ...(errorLogs.length > 0 ? { fileWarnings: errorLogs } : {}) });
+  res.status(201).json(toPublicBid(bid));
 });
 
 const loadMyPendingBid = async (projectId: string, contractorProfileId: mongoose.Types.ObjectId) => {
@@ -476,13 +515,7 @@ export const updateMyBid = asyncHandler(async (req: Request, res: Response) => {
 
   const { amount, currency, proposal, estimatedDurationDays } = req.body;
 
-  if (amount !== undefined) {
-    if (!amount || amount <= 0) {
-      res.status(400);
-      throw new Error("A positive amount is required");
-    }
-    bid.amount = amount;
-  }
+  if (amount !== undefined) bid.amount = amount;
   if (currency) bid.currency = currency;
   if (proposal) bid.proposal = proposal;
   if (estimatedDurationDays !== undefined) bid.estimatedDurationDays = estimatedDurationDays;
@@ -564,10 +597,16 @@ export const getProjectBids = asyncHandler(async (req: Request, res: Response) =
     throw new Error("Project not found");
   }
 
+  // `bidder` is never populated with `email` — a formal Contact
+  // connection (connectUsers) only exists once this specific bid is
+  // actually awarded, same as acceptApplication's identical gate in
+  // jobOpeningController.ts. Handing the poster a bidder's email while
+  // merely reviewing pending bids would let them skip that gate
+  // entirely, for every bidder, by just listing the bids.
   const bids = await Bid.find({ project: project._id })
     .sort({ createdAt: -1 })
     .populate("contractorId", "headline slug ratingAverage ratingCount")
-    .populate("bidder", "fullName email");
+    .populate("bidder", "fullName");
 
   res.status(200).json(bids.map(toPublicBid));
 });
@@ -595,11 +634,6 @@ export const awardBid = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { bidId } = req.body;
-
-  if (!bidId || !mongoose.Types.ObjectId.isValid(bidId)) {
-    res.status(400);
-    throw new Error("A valid bidId is required");
-  }
 
   const bid = await Bid.findOne({ _id: bidId, project: project._id });
   if (!bid) {

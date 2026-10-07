@@ -87,11 +87,6 @@ export const createStoreProfile = asyncHandler(async (req: Request, res: Respons
 
   const { storeName, description, categories, country, city, links } = req.body;
 
-  if (!storeName || !country) {
-    res.status(400);
-    throw new Error("Please add a store name and country");
-  }
-
   const resolvedCategories = filterValidCategories(categories);
   if (resolvedCategories.length === 0) {
     res.status(400);

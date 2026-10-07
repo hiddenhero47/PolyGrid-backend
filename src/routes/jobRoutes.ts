@@ -28,10 +28,23 @@ import {
 } from "../controllers/jobController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
+import { validateBody } from "../validators/validate";
+import {
+  createJobSchema,
+  updateJobSchema,
+  proposeStagesSchema,
+  raiseDisputeSchema,
+  resolveDisputeSchema,
+  recordPaymentSchema,
+  requestRefundSchema,
+  declineRefundRequestSchema,
+  requestPayoutSchema,
+  declinePayoutRequestSchema,
+} from "../validators/job/jobValidator";
 
 const router = express.Router();
 
-router.post("/", protect, createJob);
+router.post("/", protect, validateBody(createJobSchema), createJob);
 router.get("/mine", protect, getMyJobs);
 // Read-only queues — customer_care can see them too; resolving/approving/
 // declining are real changes and stay admin-only below. Must be
@@ -41,11 +54,11 @@ router.get("/disputes", secureRole([...REVIEW_ROLES]), getDisputedJobs);
 router.get("/refund-requests", secureRole([...REVIEW_ROLES]), getPendingRefundRequests);
 router.get("/payout-requests", secureRole([...REVIEW_ROLES]), getPendingPayoutRequests);
 router.get("/:id", protect, getJob);
-router.patch("/:id", protect, updateJob);
+router.patch("/:id", protect, validateBody(updateJobSchema), updateJob);
 router.patch("/:id/confirm", protect, confirmJob);
 router.patch("/:id/cancel", protect, cancelJob);
 
-router.post("/:id/stages/propose", protect, proposeStages);
+router.post("/:id/stages/propose", protect, validateBody(proposeStagesSchema), proposeStages);
 router.patch("/:id/stages/accept", protect, acceptProposedStages);
 router.patch("/:id/stages/reject", protect, rejectProposedStages);
 router.patch("/:id/stages/:stageId/done", protect, markStageDone);
@@ -53,23 +66,25 @@ router.patch("/:id/stages/:stageId/verify", protect, verifyStage);
 
 router.post("/:id/contract", protect, uploadContract);
 
-router.patch("/:id/dispute", protect, raiseDispute);
+router.patch("/:id/dispute", protect, validateBody(raiseDisputeSchema), raiseDispute);
 router.patch(
   "/:id/dispute/resolve",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(resolveDisputeSchema),
   resolveDispute,
 );
 
 router.post(
   "/:id/payments",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(recordPaymentSchema),
   recordPayment,
 );
 // Read-only — customer_care can see a job's payment history too; the two
 // mutating money routes below stay admin-only.
 router.get("/:id/payments", secureRole([...REVIEW_ROLES]), getJobPayments);
 
-router.post("/:id/refund-requests", protect, requestRefund);
+router.post("/:id/refund-requests", protect, validateBody(requestRefundSchema), requestRefund);
 router.patch(
   "/:id/refund-requests/:refundId/approve",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
@@ -78,10 +93,11 @@ router.patch(
 router.patch(
   "/:id/refund-requests/:refundId/decline",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(declineRefundRequestSchema),
   declineRefundRequest,
 );
 
-router.post("/:id/payout-requests", protect, requestPayout);
+router.post("/:id/payout-requests", protect, validateBody(requestPayoutSchema), requestPayout);
 router.patch(
   "/:id/payout-requests/:payoutId/approve",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
@@ -90,6 +106,7 @@ router.patch(
 router.patch(
   "/:id/payout-requests/:payoutId/decline",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(declinePayoutRequestSchema),
   declinePayoutRequest,
 );
 

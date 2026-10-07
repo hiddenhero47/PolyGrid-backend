@@ -4,10 +4,6 @@ import { Request, Response } from "express";
 import {
   JobOpening,
   IJobOpening,
-  PAY_TYPE,
-  PayType,
-  EMPLOYMENT_TYPE,
-  EmploymentType,
   JOB_OPENING_STATUS,
   MAX_OPENING_FILES,
 } from "../models/jobOpeningModel";
@@ -26,7 +22,6 @@ import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
 import { uploadHandler, FILE_VISIBILITY } from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
-import { parseMultipartData } from "../helpers/parseMultipartData";
 import { connectUsers } from "./contactController";
 
 // Never includes the gated location tier (coordinates/address/
@@ -60,23 +55,6 @@ const toPublicApplication = (application: IJobApplication) => ({
   createdAt: application.createdAt,
 });
 
-interface OpeningPayload {
-  title?: string;
-  description?: string;
-  category?: string;
-  workersNeeded?: number;
-  payRate?: number;
-  payType?: string;
-  currency?: string;
-  employmentType?: string;
-  generalArea?: { country?: string; state?: string; city?: string };
-  coordinates?: { lat?: number; lng?: number };
-  address?: string;
-  googleMapsUrl?: string;
-  contactInfo?: string;
-  applicationDeadline?: string;
-}
-
 // @desc    Post a new job opening to the board. Requires a subscribed
 //          ClientProfile — same gate as createTenderProject, and the same
 //          reasoning: a bare subscription isn't enough once posters have
@@ -107,37 +85,7 @@ export const createJobOpening = asyncHandler(async (req: Request, res: Response)
     googleMapsUrl,
     contactInfo,
     applicationDeadline,
-  } = parseMultipartData<OpeningPayload>(req);
-
-  if (!title || !description || !generalArea?.country) {
-    res.status(400);
-    throw new Error("Please add a title, description, and generalArea.country");
-  }
-
-  if (!category || !Object.values(LABOR_SKILL).includes(category as LaborSkill)) {
-    res.status(400);
-    throw new Error("Please add a valid category");
-  }
-
-  if (!payRate || payRate <= 0) {
-    res.status(400);
-    throw new Error("A positive payRate is required");
-  }
-
-  if (!payType || !Object.values(PAY_TYPE).includes(payType as PayType)) {
-    res.status(400);
-    throw new Error("Please add a valid payType");
-  }
-
-  if (!employmentType || !Object.values(EMPLOYMENT_TYPE).includes(employmentType as EmploymentType)) {
-    res.status(400);
-    throw new Error("Please add a valid employmentType");
-  }
-
-  if (applicationDeadline && new Date(applicationDeadline) <= new Date()) {
-    res.status(400);
-    throw new Error("applicationDeadline must be a date in the future");
-  }
+  } = req.body;
 
   const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
   if (attachedCount > MAX_OPENING_FILES) {
@@ -145,8 +93,15 @@ export const createJobOpening = asyncHandler(async (req: Request, res: Response)
     throw new Error(`You can attach at most ${MAX_OPENING_FILES} files to a job opening`);
   }
 
+  // Real multipart attachments only — req.files, never req.body's
+  // base64/url alternatives. Passing the whole `req` to uploadHandler
+  // would let those through too, silently saving files the caller never
+  // meant to attach and blowing past MAX_OPENING_FILES undetected
+  // (checked against req.files.length alone, just above). Same shim
+  // digitalProductController.ts's saveFilesForField already uses.
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
   const { results, errorLogs } = await uploadHandler({
-    req,
+    req: shimReq,
     visibility: FILE_VISIBILITY.PRIVATE,
     ownerId: requester.id,
   });
@@ -225,42 +180,18 @@ export const updateMyJobOpening = asyncHandler(async (req: Request, res: Respons
 
   if (title) opening.title = title;
   if (description) opening.description = description;
-  if (category !== undefined) {
-    if (!Object.values(LABOR_SKILL).includes(category)) {
-      res.status(400);
-      throw new Error("Please add a valid category");
-    }
-    opening.category = category;
-  }
+  if (category !== undefined) opening.category = category;
   if (workersNeeded !== undefined) opening.workersNeeded = workersNeeded;
   if (payRate !== undefined) opening.payRate = payRate;
-  if (payType !== undefined) {
-    if (!Object.values(PAY_TYPE).includes(payType)) {
-      res.status(400);
-      throw new Error("Please add a valid payType");
-    }
-    opening.payType = payType;
-  }
+  if (payType !== undefined) opening.payType = payType;
   if (currency) opening.currency = currency;
-  if (employmentType !== undefined) {
-    if (!Object.values(EMPLOYMENT_TYPE).includes(employmentType)) {
-      res.status(400);
-      throw new Error("Please add a valid employmentType");
-    }
-    opening.employmentType = employmentType;
-  }
+  if (employmentType !== undefined) opening.employmentType = employmentType;
   if (generalArea !== undefined) opening.generalArea = generalArea;
   if (coordinates !== undefined) opening.coordinates = coordinates;
   if (address !== undefined) opening.address = address;
   if (googleMapsUrl !== undefined) opening.googleMapsUrl = googleMapsUrl;
   if (contactInfo !== undefined) opening.contactInfo = contactInfo;
-  if (applicationDeadline !== undefined) {
-    if (new Date(applicationDeadline) <= new Date()) {
-      res.status(400);
-      throw new Error("applicationDeadline must be a date in the future");
-    }
-    opening.applicationDeadline = new Date(applicationDeadline);
-  }
+  if (applicationDeadline !== undefined) opening.applicationDeadline = applicationDeadline;
 
   await opening.save();
 
@@ -426,10 +357,6 @@ export const getJobOpening = asyncHandler(async (req: Request, res: Response) =>
   });
 });
 
-interface ApplicationPayload {
-  message?: string;
-}
-
 // @desc    Apply to a job opening.
 // @route   POST /api/job-openings/:id/applications
 // @access  Private (eligible worker only)
@@ -473,7 +400,7 @@ export const applyToJobOpening = asyncHandler(async (req: Request, res: Response
     throw new Error("You've already applied to this job opening");
   }
 
-  const { message } = parseMultipartData<ApplicationPayload>(req);
+  const { message } = req.body;
 
   const application = await JobApplication.create({
     posting: opening._id,
@@ -595,10 +522,17 @@ export const getOpeningApplications = asyncHandler(async (req: Request, res: Res
     throw new Error("Job opening not found");
   }
 
+  // `applicant` is never populated with `email` — a formal Contact
+  // connection (connectUsers) only exists once this specific application
+  // is actually accepted (see acceptApplication below), same as
+  // awardBid's identical gate in tenderProjectController.ts. Handing the
+  // poster a worker's email while merely reviewing pending applications
+  // would let them skip that gate entirely, for every applicant, by
+  // just listing the applications.
   const applications = await JobApplication.find({ posting: opening._id })
     .sort({ createdAt: -1 })
     .populate("workerId", "headline slug ratingAverage ratingCount")
-    .populate("applicant", "fullName email");
+    .populate("applicant", "fullName");
 
   res.status(200).json(applications.map(toPublicApplication));
 });

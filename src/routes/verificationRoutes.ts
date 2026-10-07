@@ -9,7 +9,7 @@ import {
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 import { validateBody } from "../validators/validate";
-import { rejectVerificationSchema } from "../validators/verificationValidator";
+import { rejectVerificationSchema } from "../validators/verification/verificationValidator";
 
 const router = express.Router();
 

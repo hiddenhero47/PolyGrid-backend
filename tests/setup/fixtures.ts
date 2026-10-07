@@ -208,6 +208,19 @@ export const TEST_PNG_BUFFER = Buffer.from(
   "base64",
 );
 
+// Enough to pass fileSignature.ts's "%PDF-" check — not a structurally
+// complete PDF, same "just enough to pass the sniffer" spirit as the PNG
+// fixture above.
+export const TEST_PDF_BUFFER = Buffer.from("%PDF-1.4\n%%EOF");
+
+// Enough to pass fileSignature.ts's docx check (a zip signature followed
+// somewhere by the "word/document.xml" part name) — not a real, openable
+// .docx, same "just enough to pass the sniffer" spirit as TEST_PDF_BUFFER.
+export const TEST_DOCX_BUFFER = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from("word/document.xml"),
+]);
+
 interface CreatePrivateFileOptions {
   uploader: IUser;
   allowedUsers?: IUser[];

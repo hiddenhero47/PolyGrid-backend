@@ -90,11 +90,6 @@ export const startOrGetConversation = asyncHandler(async (req: Request, res: Res
   const requester = req.user as IUser;
   const { userId: otherUserId } = req.body;
 
-  if (!otherUserId || !mongoose.Types.ObjectId.isValid(otherUserId)) {
-    res.status(400);
-    throw new Error("A valid userId is required");
-  }
-
   if (otherUserId === requester.id) {
     res.status(400);
     throw new Error("You can't start a conversation with yourself");
@@ -194,15 +189,11 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { body } = req.body;
-  if (!body || typeof body !== "string" || !body.trim()) {
-    res.status(400);
-    throw new Error("Message body is required");
-  }
 
   const message: IMessage = await Message.create({
     conversationId: conversation._id,
     sender: requester._id,
-    body: body.trim(),
+    body,
   });
 
   conversation.lastMessageAt = message.createdAt;
@@ -242,11 +233,6 @@ export const reportMessage = asyncHandler(async (req: Request, res: Response) =>
   const requester = req.user as IUser;
   const { reason } = req.body;
 
-  if (!reason || typeof reason !== "string" || !reason.trim()) {
-    res.status(400);
-    throw new Error("A reason is required");
-  }
-
   const message = await Message.findById(req.params.id);
   if (!message) {
     res.status(404);
@@ -263,7 +249,7 @@ export const reportMessage = asyncHandler(async (req: Request, res: Response) =>
     messageId: message._id,
     conversationId: conversation._id,
     reportedBy: requester._id,
-    reason: reason.trim(),
+    reason,
   });
 
   res.status(201).json(report);

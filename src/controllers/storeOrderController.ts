@@ -1,4 +1,3 @@
-import mongoose from "mongoose";
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { StoreOrder, IStoreOrder } from "../models/storeOrderModel";
@@ -32,12 +31,12 @@ const toPublicOrder = (order: IStoreOrder) => ({
 });
 
 interface OrderItemInput {
-  productId?: string;
-  quantity?: number;
+  productId: string;
+  quantity: number;
 }
 
 interface ShippingDestinationInput {
-  country?: string;
+  country: string;
   state?: string;
 }
 
@@ -62,26 +61,11 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
     shippingDestination,
     note,
   } = req.body as {
-    storeId?: string;
-    items?: OrderItemInput[];
-    shippingDestination?: ShippingDestinationInput;
+    storeId: string;
+    items: OrderItemInput[];
+    shippingDestination: ShippingDestinationInput;
     note?: string;
   };
-
-  if (!storeId || !mongoose.Types.ObjectId.isValid(storeId)) {
-    res.status(400);
-    throw new Error("A valid storeId is required");
-  }
-
-  if (!Array.isArray(items) || items.length === 0) {
-    res.status(400);
-    throw new Error("An order needs at least one item");
-  }
-
-  if (!shippingDestination?.country) {
-    res.status(400);
-    throw new Error("A shipping destination (at least a country) is required");
-  }
 
   const store = await StoreProfile.findById(storeId);
   if (!store) {
@@ -110,15 +94,7 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
   let shippingTotal = 0;
 
   for (const item of items) {
-    if (!item.productId || !mongoose.Types.ObjectId.isValid(item.productId)) {
-      res.status(400);
-      throw new Error("Each item needs a valid productId");
-    }
-    const quantity = Number(item.quantity);
-    if (!Number.isInteger(quantity) || quantity < 1) {
-      res.status(400);
-      throw new Error("Each item needs a quantity of at least 1");
-    }
+    const quantity = item.quantity;
 
     const product = await Product.findOne({ _id: item.productId, storeId: store._id });
     if (!product) {
@@ -139,7 +115,7 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
     // "Any location that's not there won't go through" — a product with
     // no shipping option for the requested destination can't be part of
     // this order at all, not silently skipped or defaulted to some price.
-    const shippingPrice = resolveShippingPrice(product, shippingDestination as { country: string; state?: string });
+    const shippingPrice = resolveShippingPrice(product, shippingDestination);
     if (shippingPrice === null) {
       res.status(400);
       throw new Error(`${product.title} does not ship to the requested destination`);

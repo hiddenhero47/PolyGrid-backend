@@ -9,8 +9,11 @@ import {
   createTenderProject,
   createBid,
   generateToken,
+  TEST_PNG_BUFFER,
+  TEST_PDF_BUFFER,
+  TEST_DOCX_BUFFER,
 } from "../setup/fixtures";
-import { TENDER_CATEGORY } from "../../src/models/tenderProjectModel";
+import { TENDER_CATEGORY, MAX_PROJECT_FILES } from "../../src/models/tenderProjectModel";
 import { Bid } from "../../src/models/bidModel";
 import { Job } from "../../src/models/jobModel";
 
@@ -220,6 +223,117 @@ describe("GET /api/tender-projects/:id", () => {
   });
 });
 
+describe("POST /api/tender-projects/:id/files and DELETE .../files/:fileName", () => {
+  it("adds a pdf, image, or docx file, and lets the poster remove one again", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const token = generateToken(poster);
+
+    const added = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file1", TEST_PDF_BUFFER, "spec.pdf")
+      .attach("file2", TEST_PNG_BUFFER, "site.png")
+      .attach("file3", TEST_DOCX_BUFFER, "scope.docx");
+
+    expect(added.status).toBe(201);
+    expect(added.body.files).toHaveLength(3);
+    expect(added.body.files.map((f: { url: string }) => f.url)).toEqual(
+      expect.arrayContaining([expect.any(String)]),
+    );
+
+    const fileName = added.body.files[0].fileName;
+    const removed = await request(app)
+      .delete(`/api/tender-projects/${project.id}/files/${fileName}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(removed.status).toBe(200);
+    expect(removed.body.files).toHaveLength(2);
+  });
+
+  // Same "never fail the whole request for a bad optional attachment"
+  // philosophy as every other media-upload endpoint in this codebase
+  // (see fileStorage.uploadHandler's own comment) — a file that isn't a
+  // pdf/image/docx surfaces as a non-blocking fileWarnings entry, not a
+  // 400, and simply never gets added.
+  it("surfaces a file that isn't a pdf, image, or docx as a non-blocking fileWarnings entry", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .attach("file", Buffer.from("just some text"), "notes.txt");
+
+    expect(res.status).toBe(201);
+    expect(res.body.files).toHaveLength(0);
+    expect(res.body.fileWarnings).toBeDefined();
+  });
+
+  it("requires at least one file, and caps at MAX_PROJECT_FILES", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const token = generateToken(poster);
+
+    const noFile = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+    expect(noFile.status).toBe(400);
+
+    let tooMany = request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`);
+    for (let i = 0; i < MAX_PROJECT_FILES + 1; i++) {
+      tooMany = tooMany.attach(`file${i}`, TEST_PDF_BUFFER, `spec${i}.pdf`);
+    }
+    expect((await tooMany).status).toBe(400);
+  });
+
+  it("ignores a base64 file instead of silently saving it", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .send({ base64: "data:application/pdf;base64,anything" });
+
+    // No real attachment present — same as attaching nothing at all.
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a non-poster from adding or removing files", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const stranger = await createUser();
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(stranger)}`)
+      .attach("file", TEST_PDF_BUFFER, "spec.pdf");
+
+    expect(res.status).toBe(404);
+  });
+
+  it("blocks editing files once the project is no longer open", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const token = generateToken(poster);
+
+    await request(app)
+      .patch(`/api/tender-projects/${project.id}/cancel`)
+      .set("Authorization", `Bearer ${token}`);
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PDF_BUFFER, "spec.pdf");
+
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
   it("blocks a non-eligible contractor from bidding", async () => {
     const poster = await createUserWithActiveSubscription();
@@ -315,6 +429,11 @@ describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
     expect(visibleForPoster.status).toBe(200);
     expect(visibleForPoster.body).toHaveLength(1);
     expect(visibleForPoster.body[0].proposal).toBe("From A");
+    // The bidder's name is fine for the poster to review by, but their
+    // email stays hidden until a real Contact connection exists — which
+    // only happens at awardBid, not just by listing pending bids.
+    expect(visibleForPoster.body[0].bidder.fullName).toEqual(expect.any(String));
+    expect(visibleForPoster.body[0].bidder.email).toBeUndefined();
   });
 });
 

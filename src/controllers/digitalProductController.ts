@@ -16,7 +16,6 @@ import { Subscription } from "../models/subscriptionModel";
 import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
-import { parseMultipartData } from "../helpers/parseMultipartData";
 
 // Never includes `files` — the actual deliverables are private and only
 // ever reachable through getDownloadLink's access check.
@@ -82,14 +81,6 @@ const saveFilesForField = async (
   };
 };
 
-interface DigitalProductPayload {
-  category?: string;
-  title?: string;
-  description?: string;
-  price?: number;
-  currency?: string;
-}
-
 // @desc    Create a digital product listing under my creator profile
 // @route   POST /api/digital-creator-profiles/me/products
 // @access  Private
@@ -106,17 +97,7 @@ export const createDigitalProduct = asyncHandler(async (req: Request, res: Respo
     throw new Error("You don't have a digital creator profile yet");
   }
 
-  const { category, title, description, price, currency } = parseMultipartData<DigitalProductPayload>(req);
-
-  if (!title || price === undefined) {
-    res.status(400);
-    throw new Error("Please add a title and price");
-  }
-
-  if (!category || !Object.values(DIGITAL_PRODUCT_CATEGORY).includes(category as DigitalProductCategory)) {
-    res.status(400);
-    throw new Error("Please add a valid category");
-  }
+  const { category, title, description, price, currency } = req.body;
 
   const previewCount = filesForField(req, "previewImages").length;
   if (previewCount > MAX_PREVIEW_IMAGES) {
@@ -188,14 +169,7 @@ export const updateDigitalProduct = asyncHandler(async (req: Request, res: Respo
 
   const { category, title, description, price, currency, isActive } = req.body;
 
-  if (category !== undefined) {
-    if (!Object.values(DIGITAL_PRODUCT_CATEGORY).includes(category)) {
-      res.status(400);
-      throw new Error("Please add a valid category");
-    }
-    product.category = category;
-  }
-
+  if (category !== undefined) product.category = category;
   if (title) product.title = title;
   if (description !== undefined) product.description = description;
   if (price !== undefined) product.price = price;

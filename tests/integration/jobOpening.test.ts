@@ -9,6 +9,7 @@ import {
   createJobOpening,
   createJobApplication,
   generateToken,
+  TEST_PNG_BASE64,
 } from "../setup/fixtures";
 import { LABOR_SKILL } from "../../src/models/laborProfileModel";
 import { PAY_TYPE, EMPLOYMENT_TYPE } from "../../src/models/jobOpeningModel";
@@ -109,6 +110,26 @@ describe("POST /api/job-openings", () => {
       .set("Authorization", `Bearer ${token}`)
       .field("data", JSON.stringify(openingPayload({ payType: "not-a-real-one" })));
     expect(badPayType.status).toBe(400);
+  });
+
+  // Opening files are real multipart attachments only — base64/url
+  // (uploadHandler's two other input methods) must not be silently
+  // saved just because they rode along in the same multipart request.
+  it("ignores a base64 file instead of silently saving it", async () => {
+    const poster = await createEligiblePoster();
+    const token = generateToken(poster);
+
+    const created = await request(app)
+      .post("/api/job-openings")
+      .set("Authorization", `Bearer ${token}`)
+      .field("data", JSON.stringify(openingPayload()))
+      .field("base64", TEST_PNG_BASE64);
+    expect(created.status).toBe(201);
+
+    const fetched = await request(app)
+      .get(`/api/job-openings/${created.body.id}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(fetched.body.files).toHaveLength(0);
   });
 
   it("requires a positive payRate", async () => {
@@ -345,6 +366,12 @@ describe("GET /api/job-openings/:id/applications — sealed from other applicant
     expect(visibleForPoster.status).toBe(200);
     expect(visibleForPoster.body).toHaveLength(1);
     expect(visibleForPoster.body[0].message).toBe("From A");
+    // The applicant's name is fine for the poster to review by, but
+    // their email stays hidden until a real Contact connection exists —
+    // which only happens at acceptApplication, not just by listing
+    // pending applications.
+    expect(visibleForPoster.body[0].applicant.fullName).toEqual(expect.any(String));
+    expect(visibleForPoster.body[0].applicant.email).toBeUndefined();
   });
 });
 

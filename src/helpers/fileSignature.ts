@@ -44,5 +44,27 @@ export const detectFileSignature = (buffer: Buffer): DetectedFileType | null => 
     return { mime: "application/pdf", ext: "pdf" };
   }
 
+  // .docx (and every other OOXML format — .xlsx, .pptx) is a zip archive,
+  // so the first 4 bytes alone only prove "some zip", not "a Word doc". A
+  // zip entry's *name* is always stored as cleartext in its local file
+  // header and again in the central directory, regardless of whether the
+  // entry's own content is compressed — so a plain substring search for
+  // the one part-name unique to a Word package ("word/document.xml", vs.
+  // "xl/workbook.xml" for Excel or "ppt/presentation.xml" for PowerPoint)
+  // tells a .docx apart from any other zip without a real zip parser.
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x50 &&
+    buffer[1] === 0x4b &&
+    buffer[2] === 0x03 &&
+    buffer[3] === 0x04 &&
+    buffer.toString("latin1").includes("word/document.xml")
+  ) {
+    return {
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ext: "docx",
+    };
+  }
+
   return null;
 };

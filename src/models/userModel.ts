@@ -70,13 +70,38 @@ export interface IAvatar {
   url?: string;
 }
 
-// Loosely typed to match the schema's `type: Object` — 2FA setup isn't
-// implemented yet (no otplib/qrcode wiring), this just reserves the shape
-// house-maduekwe-backend uses (`secret`/`tempSecret`) for when it is.
+// Loosely typed to match the schema's `type: Object` (mirrors
+// house-maduekwe-backend's shape) — set via userController.ts's
+// setupTwoFactor (writes `tempSecret`)/verifyTwoFactor (confirms it,
+// promotes it to `secret`, flips `enable`)/toggleTwoFactor (flips
+// `enable` using the already-confirmed `secret`), and read by
+// middleware/verifyIdentityMiddleware.ts to decide whether a sensitive
+// account change needs a TOTP code or just the current password.
+//
+// Gotcha: because this is a loosely-typed `Object` field, not a real
+// sub-schema, Mongoose only detects a *whole-field* reassignment
+// (`user.user2fa = {...user.user2fa, enable: true}`) as a change — it
+// does NOT detect a mutation of one of its properties in place
+// (`user.user2fa.enable = true`), which silently never gets saved. Every
+// write to this field must reassign the whole object.
 export interface IUser2fa {
   enable: boolean;
   secret?: string;
   tempSecret?: string;
+}
+
+// Where a verified-payout/refund actually gets sent — see
+// systemPayoutModel.ts, which snapshots this at the moment an admin
+// approves a payout/refund request (so a record never silently points at
+// an account the recipient has since changed). Setting/changing this is
+// gated behind verifyIdentityMiddleware.ts — see userController.ts's
+// updatePayoutAccount.
+export interface IPayoutAccount {
+  accountName: string;
+  accountNumber: string;
+  bankName: string;
+  bankCode?: string;
+  country: string;
 }
 
 export interface IUser extends Document {
@@ -88,6 +113,7 @@ export interface IUser extends Document {
   authProviders: IAuthProvider[];
   verified: boolean;
   user2fa: IUser2fa;
+  payoutAccount?: IPayoutAccount;
   systemRole: SystemRole;
   activeAccountType: AccountType;
   // Points at this user's most recent Subscription record — null until they
@@ -172,6 +198,26 @@ const userSchema = new Schema<IUser>(
     user2fa: {
       type: Object,
       default: { enable: false },
+    },
+    payoutAccount: {
+      type: {
+        accountName: { type: String, required: true, trim: true },
+        accountNumber: { type: String, required: true, trim: true },
+        bankName: { type: String, required: true, trim: true },
+        bankCode: { type: String, trim: true },
+        country: {
+          type: String,
+          required: true,
+          uppercase: true,
+          trim: true,
+          validate: {
+            validator: (value: string) => isValidCountryCode(value),
+            message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+          },
+        },
+      },
+      required: false,
+      _id: false,
     },
     systemRole: {
       type: String,

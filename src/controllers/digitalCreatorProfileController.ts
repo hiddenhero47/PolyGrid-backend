@@ -77,11 +77,6 @@ export const createDigitalCreatorProfile = asyncHandler(async (req: Request, res
 
   const { displayName, bio, country, city, links } = req.body;
 
-  if (!displayName || !country) {
-    res.status(400);
-    throw new Error("Please add a displayName and country");
-  }
-
   const resolvedLinks = filterValidLinks(links);
   if (resolvedLinks.length > MAX_PROFILE_LINKS) {
     res.status(400);

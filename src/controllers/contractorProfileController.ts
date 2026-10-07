@@ -16,7 +16,6 @@ import { IPortfolioMedia } from "../models/portfolioItem";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
-import { parseMultipartData } from "../helpers/parseMultipartData";
 
 const slugify = (value: string): string =>
   value
@@ -102,11 +101,6 @@ export const createContractorProfile = asyncHandler(async (req: Request, res: Re
   }
 
   const { headline, bio, specialties, country, city, yearsOfExperience, links } = req.body;
-
-  if (!headline || !country) {
-    res.status(400);
-    throw new Error("Please add a headline and country");
-  }
 
   const resolvedSpecialties = Array.isArray(specialties)
     ? specialties.filter((s): s is ContractorSpecialty => Object.values(CONTRACTOR_SPECIALTY).includes(s))
@@ -272,18 +266,17 @@ export const getContractor = asyncHandler(async (req: Request, res: Response) =>
   res.status(200).json(toPublicContractorProfile(profile));
 });
 
-interface PortfolioItemPayload {
-  title?: string;
-  description?: string;
-  tags?: string[];
-  startedAt?: string;
-  completedAt?: string;
-}
-
 const saveMediaFiles = async (
   req: Request,
 ): Promise<{ media: IPortfolioMedia[]; warnings: string[] }> => {
-  const { results, errorLogs } = await uploadHandler({ req, visibility: FILE_VISIBILITY.PUBLIC });
+  // Real multipart attachments only — req.files, never req.body's
+  // base64/url alternatives. Passing the whole `req` to uploadHandler
+  // would let those through too, silently saving media the caller never
+  // meant to attach and blowing past MAX_MEDIA_PER_ITEM/MAX_PORTFOLIO_ITEMS
+  // undetected (those are checked against req.files.length alone). Same
+  // shim digitalProductController.ts's saveFilesForField already uses.
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
+  const { results, errorLogs } = await uploadHandler({ req: shimReq, visibility: FILE_VISIBILITY.PUBLIC });
 
   return {
     media: results.map((r) => ({
@@ -313,23 +306,12 @@ export const addPortfolioItem = asyncHandler(async (req: Request, res: Response)
     throw new Error(`You can have at most ${MAX_PORTFOLIO_ITEMS} portfolio items`);
   }
 
-  const { title, description, tags, startedAt, completedAt } =
-    parseMultipartData<PortfolioItemPayload>(req);
-
-  if (!title) {
-    res.status(400);
-    throw new Error("Please add a title");
-  }
+  const { title, description, tags, startedAt, completedAt } = req.body;
 
   const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
   if (attachedCount > MAX_MEDIA_PER_ITEM) {
     res.status(400);
     throw new Error(`You can attach at most ${MAX_MEDIA_PER_ITEM} images to a single portfolio item`);
-  }
-
-  if (startedAt && completedAt && new Date(startedAt) > new Date(completedAt)) {
-    res.status(400);
-    throw new Error("completedAt must be on or after startedAt");
   }
 
   const { media, warnings: mediaWarnings } = await saveMediaFiles(req);
@@ -338,9 +320,9 @@ export const addPortfolioItem = asyncHandler(async (req: Request, res: Response)
     title,
     description,
     media,
-    tags: Array.isArray(tags) ? tags : [],
-    startedAt: startedAt ? new Date(startedAt) : undefined,
-    completedAt: completedAt ? new Date(completedAt) : undefined,
+    tags,
+    startedAt,
+    completedAt,
   });
 
   await profile.save();

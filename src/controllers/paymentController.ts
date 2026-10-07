@@ -48,11 +48,6 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
   const requester = req.user as IUser;
   const { targetId, amount } = req.body;
 
-  if (!targetId || !mongoose.Types.ObjectId.isValid(targetId) || !amount || amount <= 0) {
-    res.status(400);
-    throw new Error("Please add a valid targetId and a positive amount");
-  }
-
   const job = await Job.findById(targetId);
 
   if (!job) {
@@ -98,11 +93,6 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
 const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
   const { planTier, autoRenew } = req.body;
-
-  if (!planTier) {
-    res.status(400);
-    throw new Error("Please add a planTier");
-  }
 
   const plan = await Plan.findOne({ planTier, isActive: true });
 
@@ -166,11 +156,6 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
 const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
   const { targetId } = req.body;
-
-  if (!targetId || !mongoose.Types.ObjectId.isValid(targetId)) {
-    res.status(400);
-    throw new Error("Please add a valid targetId");
-  }
 
   const product = await DigitalProduct.findById(targetId);
   if (!product || !product.isActive) {
@@ -253,12 +238,7 @@ export const createPaymentIntent = asyncHandler(async (req: Request, res: Respon
     return handleSubscriptionPaymentIntent(req, res);
   }
 
-  if (targetType === PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE) {
-    return handleDigitalPurchasePaymentIntent(req, res);
-  }
-
-  res.status(400);
-  throw new Error("targetType must be 'Job', 'Subscription', or 'DigitalPurchase'");
+  return handleDigitalPurchasePaymentIntent(req, res);
 });
 
 // @desc    Stripe webhook — on payment_intent.succeeded, marks the Payment

@@ -5,21 +5,66 @@ import { Request, Response } from "express";
 import {
   Job,
   IJob,
+  IJobParty,
   IJobStage,
-  JOB_TYPE,
   JobType,
   JOB_STATUS,
   JobStatus,
   PAYMENT_REQUEST_STATUS,
 } from "../models/jobModel";
 import { User, IUser, SYSTEM_ROLE } from "../models/userModel";
-import { FileGrant } from "../models/fileGrantModel";
+import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE, SystemPayoutRequestType } from "../models/systemPayoutModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY, PRIVATE_DIR } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  PRIVATE_DIR,
+  DOCX_MIME,
+  countUploadCandidates,
+} from "../helpers/fileStorage";
+import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { connectUsers } from "./contactController";
+
+const CONTRACT_ALLOWED_MIME_TYPES = ["application/pdf", DOCX_MIME];
+
+// Both URLs point at the uploading party's own private folder (ownerId:
+// that party's userId, exactly as uploadContract saved it under) — minted
+// directly off the job's own assertParty check, same "a domain controller
+// mints its own link after its own access decision" pattern fileSigning.ts
+// documents, so a contract never needs a FileGrant record at all.
+const withContractLinks = (party: IJobParty) => {
+  if (!party.contractFile) return undefined;
+
+  const ownerId = party.userId.toString();
+  const { fileName } = party.contractFile;
+
+  return {
+    ...party.contractFile,
+    requestUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.VIEW }),
+    downloadUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.DOWNLOAD }),
+  };
+};
+
+// The list view — deliberately light. A job's full detail (stages,
+// amountHistory, disputeHistory, refunds, payouts, contract links, …)
+// only matters once someone has actually opened one specific job via
+// getJob; a list of every job you're a party to doesn't need all of that
+// repeated per row.
+const toJobSummary = (job: IJob) => ({
+  id: job.id,
+  jobTitle: job.jobTitle,
+  jobType: job.jobType,
+  status: job.status,
+  totalAmount: job.totalAmount,
+  currency: job.currency,
+  client: { userId: job.client.userId, isConfirmed: job.client.isConfirmed },
+  provider: { userId: job.provider.userId, isConfirmed: job.provider.isConfirmed },
+  createdAt: job.createdAt,
+});
 
 // Fire-and-forget from the requester's point of view, but awaited here so
 // a Mailgun failure surfaces in this request rather than racing the
@@ -32,7 +77,10 @@ const notifyPaymentRequestDecision = async (
   job: IJob,
   requestType: "refund" | "payout",
   requestedBy: mongoose.Types.ObjectId,
-  amount: number | undefined,
+  // Always a real, system-computed number now — neither IRefund.amount
+  // nor IPayout.amount can be unset (see jobModel.ts), so there's no
+  // "unspecified amount" case left to fall back on.
+  amount: number,
   currency: string,
   approved: boolean,
   declineReason?: string,
@@ -49,7 +97,7 @@ const notifyPaymentRequestDecision = async (
       jobTitle: job.jobTitle,
       requestType,
       approved,
-      amount: amount !== undefined ? amount : "the full available amount",
+      amount,
       currency,
       declineReason,
     },
@@ -113,6 +161,68 @@ const assertParty = (job: IJob, user: IUser): JobRole | null => {
   return role;
 };
 
+// How much of what's been paid in is still sitting in escrow, unreleased
+// toward any verified stage — the only part a refund can ever safely
+// claw back. amountDisbursed/platformFeeCollected is money already gone
+// to the provider/PolyGrid for work a client confirmed was done; a
+// refund was never meant to reach back into that, only hand back what's
+// still just sitting there unclaimed. Floored at 0 — totalRefunded can
+// equal but never (legitimately) exceed this.
+const refundableAmount = (job: IJob): number =>
+  Math.max(job.amountPaid - job.amountDisbursed - job.platformFeeCollected - job.totalRefunded, 0);
+
+// How much of what's been disbursed to the provider is still unpaid out.
+// amountDisbursed is already net of the platform's cut (verifyStage does
+// `amountDisbursed += stageAmount - feeAmount`), so — unlike refunds —
+// nothing further needs subtracting here. min() against amountPaid
+// guards the case verifyStage releases against totalAmount regardless of
+// how much has actually been paid in yet.
+const payoutAvailableAmount = (job: IJob): number =>
+  Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut;
+
+// Creates the ledger record of money PolyGrid now actually owes someone,
+// the moment an admin approves a refund/payout request — see
+// systemPayoutModel.ts. Fails loudly (before the request is marked
+// approved) if the beneficiary has never set up a payout account: there's
+// nowhere to record this money going, so the approval can't proceed.
+const createSystemPayout = async ({
+  requestType,
+  job,
+  requestId,
+  beneficiaryId,
+  amount,
+  createdBy,
+}: {
+  requestType: SystemPayoutRequestType;
+  job: IJob;
+  requestId: mongoose.Types.ObjectId;
+  beneficiaryId: mongoose.Types.ObjectId;
+  amount: number;
+  createdBy: mongoose.Types.ObjectId;
+}): Promise<void> => {
+  const beneficiary = await User.findById(beneficiaryId).select("payoutAccount");
+
+  if (!beneficiary?.payoutAccount) {
+    const error: AppError = new Error(
+      "The recipient hasn't set up a payout account yet — this can't be approved until they do",
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  await SystemPayout.create({
+    requestType,
+    targetType: PAYMENT_TARGET_TYPE.JOB,
+    targetId: job._id,
+    requestId,
+    user: beneficiaryId,
+    amount,
+    currency: job.currency,
+    payoutAccount: beneficiary.payoutAccount,
+    createdBy,
+  });
+};
+
 // @desc    Create a job with another user (already a contact, or not — this
 //          also connects the two of you, same as adding a contact directly)
 // @route   POST /api/jobs
@@ -120,34 +230,13 @@ const assertParty = (job: IJob, user: IUser): JobRole | null => {
 //          tool available to every account.
 export const createJob = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
-  const {
-    counterpartyUserId,
-    myRole,
-    jobTitle,
-    jobDescription,
-    jobType,
-    totalAmount,
-    currency,
-    stages,
-  } = req.body;
+  const { counterpartyUserId, myRole, jobTitle, jobDescription, jobType, totalAmount, currency, stages } =
+    req.body;
 
-  if (!counterpartyUserId || !myRole || !jobTitle || !jobDescription || totalAmount === undefined) {
-    res.status(400);
-    throw new Error(
-      "Please add counterpartyUserId, myRole, jobTitle, jobDescription and totalAmount",
-    );
-  }
-
-  if (myRole !== "client" && myRole !== "provider") {
-    res.status(400);
-    throw new Error("myRole must be 'client' or 'provider'");
-  }
-
-  if (!mongoose.Types.ObjectId.isValid(counterpartyUserId)) {
-    res.status(400);
-    throw new Error("Invalid counterparty user id");
-  }
-
+  // Shape/required-ness (ids, enum, non-empty strings) is validateBody's
+  // job now (see validators/job/jobValidator.ts) — this is the one check
+  // left that genuinely needs the requester's own identity, which a body
+  // schema has no access to.
   if (counterpartyUserId === requester.id) {
     res.status(400);
     throw new Error("You cannot create a job with yourself");
@@ -175,13 +264,13 @@ export const createJob = asyncHandler(async (req: Request, res: Response) => {
   const job = await Job.create({
     jobTitle,
     jobDescription,
-    jobType: Object.values(JOB_TYPE).includes(jobType) ? jobType : JOB_TYPE.OTHER,
+    jobType,
     createdBy: requester._id,
     client,
     provider,
     stages: resolvedStages,
     totalAmount,
-    currency: typeof currency === "string" && currency.trim() ? currency : undefined,
+    currency,
     platformFeePercent: getPlatformFeePercent(),
   });
 
@@ -203,7 +292,13 @@ export const getJob = asyncHandler(async (req: Request, res: Response) => {
 
   assertParty(job, req.user as IUser);
 
-  res.status(200).json(job);
+  const plain = job.toObject();
+
+  res.status(200).json({
+    ...plain,
+    client: { ...plain.client, contractFile: withContractLinks(job.client) },
+    provider: { ...plain.provider, contractFile: withContractLinks(job.provider) },
+  });
 });
 
 // @desc    List jobs I'm a party to, newest first
@@ -230,7 +325,7 @@ export const getMyJobs = asyncHandler(async (req: Request, res: Response) => {
   ]);
 
   res.status(200).json({
-    data: jobs,
+    data: jobs.map(toJobSummary),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
@@ -303,7 +398,7 @@ export const updateJob = asyncHandler(async (req: Request, res: Response) => {
 
   if (jobTitle) job.jobTitle = jobTitle;
   if (jobDescription) job.jobDescription = jobDescription;
-  if (jobType && Object.values(JOB_TYPE).includes(jobType)) job.jobType = jobType as JobType;
+  if (jobType) job.jobType = jobType as JobType;
   if (totalAmount !== undefined && totalAmount !== job.totalAmount) {
     job.amountHistory.push({
       previousAmount: job.totalAmount,
@@ -527,34 +622,47 @@ export const uploadContract = asyncHandler(async (req: Request, res: Response) =
     throw new Error("You are not a party to this job");
   }
 
-  const otherPartyId = role === "client" ? job.provider.userId : job.client.userId;
+  // Counted across every way uploadHandler accepts a file (a real
+  // attachment, base64, or a remote url) — a contract is exactly one
+  // document, never a batch, so this rejects before anything touches
+  // disk rather than saving every valid one and quietly keeping only
+  // the first (which is what calling uploadHandler unconditionally would
+  // do: it saves every file in req.files, not just results[0]).
+  if (countUploadCandidates(req) !== 1) {
+    res.status(400);
+    throw new Error("Attach exactly one contract file");
+  }
 
   const { results, errorLogs } = await uploadHandler({
     req,
     visibility: FILE_VISIBILITY.PRIVATE,
     ownerId: requester.id,
+    allowedMimeTypes: CONTRACT_ALLOWED_MIME_TYPES,
   });
 
   if (results.length === 0) {
     res.status(400);
-    throw new Error(errorLogs[0] || "No valid file provided");
+    throw new Error(errorLogs[0] || "Only PDF or DOCX contracts are accepted");
   }
 
   const saved = results[0];
   const existing = job[role].contractFile;
 
+  // No FileGrant needed — the other party's (and an admin's) access is
+  // decided live by getJob's own assertParty check, which mints
+  // requestUrl/downloadUrl directly (see withContractLinks above), the
+  // same "a domain controller mints its own link" pattern fileSigning.ts
+  // documents.
   if (existing) {
     await deleteStoredFile(path.join(PRIVATE_DIR, requester.id, existing.fileName));
-    await FileGrant.deleteOne({ fileName: existing.fileName });
   }
 
-  await FileGrant.create({
-    ownerId: requester._id,
+  job[role].contractFile = {
     fileName: saved.fileName,
-    allowedUsers: [otherPartyId],
-  });
-
-  job[role].contractFile = { fileName: saved.fileName, uploadedAt: new Date() };
+    mime: saved.mime,
+    size: saved.size,
+    uploadedAt: new Date(),
+  };
 
   await job.save();
 
@@ -581,11 +689,6 @@ export const raiseDispute = asyncHandler(async (req: Request, res: Response) => 
   }
 
   const { reason } = req.body;
-
-  if (!reason) {
-    res.status(400);
-    throw new Error("A dispute reason is required");
-  }
 
   job.isDispute = true;
   job.disputedBy = requester._id as mongoose.Types.ObjectId;
@@ -650,11 +753,6 @@ export const resolveDispute = asyncHandler(async (req: Request, res: Response) =
   }
 
   const { note } = req.body;
-
-  if (!note) {
-    res.status(400);
-    throw new Error("A resolution note is required");
-  }
 
   job.disputeHistory.push({
     resolvedBy: admin._id as mongoose.Types.ObjectId,
@@ -727,11 +825,6 @@ export const recordPayment = asyncHandler(async (req: Request, res: Response) =>
 
   const { amount } = req.body;
 
-  if (!amount || amount <= 0) {
-    res.status(400);
-    throw new Error("A positive amount is required");
-  }
-
   const client = await User.findById(job.client.userId).select("email");
 
   job.amountPaid += amount;
@@ -799,32 +892,17 @@ export const requestRefund = asyncHandler(async (req: Request, res: Response) =>
     throw new Error("You already have a pending refund request on this job");
   }
 
-  // Fails at this level first, before even looking at the requested
-  // amount — asking for anything at all makes no sense once every dollar
-  // paid in has already been refunded.
-  if (job.amountPaid - job.totalRefunded <= 0) {
+  // There's no amount to accept here — PolyGrid isn't a bank the client
+  // tells a number to, this is always exactly what's still sitting in
+  // escrow for this job (see refundableAmount's own comment).
+  const amount = refundableAmount(job);
+
+  if (amount <= 0) {
     res.status(400);
     throw new Error("There's nothing left to refund on this job");
   }
 
-  const { amount, reason } = req.body;
-
-  if (!amount || amount <= 0) {
-    res.status(400);
-    throw new Error("A positive amount is required");
-  }
-
-  if (!reason) {
-    res.status(400);
-    throw new Error("A refund reason is required");
-  }
-
-  if (job.totalRefunded + amount > job.amountPaid) {
-    res.status(400);
-    throw new Error(
-      `Requesting ${amount} would exceed what's actually been paid into this job (${job.amountPaid - job.totalRefunded} refundable)`,
-    );
-  }
+  const { reason } = req.body;
 
   job.refunds.push({
     amount,
@@ -865,6 +943,9 @@ export const getPendingRefundRequests = asyncHandler(async (req: Request, res: R
     jobTitle: job.jobTitle,
     client: job.client,
     provider: job.provider,
+    // Recomputed fresh, same reasoning as getPendingPayoutRequests'
+    // `available` — it may have shrunk since this was requested.
+    refundable: refundableAmount(job),
     refund: job.refunds.find((r) => r.status === PAYMENT_REQUEST_STATUS.PENDING),
   }));
 
@@ -899,19 +980,31 @@ export const approveRefundRequest = asyncHandler(async (req: Request, res: Respo
     throw new Error(`This refund request has already been ${refund.status}`);
   }
 
-  // Re-checked at decision time, not just at request time — other
-  // refunds may have been approved in between.
-  if (job.totalRefunded + refund.amount > job.amountPaid) {
+  // Recomputed fresh, not trusted from request time — another refund may
+  // have been approved in between, shrinking what's actually still
+  // refundable.
+  const amount = refundableAmount(job);
+
+  if (amount <= 0) {
     res.status(400);
-    throw new Error(
-      `Approving ${refund.amount} would exceed what's actually been paid into this job (${job.amountPaid - job.totalRefunded} refundable)`,
-    );
+    throw new Error("There's nothing left to refund on this job");
   }
 
+  // Before any state changes — nowhere to send this money otherwise.
+  await createSystemPayout({
+    requestType: SYSTEM_PAYOUT_REQUEST_TYPE.REFUND,
+    job,
+    requestId: refund._id,
+    beneficiaryId: job.client.userId,
+    amount,
+    createdBy: admin._id as mongoose.Types.ObjectId,
+  });
+
+  refund.amount = amount;
   refund.status = PAYMENT_REQUEST_STATUS.APPROVED;
   refund.decidedBy = admin._id as mongoose.Types.ObjectId;
   refund.decidedAt = new Date();
-  job.totalRefunded += refund.amount;
+  job.totalRefunded += amount;
 
   if (job.status !== JOB_STATUS.CLOSED) {
     job.status = JOB_STATUS.CLOSED;
@@ -919,7 +1012,7 @@ export const approveRefundRequest = asyncHandler(async (req: Request, res: Respo
   }
 
   await job.save();
-  await notifyPaymentRequestDecision(job, "refund", refund.requestedBy, refund.amount, job.currency, true);
+  await notifyPaymentRequestDecision(job, "refund", refund.requestedBy, amount, job.currency, true);
 
   res.status(200).json(job);
 });
@@ -950,11 +1043,6 @@ export const declineRefundRequest = asyncHandler(async (req: Request, res: Respo
   }
 
   const { declineReason } = req.body;
-
-  if (!declineReason) {
-    res.status(400);
-    throw new Error("A decline reason is required");
-  }
 
   refund.status = PAYMENT_REQUEST_STATUS.DECLINED;
   refund.decidedBy = admin._id as mongoose.Types.ObjectId;
@@ -1009,33 +1097,23 @@ export const requestPayout = asyncHandler(async (req: Request, res: Response) =>
     throw new Error(`A ${job.status} job has nothing left to pay out`);
   }
 
-  // amountDisbursed is what verified stages have released from escrow —
-  // but verifyStage releases against totalAmount regardless of how much
-  // has actually been paid in yet, so this takes the smaller of the two
-  // rather than trusting amountDisbursed on its own.
-  const available = Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut;
+  // There's no amount to accept here — PolyGrid isn't a bank the
+  // provider tells a number to, this is always exactly what's currently
+  // available (see payoutAvailableAmount's own comment).
+  const amount = payoutAvailableAmount(job);
 
-  if (available <= 0) {
+  if (amount <= 0) {
     res.status(400);
     throw new Error("Nothing is currently available to request a payout on");
   }
 
-  // req.body is undefined, not {}, when a request sends no body at all —
-  // legitimate here, since `amount` is meant to be entirely optional.
-  const { amount, note } = req.body ?? {};
-
-  if (amount !== undefined && (!Number(amount) || Number(amount) <= 0)) {
-    res.status(400);
-    throw new Error("amount must be a positive number");
-  }
-
-  if (amount !== undefined && Number(amount) > available) {
-    res.status(400);
-    throw new Error(`Requesting ${amount} would exceed the ${available} currently available`);
-  }
+  // `note` shape is validateBody's job now — req.body is always a real
+  // object here, never undefined, thanks to requestPayoutSchema's own
+  // `.default({})`.
+  const { note } = req.body;
 
   job.payouts.push({
-    amount: amount !== undefined ? Number(amount) : undefined,
+    amount,
     note,
     status: PAYMENT_REQUEST_STATUS.PENDING,
     requestedBy: requester._id as mongoose.Types.ObjectId,
@@ -1076,7 +1154,7 @@ export const getPendingPayoutRequests = asyncHandler(async (req: Request, res: R
     // Available is recomputed fresh, not read off the request — it may
     // have shrunk (another payout approved in the meantime) since this
     // was requested.
-    available: Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut,
+    available: payoutAvailableAmount(job),
     payout: job.payouts.find((p) => p.status === PAYMENT_REQUEST_STATUS.PENDING),
   }));
 
@@ -1111,36 +1189,34 @@ export const approvePayoutRequest = asyncHandler(async (req: Request, res: Respo
     throw new Error(`This payout request has already been ${payout.status}`);
   }
 
-  // Re-checked at decision time, not just at request time — other
-  // payouts may have been approved in between, shrinking what's left.
-  const available = Math.min(job.amountDisbursed, job.amountPaid) - job.amountPaidOut;
+  // Recomputed fresh, not trusted from request time or any caller-
+  // supplied override — other payouts may have been approved in
+  // between, shrinking what's actually left.
+  const amount = payoutAvailableAmount(job);
 
-  if (available <= 0) {
+  if (amount <= 0) {
     res.status(400);
     throw new Error("Nothing is currently available to pay out");
   }
 
-  const { amount } = req.body ?? {};
-  const resolvedAmount = amount !== undefined ? Number(amount) : payout.amount ?? available;
+  // Before any state changes — nowhere to send this money otherwise.
+  await createSystemPayout({
+    requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
+    job,
+    requestId: payout._id,
+    beneficiaryId: job.provider.userId,
+    amount,
+    createdBy: admin._id as mongoose.Types.ObjectId,
+  });
 
-  if (!resolvedAmount || resolvedAmount <= 0) {
-    res.status(400);
-    throw new Error("A positive amount is required");
-  }
-
-  if (resolvedAmount > available) {
-    res.status(400);
-    throw new Error(`Approving ${resolvedAmount} would exceed the ${available} currently available`);
-  }
-
-  payout.amount = resolvedAmount;
+  payout.amount = amount;
   payout.status = PAYMENT_REQUEST_STATUS.APPROVED;
   payout.decidedBy = admin._id as mongoose.Types.ObjectId;
   payout.decidedAt = new Date();
-  job.amountPaidOut += resolvedAmount;
+  job.amountPaidOut += amount;
 
   await job.save();
-  await notifyPaymentRequestDecision(job, "payout", payout.requestedBy, resolvedAmount, job.currency, true);
+  await notifyPaymentRequestDecision(job, "payout", payout.requestedBy, amount, job.currency, true);
 
   res.status(200).json(job);
 });
@@ -1170,11 +1246,6 @@ export const declinePayoutRequest = asyncHandler(async (req: Request, res: Respo
   }
 
   const { declineReason } = req.body;
-
-  if (!declineReason) {
-    res.status(400);
-    throw new Error("A decline reason is required");
-  }
 
   payout.status = PAYMENT_REQUEST_STATUS.DECLINED;
   payout.decidedBy = admin._id as mongoose.Types.ObjectId;

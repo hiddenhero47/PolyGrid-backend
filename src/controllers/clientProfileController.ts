@@ -49,11 +49,6 @@ export const createClientProfile = asyncHandler(async (req: Request, res: Respon
 
   const { displayName, bio, country, city } = req.body;
 
-  if (!displayName || !country) {
-    res.status(400);
-    throw new Error("Please add a displayName and country");
-  }
-
   const profile = await ClientProfile.create({
     userId: requester._id,
     currentSubscription: requester.currentSubscription,

@@ -41,6 +41,8 @@ export const DEFAULT_ALLOWED_MIME_TYPES = [
   "application/pdf",
 ];
 
+export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
 export interface SavedFileInfo {
   fileName: string;
   originalName: string;
@@ -130,6 +132,25 @@ export interface UploadOutcome {
   results: SavedFileInfo[];
   errorLogs: string[];
 }
+
+// uploadHandler (below) processes real multipart attachments
+// (req.files), req.body.base64, and req.body.url all together, in one
+// call, regardless of which ones a caller actually expected. A caller
+// that counts only `req.files.length` against a minimum/maximum —
+// "attach at least one image", "at most N images" — systematically
+// undercounts the moment a client uses base64/url instead of (or
+// alongside) a real attachment: a cap meant to block too many images can
+// be blown past entirely via base64, and a "must attach at least one"
+// check can wrongly reject a perfectly valid base64/url-only request.
+// Any such count/cap check should go through this instead of reading
+// req.files directly.
+export const countUploadCandidates = (req: Request): number => {
+  const fileCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
+  const base64Count = Array.isArray(req.body?.base64) ? req.body.base64.length : req.body?.base64 ? 1 : 0;
+  const urlCount = Array.isArray(req.body?.url) ? req.body.url.length : req.body?.url ? 1 : 0;
+
+  return fileCount + base64Count + urlCount;
+};
 
 // Mirrors house-maduekwe-backend's fileManager.uploadHandler: accepts real
 // multipart files (req.files, via multer's memory storage), base64 data

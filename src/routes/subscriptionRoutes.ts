@@ -7,6 +7,8 @@ import {
 } from "../controllers/subscriptionController";
 import { protect, secureRole, attachCurrentPlan } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
+import { validateBody } from "../validators/validate";
+import { grantSubscriptionSchema } from "../validators/subscription/subscriptionValidator";
 
 const router = express.Router();
 
@@ -20,6 +22,7 @@ router.get(
 router.post(
   "/",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(grantSubscriptionSchema),
   grantSubscription,
 );
 

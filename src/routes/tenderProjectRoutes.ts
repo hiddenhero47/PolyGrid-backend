@@ -2,6 +2,8 @@ import express from "express";
 import {
   createTenderProject,
   updateMyTenderProject,
+  addProjectFiles,
+  removeProjectFile,
   cancelMyTenderProject,
   getMyTenderProjects,
   listTenderProjects,
@@ -14,6 +16,14 @@ import {
   awardBid,
 } from "../controllers/tenderProjectController";
 import { protect } from "../middleware/authMiddleware";
+import { validateBody } from "../validators/validate";
+import {
+  createTenderProjectSchema,
+  updateTenderProjectSchema,
+  submitBidSchema,
+  updateMyBidSchema,
+  awardBidSchema,
+} from "../validators/tenderProject/tenderProjectValidator";
 
 const router = express.Router();
 
@@ -21,19 +31,21 @@ const router = express.Router();
 // (same inline-check shape as contractor/worker eligibility elsewhere in
 // this file), replacing the bare requireActiveSubscription gate this used
 // before ClientProfile existed.
-router.post("/", protect, createTenderProject);
+router.post("/", protect, validateBody(createTenderProjectSchema), createTenderProject);
 router.get("/", protect, listTenderProjects);
 router.get("/me", protect, getMyTenderProjects);
 router.get("/bids/mine", protect, getMyBids);
 
 router.get("/:id", protect, getTenderProject);
-router.patch("/:id", protect, updateMyTenderProject);
+router.patch("/:id", protect, validateBody(updateTenderProjectSchema), updateMyTenderProject);
+router.post("/:id/files", protect, addProjectFiles);
+router.delete("/:id/files/:fileName", protect, removeProjectFile);
 router.patch("/:id/cancel", protect, cancelMyTenderProject);
-router.patch("/:id/award", protect, awardBid);
+router.patch("/:id/award", protect, validateBody(awardBidSchema), awardBid);
 
-router.post("/:id/bids", protect, submitBid);
+router.post("/:id/bids", protect, validateBody(submitBidSchema), submitBid);
 router.get("/:id/bids", protect, getProjectBids);
-router.patch("/:id/bids/mine", protect, updateMyBid);
+router.patch("/:id/bids/mine", protect, validateBody(updateMyBidSchema), updateMyBid);
 router.patch("/:id/bids/mine/withdraw", protect, withdrawMyBid);
 
 export default router;
