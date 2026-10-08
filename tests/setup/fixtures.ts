@@ -221,6 +221,15 @@ export const TEST_DOCX_BUFFER = Buffer.concat([
   Buffer.from("word/document.xml"),
 ]);
 
+// Enough to pass fileSignature.ts's AVIF check (an ISOBMFF "ftyp" box
+// whose brand is "avif") — not a real, decodable AVIF image, same
+// "just enough to pass the sniffer" spirit as TEST_PDF_BUFFER.
+export const TEST_AVIF_BUFFER = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x1c]),
+  Buffer.from("ftyp", "ascii"),
+  Buffer.from("avif", "ascii"),
+]);
+
 interface CreatePrivateFileOptions {
   uploader: IUser;
   allowedUsers?: IUser[];

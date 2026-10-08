@@ -10,8 +10,15 @@ import {
 import { DigitalProduct } from "../models/digitalProductModel";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
+import { PROFILE_STATUS } from "../constants/profileStatus";
 import { toPublicMediaFile } from "../models/mediaFile";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  IMAGE_ONLY_MIME_TYPES,
+  countUploadCandidates,
+} from "../helpers/fileStorage";
 import { toPublicDigitalProduct } from "./digitalProductController";
 
 const slugify = (value: string): string =>
@@ -36,6 +43,7 @@ export const toPublicDigitalCreatorProfile = (profile: IDigitalCreatorProfile) =
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
+  status: profile.status,
   slug: profile.slug,
   displayName: profile.displayName,
   bio: profile.bio,
@@ -122,7 +130,12 @@ export const updateMyDigitalCreatorProfile = asyncHandler(async (req: Request, r
     throw new Error("You don't have a digital creator profile yet");
   }
 
-  const { displayName, bio, country, city, links } = req.body;
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(403);
+    throw new Error("This profile has been banned — contact support");
+  }
+
+  const { displayName, bio, country, city, links, status } = req.body;
 
   if (displayName) profile.displayName = displayName;
   if (bio !== undefined) profile.bio = bio;
@@ -137,6 +150,11 @@ export const updateMyDigitalCreatorProfile = asyncHandler(async (req: Request, r
     }
     profile.links = resolvedLinks;
   }
+
+  // Validated (updateDigitalCreatorProfileSchema) to only ever be
+  // 'active'/'inactive' — self-service never reaches 'banned', same as
+  // every other pillar profile's own update endpoint.
+  if (status !== undefined) profile.status = status;
 
   await profile.save();
 
@@ -154,7 +172,20 @@ export const uploadDigitalCreatorAvatar = asyncHandler(async (req: Request, res:
     throw new Error("You don't have a digital creator profile yet");
   }
 
-  const { results, errorLogs } = await uploadHandler({ req, visibility: FILE_VISIBILITY.PUBLIC });
+  // Exactly one source — an avatar is one image, never a batch. Without
+  // this, uploadHandler would save every file/base64/url candidate
+  // present and only keep results[0], silently orphaning the rest on
+  // disk (same bug jobController.uploadContract had).
+  if (countUploadCandidates(req) !== 1) {
+    res.status(400);
+    throw new Error("Attach exactly one avatar image");
+  }
+
+  const { results, errorLogs } = await uploadHandler({
+    req,
+    visibility: FILE_VISIBILITY.PUBLIC,
+    allowedMimeTypes: IMAGE_ONLY_MIME_TYPES,
+  });
   const saved = results[0];
 
   if (!saved) {
@@ -206,6 +237,15 @@ export const getDigitalCreatorProfile = asyncHandler(async (req: Request, res: R
   if (!profile) {
     res.status(404);
     throw new Error("Creator not found");
+  }
+
+  // Banned hides the page outright — a moderation action, not a
+  // subscription lapse. Inactive (on a break) falls through to the
+  // normal subscription check below instead, same as any other
+  // unsubscribed creator.
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(200).json({ available: false, message: "This creator's storefront is not currently available." });
+    return;
   }
 
   const subscription = profile.currentSubscription

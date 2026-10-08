@@ -20,9 +20,25 @@ import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
-import { uploadHandler, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+} from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
 import { connectUsers } from "./contactController";
+
+// The one place opening.files gets turned into signed, servable links —
+// shared by getJobOpening/addOpeningFiles/removeOpeningFile so all three
+// return the exact same shape.
+const toFilesWithLinks = (opening: IJobOpening) =>
+  opening.files.map((file) => ({
+    fileName: file.fileName,
+    mime: file.mime,
+    size: file.size,
+    url: signFileUrl({ ownerId: opening.postedBy.toString(), fileName: file.fileName, mode: FILE_URL_MODE.VIEW }),
+  }));
 
 // Never includes the gated location tier (coordinates/address/
 // googleMapsUrl/contactInfo/files) — see getJobOpening for the one place
@@ -55,19 +71,19 @@ const toPublicApplication = (application: IJobApplication) => ({
   createdAt: application.createdAt,
 });
 
-// @desc    Post a new job opening to the board. Requires a subscribed
-//          ClientProfile — same gate as createTenderProject, and the same
-//          reasoning: a bare subscription isn't enough once posters have
-//          a real profile to attach a reputation to.
+// @desc    Post a new job opening to the board. Requires a verified,
+//          subscribed ClientProfile — same gate as createTenderProject,
+//          and the same reasoning: a worker accepting this is about to
+//          travel to an address the poster controls.
 // @route   POST /api/job-openings
-// @access  Private — requires a subscribed client profile
+// @access  Private — requires a verified, subscribed client profile
 export const createJobOpening = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
 
   const clientProfile = await loadEligibleClientProfile(requester._id);
   if (!clientProfile) {
     res.status(402);
-    throw new Error("You need a client profile with an active subscription to post a job opening");
+    throw new Error("You need a verified client profile with an active subscription to post a job opening");
   }
 
   const {
@@ -104,6 +120,7 @@ export const createJobOpening = asyncHandler(async (req: Request, res: Response)
     req: shimReq,
     visibility: FILE_VISIBILITY.PRIVATE,
     ownerId: requester.id,
+    allowedMimeTypes: PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
   });
 
   const files: IMediaFile[] = results.map((r) => ({
@@ -196,6 +213,102 @@ export const updateMyJobOpening = asyncHandler(async (req: Request, res: Respons
   await opening.save();
 
   res.status(200).json(toPublicJobOpening(opening));
+});
+
+// @desc    Add more files to my job opening (site photos) — only while
+//          still open, same editing window as updateMyJobOpening. Real
+//          multipart attachments only — req.files, never req.body's
+//          base64/url alternatives (see createJobOpening's shim and why
+//          it matters: passing the whole `req` to uploadHandler would
+//          let those through too, uncounted against MAX_OPENING_FILES).
+//          Images only — jpeg/png/avif — same rule as the portfolio
+//          uploads on labor/contractor/consultancy profiles.
+// @route   POST /api/job-openings/:id/files
+// @access  Private (poster only)
+export const addOpeningFiles = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const opening = await loadMyOpening(requester.id, req.params.id as string);
+
+  if (!opening) {
+    res.status(404);
+    throw new Error("Job opening not found");
+  }
+
+  if (opening.status !== JOB_OPENING_STATUS.OPEN) {
+    res.status(400);
+    throw new Error("This job opening can no longer be edited");
+  }
+
+  const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
+  if (attachedCount === 0) {
+    res.status(400);
+    throw new Error("Attach at least one file");
+  }
+
+  if (opening.files.length + attachedCount > MAX_OPENING_FILES) {
+    res.status(400);
+    throw new Error(
+      `This job opening already has ${opening.files.length} of ${MAX_OPENING_FILES} files allowed — attach fewer`,
+    );
+  }
+
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
+
+  const { results, errorLogs } = await uploadHandler({
+    req: shimReq,
+    visibility: FILE_VISIBILITY.PRIVATE,
+    ownerId: requester.id,
+    allowedMimeTypes: PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+  });
+
+  const newFiles: IMediaFile[] = results.map((r) => ({
+    fileName: r.fileName,
+    storagePath: r.storagePath,
+    mime: r.mime,
+    size: r.size,
+  }));
+
+  opening.files.push(...newFiles);
+  await opening.save();
+
+  res.status(201).json({
+    ...toPublicJobOpening(opening),
+    files: toFilesWithLinks(opening),
+    ...(errorLogs.length > 0 ? { fileWarnings: errorLogs } : {}),
+  });
+});
+
+// @desc    Remove one file from my job opening — only while still open,
+//          same editing window as updateMyJobOpening.
+// @route   DELETE /api/job-openings/:id/files/:fileName
+// @access  Private (poster only)
+export const removeOpeningFile = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const opening = await loadMyOpening(requester.id, req.params.id as string);
+
+  if (!opening) {
+    res.status(404);
+    throw new Error("Job opening not found");
+  }
+
+  if (opening.status !== JOB_OPENING_STATUS.OPEN) {
+    res.status(400);
+    throw new Error("This job opening can no longer be edited");
+  }
+
+  const fileName = req.params.fileName as string;
+  const file = opening.files.find((f) => f.fileName === fileName);
+
+  if (!file) {
+    res.status(404);
+    throw new Error("File not found on this job opening");
+  }
+
+  await deleteStoredFile(file.storagePath);
+  opening.files = opening.files.filter((f) => f.fileName !== fileName) as typeof opening.files;
+  await opening.save();
+
+  res.status(200).json({ ...toPublicJobOpening(opening), files: toFilesWithLinks(opening) });
 });
 
 // @desc    Cancel my job opening while still open — rejects every pending
@@ -340,20 +453,13 @@ export const getJobOpening = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  const files = opening.files.map((file) => ({
-    fileName: file.fileName,
-    mime: file.mime,
-    size: file.size,
-    url: signFileUrl({ ownerId: opening.postedBy.toString(), fileName: file.fileName, mode: FILE_URL_MODE.VIEW }),
-  }));
-
   res.status(200).json({
     ...toPublicJobOpening(opening),
     coordinates: opening.coordinates,
     address: opening.address,
     googleMapsUrl: opening.googleMapsUrl,
     contactInfo: opening.contactInfo,
-    files,
+    files: toFilesWithLinks(opening),
   });
 });
 

@@ -15,7 +15,13 @@ import {
 } from "../models/consultancyProfileModel";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import { PROFILE_STATUS } from "../constants/profileStatus";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+} from "../helpers/fileStorage";
 
 const slugify = (value: string): string =>
   value
@@ -61,6 +67,7 @@ const toPublicProfile = (profile: IConsultancyProfile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
+  status: profile.status,
   slug: profile.slug,
   headline: profile.headline,
   bio: profile.bio,
@@ -168,6 +175,11 @@ export const updateMyProfile = asyncHandler(async (req: Request, res: Response) 
     throw new Error("You don't have a consultancy profile yet");
   }
 
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(403);
+    throw new Error("This profile has been banned — contact support");
+  }
+
   const {
     headline,
     bio,
@@ -178,6 +190,7 @@ export const updateMyProfile = asyncHandler(async (req: Request, res: Response) 
     links,
     services,
     mentorship,
+    status,
   } = req.body;
 
   if (headline) profile.headline = headline;
@@ -209,15 +222,20 @@ export const updateMyProfile = asyncHandler(async (req: Request, res: Response) 
     profile.mentorship = { ...profile.mentorship, ...mentorship };
   }
 
+  // Validated (updateConsultancyProfileSchema) to only ever be
+  // 'active'/'inactive' — self-service never reaches 'banned', same as
+  // every other pillar profile's own update endpoint.
+  if (status !== undefined) profile.status = status;
+
   await profile.save();
 
   res.status(200).json(toPublicProfile(profile));
 });
 
-// @desc    Search/list consultants — only those verified AND currently
-//          subscribed show up here (product-overview.md's global
-//          subscription rule), even though a profile page itself is always
-//          directly reachable by id/slug once created.
+// @desc    Search/list consultants — only those verified, active, AND
+//          currently subscribed show up here (product-overview.md's
+//          global subscription rule), even though a profile page itself
+//          is always directly reachable by id/slug once created.
 // @route   GET /api/consultancy-profiles
 // @access  Public
 export const searchConsultants = asyncHandler(async (req: Request, res: Response) => {
@@ -227,7 +245,11 @@ export const searchConsultants = asyncHandler(async (req: Request, res: Response
 
   const { specialization, country } = req.query as { specialization?: string; country?: string };
 
-  const match: Record<string, unknown> = { isVerified: true, currentSubscription: { $ne: null } };
+  const match: Record<string, unknown> = {
+    isVerified: true,
+    status: PROFILE_STATUS.ACTIVE,
+    currentSubscription: { $ne: null },
+  };
 
   if (specialization && Object.values(SPECIALIZATION).includes(specialization as Specialization)) {
     match.specializations = specialization;
@@ -301,6 +323,16 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("Profile not found");
   }
 
+  // Banned hides the page outright — a moderation action, not a
+  // subscription lapse. Inactive (on a break) falls through to the
+  // normal subscription check below instead, same as any other
+  // unsubscribed profile — it was never meant to hide the page on its
+  // own, only drop out of search.
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(200).json({ available: false, message: "This profile is not currently available." });
+    return;
+  }
+
   const subscription = profile.currentSubscription
     ? await Subscription.findById(profile.currentSubscription)
     : null;
@@ -329,7 +361,11 @@ const saveMediaFiles = async (
   // undetected (those are checked against req.files.length alone). Same
   // shim digitalProductController.ts's saveFilesForField already uses.
   const shimReq = { files: req.files, body: {} } as unknown as Request;
-  const { results, errorLogs } = await uploadHandler({ req: shimReq, visibility: FILE_VISIBILITY.PUBLIC });
+  const { results, errorLogs } = await uploadHandler({
+    req: shimReq,
+    visibility: FILE_VISIBILITY.PUBLIC,
+    allowedMimeTypes: PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+  });
 
   return {
     media: results.map((r) => ({

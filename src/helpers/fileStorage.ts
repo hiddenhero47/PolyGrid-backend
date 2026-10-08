@@ -43,6 +43,16 @@ export const DEFAULT_ALLOWED_MIME_TYPES = [
 
 export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+// Work-photo portfolio uploads (labor/contractor/consultancy profiles)
+// — real photos only, never a webp/pdf, which DEFAULT_ALLOWED_MIME_TYPES
+// would otherwise allow through.
+export const PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/avif"];
+
+// Any single-avatar/logo upload (store logo, digital creator avatar,
+// user avatar) — an image in any format we recognize, but never a pdf,
+// which DEFAULT_ALLOWED_MIME_TYPES would otherwise allow through.
+export const IMAGE_ONLY_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif"];
+
 export interface SavedFileInfo {
   fileName: string;
   originalName: string;

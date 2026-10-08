@@ -3,6 +3,8 @@ import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
+  createAdmin,
+  createCustomerCare,
   createUserWithActiveSubscription,
   createDigitalCreatorProfile,
   createDigitalProduct,
@@ -213,8 +215,8 @@ describe("GET /api/digital-products/feed", () => {
       currentSubscription: user.currentSubscription,
       isVerified: true,
     });
-    const product = await createDigitalProduct({ creator: profile });
-    await createDigitalProduct({ creator: profile, isActive: false });
+    const product = await createDigitalProduct({ creator: profile, isVerified: true });
+    await createDigitalProduct({ creator: profile, isActive: false, isVerified: true });
 
     const res = await request(app).get("/api/digital-products/feed");
 
@@ -230,8 +232,16 @@ describe("GET /api/digital-products/feed", () => {
       currentSubscription: user.currentSubscription,
       isVerified: true,
     });
-    await createDigitalProduct({ creator: profile, category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN });
-    await createDigitalProduct({ creator: profile, category: DIGITAL_PRODUCT_CATEGORY.BOQ_SHEET });
+    await createDigitalProduct({
+      creator: profile,
+      category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN,
+      isVerified: true,
+    });
+    await createDigitalProduct({
+      creator: profile,
+      category: DIGITAL_PRODUCT_CATEGORY.BOQ_SHEET,
+      isVerified: true,
+    });
 
     const res = await request(app).get(
       `/api/digital-products/feed?category=${DIGITAL_PRODUCT_CATEGORY.BOQ_SHEET}`,
@@ -248,7 +258,7 @@ describe("GET /api/digital-products/feed", () => {
       currentSubscription: user.currentSubscription,
       isVerified: true,
     });
-    await createDigitalProduct({ creator: profile });
+    await createDigitalProduct({ creator: profile, isVerified: true });
 
     await Subscription.updateOne(
       { _id: user.currentSubscription },
@@ -272,6 +282,32 @@ describe("GET /api/digital-products/:id", () => {
     expect(res.body).toEqual({ available: false, message: expect.any(String) });
   });
 
+  it("withholds a product when its creator is inactive (on a break) or banned", async () => {
+    const inactiveUser = await createUserWithActiveSubscription();
+    const inactiveProfile = await createDigitalCreatorProfile({
+      user: inactiveUser,
+      currentSubscription: inactiveUser.currentSubscription,
+      isVerified: true,
+      status: "inactive",
+    });
+    const inactiveProduct = await createDigitalProduct({ creator: inactiveProfile, isVerified: true });
+
+    const inactiveRes = await request(app).get(`/api/digital-products/${inactiveProduct.id}`);
+    expect(inactiveRes.body.available).toBe(false);
+
+    const bannedUser = await createUserWithActiveSubscription();
+    const bannedProfile = await createDigitalCreatorProfile({
+      user: bannedUser,
+      currentSubscription: bannedUser.currentSubscription,
+      isVerified: true,
+      status: "banned",
+    });
+    const bannedProduct = await createDigitalProduct({ creator: bannedProfile, isVerified: true });
+
+    const bannedRes = await request(app).get(`/api/digital-products/${bannedProduct.id}`);
+    expect(bannedRes.body.available).toBe(false);
+  });
+
   it("returns the product once the creator is verified and subscribed", async () => {
     const user = await createUserWithActiveSubscription();
     const profile = await createDigitalCreatorProfile({
@@ -279,7 +315,7 @@ describe("GET /api/digital-products/:id", () => {
       currentSubscription: user.currentSubscription,
       isVerified: true,
     });
-    const product = await createDigitalProduct({ creator: profile });
+    const product = await createDigitalProduct({ creator: profile, isVerified: true });
 
     const res = await request(app).get(`/api/digital-products/${product.id}`);
 
@@ -287,9 +323,73 @@ describe("GET /api/digital-products/:id", () => {
     expect(res.body.title).toBe(product.title);
   });
 
+  it("withholds a product whose listing itself hasn't been verified yet, even if the creator has", async () => {
+    const user = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user,
+      currentSubscription: user.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile }); // isVerified defaults false
+
+    const res = await request(app).get(`/api/digital-products/${product.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ available: false, message: expect.any(String) });
+  });
+
   it("404s for an unknown product id", async () => {
     const res = await request(app).get("/api/digital-products/507f1f77bcf86cd799439011");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/digital-products/:id/verify", () => {
+  it("lets an admin confirm a listing is authentic", async () => {
+    const admin = await createAdmin();
+    const profile = await createDigitalCreatorProfile({ user: await createUser() });
+    const product = await createDigitalProduct({ creator: profile });
+
+    const res = await request(app)
+      .patch(`/api/digital-products/${product.id}/verify`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ isVerified: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.isVerified).toBe(true);
+  });
+
+  // Deliberately open to customer_care too — unlike most moderation
+  // actions in this codebase, checking a listing's contents against
+  // what it claims is exactly the kind of day-to-day review work
+  // customer_care is meant to help with (see
+  // digitalProductController.setDigitalProductVerification's own
+  // comment).
+  it("lets customer_care confirm or revoke a listing's verification too", async () => {
+    const customerCare = await createCustomerCare();
+    const profile = await createDigitalCreatorProfile({ user: await createUser() });
+    const product = await createDigitalProduct({ creator: profile, isVerified: true });
+
+    const res = await request(app)
+      .patch(`/api/digital-products/${product.id}/verify`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`)
+      .send({ isVerified: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.isVerified).toBe(false);
+  });
+
+  it("blocks a regular user", async () => {
+    const user = await createUser();
+    const profile = await createDigitalCreatorProfile({ user: await createUser() });
+    const product = await createDigitalProduct({ creator: profile });
+
+    const res = await request(app)
+      .patch(`/api/digital-products/${product.id}/verify`)
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ isVerified: true });
+
+    expect(res.status).toBe(401);
   });
 });
 

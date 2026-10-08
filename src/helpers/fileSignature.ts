@@ -40,6 +40,21 @@ export const detectFileSignature = (buffer: Buffer): DetectedFileType | null => 
     return { mime: "image/webp", ext: "webp" };
   }
 
+  // AVIF is an ISOBMFF/HEIF container — no fixed magic bytes at offset 0
+  // the way JPEG/PNG have, just a box structure: a 4-byte size, then an
+  // ASCII "ftyp" box type, then a 4-byte brand. "avif" (still image) and
+  // "avis" (an image sequence) are AVIF's own major brands; other
+  // ISOBMFF formats (HEIC, MP4) use a different brand in that same slot,
+  // so checking it is enough to tell AVIF apart without a real ISOBMFF
+  // parser.
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 4, 8) === "ftyp" &&
+    (buffer.toString("ascii", 8, 12) === "avif" || buffer.toString("ascii", 8, 12) === "avis")
+  ) {
+    return { mime: "image/avif", ext: "avif" };
+  }
+
   if (buffer.length >= 5 && buffer.toString("ascii", 0, 5) === "%PDF-") {
     return { mime: "application/pdf", ext: "pdf" };
   }

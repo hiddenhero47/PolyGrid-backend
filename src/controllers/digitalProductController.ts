@@ -13,6 +13,7 @@ import { DigitalCreatorProfile, IDigitalCreatorProfile } from "../models/digital
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
+import { PROFILE_STATUS } from "../constants/profileStatus";
 import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
@@ -29,6 +30,7 @@ export const toPublicDigitalProduct = (product: IDigitalProduct) => ({
   price: product.price,
   currency: product.currency,
   isActive: product.isActive,
+  isVerified: product.isVerified,
   createdAt: product.createdAt,
 });
 
@@ -310,17 +312,21 @@ const paginationParams = (req: Request) => {
 //          for why this differs from Physical's store-first browsing). One
 //          aggregation, anchored directly on DigitalProduct, with a two-hop
 //          $lookup (DigitalProduct -> its creator's DigitalCreatorProfile ->
-//          Subscription) so an unsubscribed or unverified creator's
-//          products never appear — checked live on every page, nothing
-//          denormalized onto the product itself, same cost (one query per
-//          page) as the store-level version used for Physical.
+//          Subscription) so an unsubscribed, unverified, inactive, or
+//          banned creator's products never appear — checked live on
+//          every page, nothing denormalized onto the product itself,
+//          same cost (one query per page) as the store-level version
+//          used for Physical. `isVerified` on the product itself
+//          (admin/customer_care confirming the listing matches what it
+//          promises — see setDigitalProductVerification) gates it too,
+//          independently of the creator's own verification.
 // @route   GET /api/digital-products/feed
 // @access  Public
 export const listDigitalProductFeed = asyncHandler(async (req: Request, res: Response) => {
   const { page, limit, skip } = paginationParams(req);
   const { category } = req.query as { category?: string };
 
-  const match: Record<string, unknown> = { isActive: true };
+  const match: Record<string, unknown> = { isActive: true, isVerified: true };
   if (category && Object.values(DIGITAL_PRODUCT_CATEGORY).includes(category as DigitalProductCategory)) {
     match.category = category;
   }
@@ -336,7 +342,7 @@ export const listDigitalProductFeed = asyncHandler(async (req: Request, res: Res
       },
     },
     { $unwind: "$creator" },
-    { $match: { "creator.isVerified": true } },
+    { $match: { "creator.isVerified": true, "creator.status": PROFILE_STATUS.ACTIVE } },
     {
       $lookup: {
         from: "subscriptions",
@@ -400,10 +406,51 @@ export const getDigitalProduct = asyncHandler(async (req: Request, res: Response
     ? await Subscription.findById(creator.currentSubscription)
     : null;
 
-  if (!creator?.isVerified || !subscription?.isActive()) {
+  if (
+    !product.isVerified ||
+    !creator?.isVerified ||
+    creator.status !== PROFILE_STATUS.ACTIVE ||
+    !subscription?.isActive()
+  ) {
     res.status(200).json({ available: false, message: "This product is not currently available." });
     return;
   }
+
+  res.status(200).json(toPublicDigitalProduct(product));
+});
+
+// @desc    Confirm (or revoke) that a digital product listing is
+//          authentic — the deliverable files actually match what the
+//          title/description/price promise. Separate from (and
+//          independent of) the creator's own isVerified/status; see
+//          digitalProductModel.ts. Deliberately open to customer_care
+//          too, not just Admin/Super Admin — unlike most moderation
+//          actions in this codebase, checking a listing's contents
+//          against what it claims is exactly the kind of day-to-day
+//          review work customer_care is meant to help with.
+// @route   PATCH /api/digital-products/:id/verify
+// @access  Private (Admin / Super Admin / Customer Care)
+export const setDigitalProductVerification = asyncHandler(async (req: Request, res: Response) => {
+  const reviewer = req.user as IUser;
+  const id = req.params.id as string;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(404);
+    throw new Error("Product not found");
+  }
+
+  const product = await DigitalProduct.findById(id);
+  if (!product) {
+    res.status(404);
+    throw new Error("Product not found");
+  }
+
+  const { isVerified } = req.body;
+
+  product.isVerified = isVerified;
+  product.verifiedBy = reviewer._id as mongoose.Types.ObjectId;
+  product.verifiedAt = new Date();
+  await product.save();
 
   res.status(200).json(toPublicDigitalProduct(product));
 });

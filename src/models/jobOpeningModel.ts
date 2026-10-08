@@ -44,7 +44,7 @@ export const JOB_OPENING_STATUS = {
 } as const;
 export type JobOpeningStatus = (typeof JOB_OPENING_STATUS)[keyof typeof JOB_OPENING_STATUS];
 
-export const MAX_OPENING_FILES = 10;
+export const MAX_OPENING_FILES = 5;
 
 export interface IGeneralArea {
   country: string;

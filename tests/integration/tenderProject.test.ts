@@ -14,6 +14,7 @@ import {
   TEST_DOCX_BUFFER,
 } from "../setup/fixtures";
 import { TENDER_CATEGORY, MAX_PROJECT_FILES } from "../../src/models/tenderProjectModel";
+import { ContractorProfile } from "../../src/models/contractorProfileModel";
 import { Bid } from "../../src/models/bidModel";
 import { Job } from "../../src/models/jobModel";
 
@@ -42,11 +43,11 @@ const createEligibleContractor = async () => {
   return { user, profile };
 };
 
-// A poster eligible to post a project: a subscribed ClientProfile — no
-// `isVerified` required (see clientProfileModel.ts).
+// A poster eligible to post a project: a verified, subscribed
+// ClientProfile (see clientProfileModel.ts).
 const createEligiblePoster = async () => {
   const user = await createUserWithActiveSubscription();
-  await createClientProfile({ user, currentSubscription: user.currentSubscription });
+  await createClientProfile({ user, currentSubscription: user.currentSubscription, isVerified: true });
   return user;
 };
 
@@ -82,7 +83,64 @@ describe("POST /api/tender-projects", () => {
     }
   });
 
-  it("posts a project once I have a subscribed client profile", async () => {
+  it("requires the client profile to be verified, not just subscribed", async () => {
+    const user = await createUserWithActiveSubscription();
+    await createClientProfile({ user, currentSubscription: user.currentSubscription }); // isVerified: false
+
+    const res = await request(app)
+      .post("/api/tender-projects")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({
+          title: "New roof",
+          description: "Replace the roof",
+          category: TENDER_CATEGORY.ROOFING,
+          location: { country: "NG" },
+          bidDeadline: futureDeadline(),
+        }),
+      );
+
+    expect(res.status).toBe(402);
+  });
+
+  it("requires the client profile to be active — inactive (on a break) or banned also blocks posting", async () => {
+    const inactiveUser = await createUserWithActiveSubscription();
+    await createClientProfile({
+      user: inactiveUser,
+      currentSubscription: inactiveUser.currentSubscription,
+      isVerified: true,
+      status: "inactive",
+    });
+
+    const bannedUser = await createUserWithActiveSubscription();
+    await createClientProfile({
+      user: bannedUser,
+      currentSubscription: bannedUser.currentSubscription,
+      isVerified: true,
+      status: "banned",
+    });
+
+    for (const user of [inactiveUser, bannedUser]) {
+      const res = await request(app)
+        .post("/api/tender-projects")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .field(
+          "data",
+          JSON.stringify({
+            title: "New roof",
+            description: "Replace the roof",
+            category: TENDER_CATEGORY.ROOFING,
+            location: { country: "NG" },
+            bidDeadline: futureDeadline(),
+          }),
+        );
+
+      expect(res.status).toBe(402);
+    }
+  });
+
+  it("posts a project once I have a verified, subscribed client profile", async () => {
     const user = await createEligiblePoster();
 
     const res = await request(app)
@@ -346,6 +404,29 @@ describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
       .field("data", JSON.stringify({ amount: 5000, proposal: "I can do this" }));
 
     expect(res.status).toBe(403);
+  });
+
+  it("blocks a contractor who's inactive (on a break) or banned from bidding", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+
+    const { user: inactiveContractor } = await createEligibleContractor();
+    await ContractorProfile.updateOne({ userId: inactiveContractor._id }, { status: "inactive" });
+
+    const inactiveRes = await request(app)
+      .post(`/api/tender-projects/${project.id}/bids`)
+      .set("Authorization", `Bearer ${generateToken(inactiveContractor)}`)
+      .field("data", JSON.stringify({ amount: 5000, proposal: "I can do this" }));
+    expect(inactiveRes.status).toBe(403);
+
+    const { user: bannedContractor } = await createEligibleContractor();
+    await ContractorProfile.updateOne({ userId: bannedContractor._id }, { status: "banned" });
+
+    const bannedRes = await request(app)
+      .post(`/api/tender-projects/${project.id}/bids`)
+      .set("Authorization", `Bearer ${generateToken(bannedContractor)}`)
+      .field("data", JSON.stringify({ amount: 5000, proposal: "I can do this" }));
+    expect(bannedRes.status).toBe(403);
   });
 
   it("blocks the poster from bidding on their own project", async () => {

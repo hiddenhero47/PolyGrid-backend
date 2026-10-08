@@ -53,6 +53,18 @@ export interface IDigitalProduct extends Document {
   // hides it from the feed/creator page/direct view; the record and its
   // files stay exactly as they were.
   isActive: boolean;
+  // Separate from (and in addition to) `isActive` and the creator's own
+  // isVerified/status — this is admin/customer_care confirming the
+  // *listing itself* is what it claims to be (the deliverable files
+  // actually match the title/description/price), not a statement about
+  // the creator. Defaults false: a brand-new listing is invisible in the
+  // feed/direct view until someone's actually checked it, the same
+  // "unverified by default" instinct every PROFILE_MODEL_REGISTRY entry
+  // already uses. Set via digitalProductController.setDigitalProductVerification
+  // — never by the creator.
+  isVerified: boolean;
+  verifiedBy?: Types.ObjectId;
+  verifiedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -91,14 +103,18 @@ const digitalProductSchema = new Schema<IDigitalProduct>(
       },
     },
     isActive: { type: Boolean, default: true },
+    isVerified: { type: Boolean, default: false },
+    verifiedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    verifiedAt: { type: Date },
   },
   { timestamps: true },
 );
 
-// The feed's two query shapes: "everything active, optionally by
-// category" and "one creator's active work" (the creator-page view).
-digitalProductSchema.index({ isActive: 1, category: 1, createdAt: -1 });
-digitalProductSchema.index({ creatorId: 1, isActive: 1, createdAt: -1 });
+// The feed's two query shapes: "everything active+verified, optionally
+// by category" and "one creator's active+verified work" (the
+// creator-page view).
+digitalProductSchema.index({ isActive: 1, isVerified: 1, category: 1, createdAt: -1 });
+digitalProductSchema.index({ creatorId: 1, isActive: 1, isVerified: 1, createdAt: -1 });
 
 export const DigitalProduct: Model<IDigitalProduct> = mongoose.model<IDigitalProduct>(
   "DigitalProduct",

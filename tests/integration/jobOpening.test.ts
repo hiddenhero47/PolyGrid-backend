@@ -10,9 +10,12 @@ import {
   createJobApplication,
   generateToken,
   TEST_PNG_BASE64,
+  TEST_PNG_BUFFER,
+  TEST_AVIF_BUFFER,
+  TEST_PDF_BUFFER,
 } from "../setup/fixtures";
-import { LABOR_SKILL } from "../../src/models/laborProfileModel";
-import { PAY_TYPE, EMPLOYMENT_TYPE } from "../../src/models/jobOpeningModel";
+import { LABOR_SKILL, LaborProfile } from "../../src/models/laborProfileModel";
+import { PAY_TYPE, EMPLOYMENT_TYPE, MAX_OPENING_FILES } from "../../src/models/jobOpeningModel";
 import { APPLICATION_STATUS } from "../../src/models/jobApplicationModel";
 import { JobApplication } from "../../src/models/jobApplicationModel";
 import { Job } from "../../src/models/jobModel";
@@ -33,7 +36,7 @@ afterAll(async () => {
 
 const createEligiblePoster = async () => {
   const user = await createUserWithActiveSubscription();
-  await createClientProfile({ user, currentSubscription: user.currentSubscription });
+  await createClientProfile({ user, currentSubscription: user.currentSubscription, isVerified: true });
   return user;
 };
 
@@ -79,7 +82,19 @@ describe("POST /api/job-openings", () => {
     expect(res.status).toBe(402);
   });
 
-  it("posts a job opening once I have a subscribed client profile", async () => {
+  it("requires the client profile to be verified, not just subscribed", async () => {
+    const user = await createUserWithActiveSubscription();
+    await createClientProfile({ user, currentSubscription: user.currentSubscription }); // isVerified: false
+
+    const res = await request(app)
+      .post("/api/job-openings")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field("data", JSON.stringify(openingPayload()));
+
+    expect(res.status).toBe(402);
+  });
+
+  it("posts a job opening once I have a verified, subscribed client profile", async () => {
     const poster = await createEligiblePoster();
 
     const res = await request(app)
@@ -141,6 +156,95 @@ describe("POST /api/job-openings", () => {
       .field("data", JSON.stringify(openingPayload({ payRate: 0 })));
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/job-openings/:id/files and DELETE .../files/:fileName", () => {
+  it("adds jpeg/png/avif files, and lets the poster remove one again", async () => {
+    const poster = await createEligiblePoster();
+    const created = await request(app)
+      .post("/api/job-openings")
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .field("data", JSON.stringify(openingPayload()));
+    const token = generateToken(poster);
+
+    const added = await request(app)
+      .post(`/api/job-openings/${created.body.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file1", TEST_PNG_BUFFER, "site.png")
+      .attach("file2", TEST_AVIF_BUFFER, "site.avif");
+
+    expect(added.status).toBe(201);
+    expect(added.body.files).toHaveLength(2);
+    expect(added.body.files[0].url).toEqual(expect.any(String));
+
+    const fileName = added.body.files[0].fileName;
+    const removed = await request(app)
+      .delete(`/api/job-openings/${created.body.id}/files/${fileName}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(removed.status).toBe(200);
+    expect(removed.body.files).toHaveLength(1);
+  });
+
+  // Images only — jpeg/png/avif — same rule as portfolio uploads
+  // elsewhere; a PDF surfaces as a non-blocking fileWarnings entry,
+  // same "never fail the whole request for a bad optional attachment"
+  // philosophy as every other media-upload endpoint in this codebase.
+  it("surfaces a non-image file as a non-blocking fileWarnings entry", async () => {
+    const poster = await createEligiblePoster();
+    const created = await request(app)
+      .post("/api/job-openings")
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .field("data", JSON.stringify(openingPayload()));
+
+    const res = await request(app)
+      .post(`/api/job-openings/${created.body.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .attach("file", TEST_PDF_BUFFER, "spec.pdf");
+
+    expect(res.status).toBe(201);
+    expect(res.body.files).toHaveLength(0);
+    expect(res.body.fileWarnings).toBeDefined();
+  });
+
+  it("requires at least one file, and caps at MAX_OPENING_FILES", async () => {
+    const poster = await createEligiblePoster();
+    const created = await request(app)
+      .post("/api/job-openings")
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .field("data", JSON.stringify(openingPayload()));
+    const token = generateToken(poster);
+
+    const noFile = await request(app)
+      .post(`/api/job-openings/${created.body.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+    expect(noFile.status).toBe(400);
+
+    let tooMany = request(app)
+      .post(`/api/job-openings/${created.body.id}/files`)
+      .set("Authorization", `Bearer ${token}`);
+    for (let i = 0; i < MAX_OPENING_FILES + 1; i++) {
+      tooMany = tooMany.attach(`file${i}`, TEST_PNG_BUFFER, `site${i}.png`);
+    }
+    expect((await tooMany).status).toBe(400);
+  });
+
+  it("blocks a non-poster from adding or removing files", async () => {
+    const poster = await createEligiblePoster();
+    const created = await request(app)
+      .post("/api/job-openings")
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .field("data", JSON.stringify(openingPayload()));
+    const stranger = await createUser();
+
+    const res = await request(app)
+      .post(`/api/job-openings/${created.body.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(stranger)}`)
+      .attach("file", TEST_PNG_BUFFER, "site.png");
+
+    expect(res.status).toBe(404);
   });
 });
 
@@ -276,6 +380,29 @@ describe("POST /api/job-openings/:id/applications", () => {
       .field("data", JSON.stringify({ message: "I'd like to help" }));
 
     expect(res.status).toBe(403);
+  });
+
+  it("blocks a worker who's inactive (on a break) or banned from applying", async () => {
+    const poster = await createEligiblePoster();
+    const opening = await createJobOpening({ postedBy: poster });
+
+    const { user: inactiveWorker } = await createEligibleWorker();
+    await LaborProfile.updateOne({ userId: inactiveWorker._id }, { status: "inactive" });
+
+    const inactiveRes = await request(app)
+      .post(`/api/job-openings/${opening.id}/applications`)
+      .set("Authorization", `Bearer ${generateToken(inactiveWorker)}`)
+      .field("data", JSON.stringify({ message: "I'd like to help" }));
+    expect(inactiveRes.status).toBe(403);
+
+    const { user: bannedWorker } = await createEligibleWorker();
+    await LaborProfile.updateOne({ userId: bannedWorker._id }, { status: "banned" });
+
+    const bannedRes = await request(app)
+      .post(`/api/job-openings/${opening.id}/applications`)
+      .set("Authorization", `Bearer ${generateToken(bannedWorker)}`)
+      .field("data", JSON.stringify({ message: "I'd like to help" }));
+    expect(bannedRes.status).toBe(403);
   });
 
   it("blocks the poster from applying to their own opening", async () => {

@@ -1,4 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { PROFILE_STATUS, ProfileStatus } from "../constants/profileStatus";
 import { isValidCountryCode } from "../helpers/countryReference";
 
 // The poster-side identity for pillars with a genuine "post something,
@@ -15,19 +16,24 @@ import { isValidCountryCode } from "../helpers/countryReference";
 // client already gets about them. Without a profile here, there was
 // nothing for that review to point at.
 //
-// Posting itself only ever requires an active subscription (checked via
-// `currentSubscription` below) — never `isVerified`. Real gig/service
-// platforms (TaskRabbit, Handy) background-check the person going to a
-// stranger's property, not the person inviting them; `isVerified`/
-// `verification` are kept here purely for consistency with every other
-// PROFILE_MODEL_REGISTRY entry (so the generic Verification pipeline
-// works for a poster who *chooses* to verify, e.g. to earn a trust badge)
-// — never required to post.
+// Posting requires both an active subscription AND `isVerified`
+// (clientProfileController.loadEligibleClientProfile), same rule every
+// other PROFILE_MODEL_REGISTRY entry already enforces. A worker or
+// contractor who accepts/wins a posting travels to an address this
+// poster controls — an unverified poster is exactly the kind of safety
+// gap verification exists to close here, not just a courtesy extended
+// to whoever shows up. The generic Verification pipeline (submit against
+// whatever template the admin has configured for PROFILE_TYPE.CLIENT in
+// the poster's country, then admin approval) is the only thing that ever
+// flips `isVerified` — there's no separate client-specific flow.
 export interface IClientProfile extends Document {
   userId: Types.ObjectId;
   currentSubscription: Types.ObjectId | null;
   isVerified: boolean;
   verification: Types.ObjectId | null;
+  // See constants/profileStatus.ts — active by default, inactive is
+  // self-service, banned is admin-only.
+  status: ProfileStatus;
   displayName: string;
   bio?: string;
   country: string;
@@ -46,6 +52,7 @@ const clientProfileSchema = new Schema<IClientProfile>(
     currentSubscription: { type: Schema.Types.ObjectId, ref: "Subscription", default: null },
     isVerified: { type: Boolean, default: false },
     verification: { type: Schema.Types.ObjectId, ref: "Verification", default: null },
+    status: { type: String, enum: Object.values(PROFILE_STATUS), default: PROFILE_STATUS.ACTIVE },
     displayName: { type: String, required: [true, "Please add a display name"], trim: true },
     bio: { type: String },
     country: {

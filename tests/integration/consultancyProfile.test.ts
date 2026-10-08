@@ -10,6 +10,8 @@ import {
   generateToken,
   TEST_PNG_BUFFER,
   TEST_PNG_BASE64,
+  TEST_PDF_BUFFER,
+  TEST_AVIF_BUFFER,
 } from "../setup/fixtures";
 import {
   ConsultancyProfile,
@@ -204,6 +206,50 @@ describe("GET /api/consultancy-profiles/me and PATCH", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("lets me toggle my own status between active and inactive (\"taking a break\")", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+    const token = generateToken(user);
+
+    const toInactive = await request(app)
+      .patch("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "inactive" });
+    expect(toInactive.status).toBe(200);
+    expect(toInactive.body.status).toBe("inactive");
+
+    const backToActive = await request(app)
+      .patch("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "active" });
+    expect(backToActive.status).toBe(200);
+    expect(backToActive.body.status).toBe("active");
+  });
+
+  it("rejects setting my own status to 'banned' — that's admin-only", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+
+    const res = await request(app)
+      .patch("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ status: "banned" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks any update at all once a profile has been banned", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user, status: "banned" });
+
+    const res = await request(app)
+      .patch("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ headline: "Trying to sneak an edit in" });
+
+    expect(res.status).toBe(403);
+  });
 });
 
 describe("GET /api/consultancy-profiles/:idOrSlug", () => {
@@ -259,6 +305,31 @@ describe("GET /api/consultancy-profiles/:idOrSlug", () => {
   it("404s for an unknown slug", async () => {
     const res = await request(app).get("/api/consultancy-profiles/does-not-exist");
     expect(res.status).toBe(404);
+  });
+
+  it("hides a banned profile's page outright, but an inactive (on-a-break) profile's page stays visible", async () => {
+    const bannedUser = await createUserWithActiveSubscription();
+    await createConsultancyProfile({
+      user: bannedUser,
+      currentSubscription: bannedUser.currentSubscription,
+      status: "banned",
+      slug: "banned-one",
+    });
+
+    const inactiveUser = await createUserWithActiveSubscription();
+    await createConsultancyProfile({
+      user: inactiveUser,
+      currentSubscription: inactiveUser.currentSubscription,
+      status: "inactive",
+      slug: "inactive-one",
+    });
+
+    const bannedRes = await request(app).get("/api/consultancy-profiles/banned-one");
+    expect(bannedRes.body.available).toBe(false);
+
+    const inactiveRes = await request(app).get("/api/consultancy-profiles/inactive-one");
+    expect(inactiveRes.body.available).toBeUndefined();
+    expect(inactiveRes.body.headline).toBeTruthy();
   });
 });
 
@@ -330,6 +401,29 @@ describe("GET /api/consultancy-profiles (search)", () => {
       { _id: user.currentSubscription },
       { expiresAt: new Date(Date.now() - 1000) },
     );
+
+    const res = await request(app).get("/api/consultancy-profiles");
+    expect(res.body.data).toHaveLength(0);
+  });
+
+  it("excludes an inactive (on-a-break) or banned profile, even if verified and subscribed", async () => {
+    const inactiveUser = await createUserWithActiveSubscription();
+    await createConsultancyProfile({
+      user: inactiveUser,
+      currentSubscription: inactiveUser.currentSubscription,
+      isVerified: true,
+      status: "inactive",
+      slug: "on-a-break",
+    });
+
+    const bannedUser = await createUserWithActiveSubscription();
+    await createConsultancyProfile({
+      user: bannedUser,
+      currentSubscription: bannedUser.currentSubscription,
+      isVerified: true,
+      status: "banned",
+      slug: "banned",
+    });
 
     const res = await request(app).get("/api/consultancy-profiles");
     expect(res.body.data).toHaveLength(0);
@@ -448,6 +542,23 @@ describe("Portfolio", () => {
     expect(res.status).toBe(201);
     expect(res.body.portfolio[0].media).toHaveLength(0);
     expect(res.body.mediaWarnings).toBeDefined();
+  });
+
+  // Portfolio media is work photos only — jpeg/png/avif — never a pdf or
+  // webp, which DEFAULT_ALLOWED_MIME_TYPES would otherwise let through.
+  it("accepts an AVIF image but rejects a PDF/WEBP as a non-blocking mediaWarnings entry", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+    const token = generateToken(user);
+
+    const avif = await addItem(token).attach("file", TEST_AVIF_BUFFER, "work.avif");
+    expect(avif.status).toBe(201);
+    expect(avif.body.portfolio[0].media).toHaveLength(1);
+
+    const pdf = await addItem(token).attach("file", TEST_PDF_BUFFER, "notes.pdf");
+    expect(pdf.status).toBe(201);
+    expect(pdf.body.portfolio[1].media).toHaveLength(0);
+    expect(pdf.body.mediaWarnings).toBeDefined();
   });
 
   describe("POST .../portfolio/:itemId/media", () => {

@@ -1,4 +1,5 @@
 import * as yup from "yup";
+import { selfServiceProfileStatus } from "../common";
 
 // `specializations`/`links` deliberately aren't validated here — the
 // controller's own resolvedSpecializations/filterValidLinks filters
@@ -38,6 +39,7 @@ export const updateConsultancyProfileSchema = yup
     // its own to strip against, so the value passes through untouched,
     // same as `services` above.
     mentorship: yup.mixed().notRequired(),
+    status: selfServiceProfileStatus(),
   })
   .noUnknown(true);
 

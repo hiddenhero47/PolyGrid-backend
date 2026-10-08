@@ -1,4 +1,5 @@
 import * as yup from "yup";
+import { selfServiceProfileStatus } from "../common";
 
 // `skills`/`links` deliberately aren't validated here — the controller's
 // own resolvedSkills/filterValidLinks filters silently drop invalid
@@ -27,6 +28,7 @@ export const updateLaborProfileSchema = yup
     city: yup.string().trim().notRequired(),
     yearsOfExperience: yup.number().min(0).notRequired(),
     links: yup.array().notRequired(),
+    status: selfServiceProfileStatus(),
   })
   .noUnknown(true);
 

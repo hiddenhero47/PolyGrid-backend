@@ -27,6 +27,7 @@ import reviewRoutes from "./routes/reviewRoutes";
 import clientProfileRoutes from "./routes/clientProfileRoutes";
 import laborProfileRoutes from "./routes/laborProfileRoutes";
 import jobOpeningRoutes from "./routes/jobOpeningRoutes";
+import adminProfileRoutes from "./routes/adminProfileRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
@@ -90,6 +91,7 @@ const createApp = (): Express => {
   app.use("/api/client-profiles", clientProfileRoutes);
   app.use("/api/labor-profiles", laborProfileRoutes);
   app.use("/api/job-openings", jobOpeningRoutes);
+  app.use("/api/admin/profiles", adminProfileRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

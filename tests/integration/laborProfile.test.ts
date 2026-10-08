@@ -82,6 +82,39 @@ describe("POST /api/labor-profiles", () => {
   });
 });
 
+// Full status (active/inactive/banned) behavior — self-service toggle,
+// admin-only ban, search/eligibility exclusion, banned-hides-the-page —
+// is covered in depth once in consultancyProfile.test.ts (identical
+// shared logic); this just confirms the same wiring exists here too.
+describe("PATCH /api/labor-profiles/me", () => {
+  it("lets me toggle my own status, but not to 'banned'; a banned profile rejects any update", async () => {
+    const user = await createUser();
+    await createLaborProfile({ user });
+    const token = generateToken(user);
+
+    const toInactive = await request(app)
+      .patch("/api/labor-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "inactive" });
+    expect(toInactive.status).toBe(200);
+    expect(toInactive.body.status).toBe("inactive");
+
+    const selfBan = await request(app)
+      .patch("/api/labor-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "banned" });
+    expect(selfBan.status).toBe(400);
+
+    const bannedUser = await createUser();
+    await createLaborProfile({ user: bannedUser, status: "banned" });
+    const bannedUpdate = await request(app)
+      .patch("/api/labor-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(bannedUser)}`)
+      .send({ headline: "Trying to sneak an edit in" });
+    expect(bannedUpdate.status).toBe(403);
+  });
+});
+
 describe("GET /api/labor-profiles/:idOrSlug", () => {
   it("resolves the URL but withholds content when not currently subscribed", async () => {
     const user = await createUser();

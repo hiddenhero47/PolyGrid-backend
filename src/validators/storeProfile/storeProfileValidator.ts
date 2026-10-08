@@ -1,4 +1,5 @@
 import * as yup from "yup";
+import { selfServiceProfileStatus } from "../common";
 
 // `categories`/`links` deliberately aren't validated here — the
 // controller's own filterValidCategories/filterValidLinks filters
@@ -26,5 +27,6 @@ export const updateStoreProfileSchema = yup
     country: yup.string().trim().notRequired(),
     city: yup.string().trim().notRequired(),
     links: yup.array().notRequired(),
+    status: selfServiceProfileStatus(),
   })
   .noUnknown(true);

@@ -1,4 +1,5 @@
 import * as yup from "yup";
+import { selfServiceProfileStatus } from "../common";
 
 // `links` deliberately isn't validated here — filterValidLinks in
 // digitalCreatorProfileController.ts silently drops malformed entries
@@ -25,5 +26,6 @@ export const updateDigitalCreatorProfileSchema = yup
     country: yup.string().trim().notRequired(),
     city: yup.string().trim().notRequired(),
     links: yup.array().notRequired(),
+    status: selfServiceProfileStatus(),
   })
   .noUnknown(true);

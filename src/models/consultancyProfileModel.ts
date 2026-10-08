@@ -1,4 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { PROFILE_STATUS, ProfileStatus } from "../constants/profileStatus";
 import { isValidCountryCode } from "../helpers/countryReference";
 import { isValidCurrencyCode } from "../helpers/currencyReference";
 import { IProfileLink, profileLinkSchema, validateLinkCount, MAX_PROFILE_LINKS } from "./profileLink";
@@ -76,6 +77,9 @@ export interface IConsultancyProfile extends Document {
   // Points at the *latest* Verification record — see verificationModel.ts
   // for why history isn't collapsed into this profile directly.
   verification: Types.ObjectId | null;
+  // See constants/profileStatus.ts — active by default, inactive is
+  // self-service, banned is admin-only.
+  status: ProfileStatus;
   slug: string;
   headline: string;
   bio?: string;
@@ -139,6 +143,7 @@ const consultancyProfileSchema = new Schema<IConsultancyProfile>(
     },
     isVerified: { type: Boolean, default: false },
     verification: { type: Schema.Types.ObjectId, ref: "Verification", default: null },
+    status: { type: String, enum: Object.values(PROFILE_STATUS), default: PROFILE_STATUS.ACTIVE },
     slug: { type: String, required: true, unique: true },
     headline: { type: String, required: [true, "Please add a headline"], trim: true },
     bio: { type: String },
@@ -189,7 +194,7 @@ const consultancyProfileSchema = new Schema<IConsultancyProfile>(
 );
 
 consultancyProfileSchema.index({ specializations: 1 });
-consultancyProfileSchema.index({ isVerified: 1, currentSubscription: 1 });
+consultancyProfileSchema.index({ isVerified: 1, status: 1, currentSubscription: 1 });
 
 export const ConsultancyProfile: Model<IConsultancyProfile> =
   mongoose.model<IConsultancyProfile>("ConsultancyProfile", consultancyProfileSchema);

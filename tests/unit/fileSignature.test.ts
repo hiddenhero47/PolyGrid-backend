@@ -1,5 +1,5 @@
 import { detectFileSignature } from "../../src/helpers/fileSignature";
-import { TEST_PNG_BUFFER, TEST_DOCX_BUFFER } from "../setup/fixtures";
+import { TEST_PNG_BUFFER, TEST_DOCX_BUFFER, TEST_AVIF_BUFFER } from "../setup/fixtures";
 
 describe("detectFileSignature", () => {
   it("detects a real PNG by magic bytes", () => {
@@ -21,6 +21,19 @@ describe("detectFileSignature", () => {
       Buffer.from("WEBP", "ascii"),
     ]);
     expect(detectFileSignature(buffer)).toEqual({ mime: "image/webp", ext: "webp" });
+  });
+
+  it("detects an AVIF by its ftyp box brand", () => {
+    expect(detectFileSignature(TEST_AVIF_BUFFER)).toEqual({ mime: "image/avif", ext: "avif" });
+  });
+
+  it("does not mistake another ISOBMFF brand (e.g. HEIC) for AVIF", () => {
+    const buffer = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x1c]),
+      Buffer.from("ftyp", "ascii"),
+      Buffer.from("heic", "ascii"),
+    ]);
+    expect(detectFileSignature(buffer)).toBeNull();
   });
 
   it("detects a PDF by its header", () => {

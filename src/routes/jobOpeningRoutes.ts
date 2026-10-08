@@ -2,6 +2,8 @@ import express from "express";
 import {
   createJobOpening,
   updateMyJobOpening,
+  addOpeningFiles,
+  removeOpeningFile,
   cancelMyJobOpening,
   getMyJobOpenings,
   listJobOpenings,
@@ -32,6 +34,8 @@ router.get("/applications/mine", protect, getMyApplications);
 
 router.get("/:id", protect, getJobOpening);
 router.patch("/:id", protect, validateBody(updateJobOpeningSchema), updateMyJobOpening);
+router.post("/:id/files", protect, addOpeningFiles);
+router.delete("/:id/files/:fileName", protect, removeOpeningFile);
 router.patch("/:id/cancel", protect, cancelMyJobOpening);
 
 router.post("/:id/applications", protect, validateBody(applyToJobOpeningSchema), applyToJobOpening);

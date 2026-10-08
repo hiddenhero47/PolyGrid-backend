@@ -15,7 +15,13 @@ import {
 import { IPortfolioMedia } from "../models/portfolioItem";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import { PROFILE_STATUS } from "../constants/profileStatus";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+} from "../helpers/fileStorage";
 
 const slugify = (value: string): string =>
   value
@@ -56,6 +62,7 @@ export const toPublicLaborProfile = (profile: ILaborProfile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
+  status: profile.status,
   slug: profile.slug,
   headline: profile.headline,
   bio: profile.bio,
@@ -96,7 +103,7 @@ export const loadEligibleLaborProfile = async (
   userId: mongoose.Types.ObjectId | string,
 ): Promise<ILaborProfile | null> => {
   const profile = await LaborProfile.findOne({ userId });
-  if (!profile?.isVerified) return null;
+  if (!profile?.isVerified || profile.status !== PROFILE_STATUS.ACTIVE) return null;
 
   const subscription = profile.currentSubscription
     ? await Subscription.findById(profile.currentSubscription)
@@ -170,7 +177,12 @@ export const updateMyLaborProfile = asyncHandler(async (req: Request, res: Respo
     throw new Error("You don't have a labor profile yet");
   }
 
-  const { headline, bio, skills, country, city, yearsOfExperience, links } = req.body;
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(403);
+    throw new Error("This profile has been banned — contact support");
+  }
+
+  const { headline, bio, skills, country, city, yearsOfExperience, links, status } = req.body;
 
   if (headline) profile.headline = headline;
   if (bio !== undefined) profile.bio = bio;
@@ -191,13 +203,18 @@ export const updateMyLaborProfile = asyncHandler(async (req: Request, res: Respo
     profile.links = resolvedLinks;
   }
 
+  // Validated (updateLaborProfileSchema) to only ever be
+  // 'active'/'inactive' — self-service never reaches 'banned', same as
+  // every other pillar profile's own update endpoint.
+  if (status !== undefined) profile.status = status;
+
   await profile.save();
 
   res.status(200).json(toPublicLaborProfile(profile));
 });
 
-// @desc    Search/list workers — only those verified AND currently
-//          subscribed show up here. Same rule as searchContractors.
+// @desc    Search/list workers — only those verified, active, AND
+//          currently subscribed show up here. Same rule as searchContractors.
 // @route   GET /api/labor-profiles
 // @access  Public
 export const searchWorkers = asyncHandler(async (req: Request, res: Response) => {
@@ -207,7 +224,11 @@ export const searchWorkers = asyncHandler(async (req: Request, res: Response) =>
 
   const { skill, country } = req.query as { skill?: string; country?: string };
 
-  const match: Record<string, unknown> = { isVerified: true, currentSubscription: { $ne: null } };
+  const match: Record<string, unknown> = {
+    isVerified: true,
+    status: PROFILE_STATUS.ACTIVE,
+    currentSubscription: { $ne: null },
+  };
 
   if (skill && Object.values(LABOR_SKILL).includes(skill as LaborSkill)) {
     match.skills = skill;
@@ -267,6 +288,15 @@ export const getWorker = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("Profile not found");
   }
 
+  // Banned hides the page outright — a moderation action, not a
+  // subscription lapse. Inactive (on a break) falls through to the
+  // normal subscription check below instead, same as any other
+  // unsubscribed profile.
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(200).json({ available: false, message: "This profile is not currently available." });
+    return;
+  }
+
   const subscription = profile.currentSubscription
     ? await Subscription.findById(profile.currentSubscription)
     : null;
@@ -289,7 +319,11 @@ const saveMediaFiles = async (
   // undetected (those are checked against req.files.length alone). Same
   // shim digitalProductController.ts's saveFilesForField already uses.
   const shimReq = { files: req.files, body: {} } as unknown as Request;
-  const { results, errorLogs } = await uploadHandler({ req: shimReq, visibility: FILE_VISIBILITY.PUBLIC });
+  const { results, errorLogs } = await uploadHandler({
+    req: shimReq,
+    visibility: FILE_VISIBILITY.PUBLIC,
+    allowedMimeTypes: PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+  });
 
   return {
     media: results.map((r) => ({

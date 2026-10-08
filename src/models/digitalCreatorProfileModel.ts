@@ -1,4 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { PROFILE_STATUS, ProfileStatus } from "../constants/profileStatus";
 import { isValidCountryCode } from "../helpers/countryReference";
 import { IProfileLink, profileLinkSchema, validateLinkCount, MAX_PROFILE_LINKS } from "./profileLink";
 import { IMediaFile, mediaFileSchema } from "./mediaFile";
@@ -26,6 +27,9 @@ export interface IDigitalCreatorProfile extends Document {
   currentSubscription: Types.ObjectId | null;
   isVerified: boolean;
   verification: Types.ObjectId | null;
+  // See constants/profileStatus.ts — active by default, inactive is
+  // self-service, banned is admin-only.
+  status: ProfileStatus;
   slug: string;
   displayName: string;
   bio?: string;
@@ -47,6 +51,7 @@ const digitalCreatorProfileSchema = new Schema<IDigitalCreatorProfile>(
     currentSubscription: { type: Schema.Types.ObjectId, ref: "Subscription", default: null },
     isVerified: { type: Boolean, default: false },
     verification: { type: Schema.Types.ObjectId, ref: "Verification", default: null },
+    status: { type: String, enum: Object.values(PROFILE_STATUS), default: PROFILE_STATUS.ACTIVE },
     slug: { type: String, required: true, unique: true },
     displayName: { type: String, required: [true, "Please add a display name"], trim: true },
     bio: { type: String },
@@ -73,7 +78,7 @@ const digitalCreatorProfileSchema = new Schema<IDigitalCreatorProfile>(
   { timestamps: true },
 );
 
-digitalCreatorProfileSchema.index({ isVerified: 1, currentSubscription: 1 });
+digitalCreatorProfileSchema.index({ isVerified: 1, status: 1, currentSubscription: 1 });
 
 export const DigitalCreatorProfile: Model<IDigitalCreatorProfile> = mongoose.model<IDigitalCreatorProfile>(
   "DigitalCreatorProfile",

@@ -17,7 +17,13 @@ import {
   AuthProviderName,
   TOKENS,
 } from "../models/userModel";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  IMAGE_ONLY_MIME_TYPES,
+  countUploadCandidates,
+} from "../helpers/fileStorage";
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 
@@ -392,15 +398,22 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
   // things — a bad/missing image must never fail the whole profile update.
   // uploadHandler already never throws; it just reports what it couldn't
   // save in errorLogs, which we surface as a soft warning instead of an
-  // error response.
-  const hasIncomingFile =
-    (req.files as Express.Multer.File[] | undefined)?.length || req.body?.base64 || req.body?.url;
+  // error response. Same reasoning for more than one source at once
+  // (a file, base64, *and* url all attached) — rather than let
+  // uploadHandler save every one of them and only keep the first
+  // (silently orphaning the rest on disk, same bug
+  // jobController.uploadContract had), this skips the upload
+  // entirely and surfaces it as a warning instead.
+  const candidateCount = countUploadCandidates(req);
   let avatarWarnings: string[] = [];
 
-  if (hasIncomingFile) {
+  if (candidateCount > 1) {
+    avatarWarnings = ["Attach exactly one avatar image — no image was saved"];
+  } else if (candidateCount === 1) {
     const { results, errorLogs } = await uploadHandler({
       req,
       visibility: FILE_VISIBILITY.PUBLIC, // avatars are always public
+      allowedMimeTypes: IMAGE_ONLY_MIME_TYPES,
     });
 
     if (results.length > 0) {

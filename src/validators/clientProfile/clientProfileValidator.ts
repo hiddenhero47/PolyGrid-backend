@@ -1,4 +1,5 @@
 import * as yup from "yup";
+import { selfServiceProfileStatus } from "../common";
 
 // Country format is already enforced once, at the Mongoose schema level.
 export const createClientProfileSchema = yup
@@ -16,5 +17,6 @@ export const updateClientProfileSchema = yup
     bio: yup.string().trim().notRequired(),
     country: yup.string().trim().notRequired(),
     city: yup.string().trim().notRequired(),
+    status: selfServiceProfileStatus(),
   })
   .noUnknown(true);

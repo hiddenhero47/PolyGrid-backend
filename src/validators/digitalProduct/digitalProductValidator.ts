@@ -29,3 +29,11 @@ export const updateDigitalProductSchema = yup
     isActive: yup.boolean().notRequired(),
   })
   .noUnknown(true);
+
+// Admin/customer_care only (setDigitalProductVerification) — never part
+// of the creator's own createDigitalProductSchema/updateDigitalProductSchema.
+export const setDigitalProductVerificationSchema = yup
+  .object({
+    isVerified: yup.boolean().required("isVerified must be true or false"),
+  })
+  .noUnknown(true);

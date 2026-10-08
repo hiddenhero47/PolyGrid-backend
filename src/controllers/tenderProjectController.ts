@@ -12,6 +12,7 @@ import {
 import { Bid, IBid, BID_STATUS } from "../models/bidModel";
 import { ContractorProfile, IContractorProfile } from "../models/contractorProfileModel";
 import { Subscription } from "../models/subscriptionModel";
+import { PROFILE_STATUS } from "../constants/profileStatus";
 import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
 import { loadEligibleClientProfile } from "./clientProfileController";
@@ -83,7 +84,7 @@ const loadEligibleContractorProfile = async (
   userId: mongoose.Types.ObjectId | string,
 ): Promise<IContractorProfile | null> => {
   const profile = await ContractorProfile.findOne({ userId });
-  if (!profile?.isVerified) return null;
+  if (!profile?.isVerified || profile.status !== PROFILE_STATUS.ACTIVE) return null;
 
   const subscription = profile.currentSubscription
     ? await Subscription.findById(profile.currentSubscription)
@@ -92,21 +93,21 @@ const loadEligibleContractorProfile = async (
   return subscription?.isActive() ? profile : null;
 };
 
-// @desc    Post a new project to the bidding board. Requires a subscribed
-//          ClientProfile — posting doesn't require `isVerified` (see
-//          clientProfileModel.ts for why), but it does require the poster
-//          to actually have a profile now, not just a bare subscribed
-//          User — that's what lets a contractor review the poster's
-//          reputation after a job (see reviewController.createReview).
+// @desc    Post a new project to the bidding board. Requires a verified,
+//          subscribed ClientProfile (see clientProfileModel.ts for why
+//          verification matters here too, not just a bare subscribed
+//          User) — that's also what lets a contractor review the
+//          poster's reputation after a job (see
+//          reviewController.createReview).
 // @route   POST /api/tender-projects
-// @access  Private — requires a subscribed client profile
+// @access  Private — requires a verified, subscribed client profile
 export const createTenderProject = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
 
   const clientProfile = await loadEligibleClientProfile(requester._id);
   if (!clientProfile) {
     res.status(402);
-    throw new Error("You need a client profile with an active subscription to post a project");
+    throw new Error("You need a verified client profile with an active subscription to post a project");
   }
 
   const { title, description, category, budgetMin, budgetMax, currency, location, bidDeadline } = req.body;
