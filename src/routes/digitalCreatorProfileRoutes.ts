@@ -12,6 +12,7 @@ import {
   addDigitalProductPreviewImages,
   removeDigitalProductPreviewImage,
   addDigitalProductFiles,
+  removeDigitalProductFile,
 } from "../controllers/digitalProductController";
 import { protect } from "../middleware/authMiddleware";
 import { validateBody } from "../validators/validate";
@@ -36,6 +37,7 @@ router.patch("/me/products/:id", protect, validateBody(updateDigitalProductSchem
 router.post("/me/products/:id/preview-images", protect, addDigitalProductPreviewImages);
 router.delete("/me/products/:id/preview-images/:fileName", protect, removeDigitalProductPreviewImage);
 router.post("/me/products/:id/files", protect, addDigitalProductFiles);
+router.delete("/me/products/:id/files/:fileName", protect, removeDigitalProductFile);
 
 // Catch-all by id/slug — must stay last so it doesn't shadow the routes above.
 router.get("/:idOrSlug", getDigitalCreatorProfile);

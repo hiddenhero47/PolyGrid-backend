@@ -14,8 +14,11 @@ export type FileVisibility = (typeof FILE_VISIBILITY)[keyof typeof FILE_VISIBILI
 // Kept outside src/ (and outside dist/) on purpose — this is runtime data,
 // not build output, so it shouldn't live inside a directory a rebuild could
 // reasonably be expected to touch. Override via STORAGE_ROOT (tests point
-// this at a throwaway directory — see tests/setup/env.ts).
-const STORAGE_ROOT = process.env.STORAGE_ROOT
+// this at a throwaway directory — see tests/setup/env.ts). Exported so
+// internalStorageProvider.ts (providers/digitalStorageProviders/) can lay
+// its own digital-store/ directory alongside public/ and private/ without
+// re-deriving this same env-var-or-default logic.
+export const STORAGE_ROOT = process.env.STORAGE_ROOT
   ? path.resolve(process.env.STORAGE_ROOT)
   : path.join(process.cwd(), "storage");
 
@@ -110,6 +113,29 @@ const saveBuffer = async (
   };
 };
 
+// Pure validation — no I/O. Shared by the local-disk save path below and
+// s3Storage.ts's upload path, so both enforce the exact same size cap +
+// magic-byte MIME check without duplicating it.
+export type FileDetectionResult = { ok: true; mime: string; ext: string } | { ok: false; error: string };
+
+export const detectAndValidateFile = (
+  buffer: Buffer,
+  originalName: string,
+  allowedMimeTypes: string[],
+): FileDetectionResult => {
+  if (buffer.length > MAX_FILE_SIZE_BYTES) {
+    return { ok: false, error: `${originalName}: file exceeds the ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB limit` };
+  }
+
+  const detected = detectFileSignature(buffer);
+
+  if (!detected || !allowedMimeTypes.includes(detected.mime)) {
+    return { ok: false, error: `${originalName}: unsupported or unrecognized file type` };
+  }
+
+  return { ok: true, mime: detected.mime, ext: detected.ext };
+};
+
 const validateAndSave = async (
   buffer: Buffer,
   originalName: string,
@@ -117,14 +143,10 @@ const validateAndSave = async (
   allowedMimeTypes: string[],
   ownerId?: string,
 ): Promise<{ saved?: SavedFileInfo; error?: string }> => {
-  if (buffer.length > MAX_FILE_SIZE_BYTES) {
-    return { error: `${originalName}: file exceeds the ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB limit` };
-  }
+  const detected = detectAndValidateFile(buffer, originalName, allowedMimeTypes);
 
-  const detected = detectFileSignature(buffer);
-
-  if (!detected || !allowedMimeTypes.includes(detected.mime)) {
-    return { error: `${originalName}: unsupported or unrecognized file type` };
+  if (!detected.ok) {
+    return { error: detected.error };
   }
 
   const saved = await saveBuffer(

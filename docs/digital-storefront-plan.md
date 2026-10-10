@@ -68,36 +68,93 @@ exactly like ConsultancyProfile and StoreProfile were — KYC/verification
 works for it with zero pillar-specific code, same payoff the registry was
 built for.
 
-## Products — public preview, private deliverable, permanent purchase
+## Storage provider — internal (local disk) by default, S3 opt-in
+
+Deliverable files (both a product's originals and a buyer's purchase
+copy) go through a small adapter interface,
+`providers/digitalStorageProviders/types.ts` (`DigitalStorageProviderAdapter`
+— `uploadDigitalFiles`/`copyDigitalFile`/`deleteDigitalFile`/
+`getDigitalFileDownloadUrl`), the same shape `providers/paymentProviders`
+already established for swapping Stripe for another gateway later without
+rewriting every caller. Two implementations exist today:
+
+- `internalStorageProvider.ts` — **the default.** Local disk, under
+  `STORAGE_ROOT/digital-store/` (kept separate from `public/`/`private/` —
+  a distinct concern with its own buyer-copy semantics). Download links
+  are minted by `helpers/digitalFileSigning.ts` (a JWT keyed by `key`,
+  mirroring `fileSigning.ts`'s ownerId+fileName token but for a
+  potentially-multi-segment storage key) and served by
+  `digitalStoreController.downloadDigitalStoreFile` at
+  `GET /digital-store/download?token=...` — no `protect`, no DB read, the
+  signed token IS the authorization, exactly like `/private/download/...`.
+- `s3StorageProvider.ts` — AWS S3. Requires real credentials
+  (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION`/`S3_BUCKET`),
+  which this project doesn't have set up yet.
+
+`providers/digitalStorageProviders/index.ts`'s `getDigitalStorageProvider()`
+picks between them by reading `process.env.DIGITAL_STORAGE_PROVIDER`
+(`"internal"` or `"aws"`) fresh on every call — **deliberately never
+exposed through any API**, and not meant to change at runtime. Which
+provider is active is a deploy-time decision (edit `.env`, redeploy): a
+request-level or admin-API toggle would mean existing `key`s stay pointing
+at whichever store they were actually written to while new reads went
+looking in the other one — there's no way to know "where to look" for a
+file written under a provider that's no longer configured. Move to
+`DIGITAL_STORAGE_PROVIDER=aws` once real AWS credentials exist; nothing
+else about the code needs to change, since every caller goes through the
+adapter interface, never a concrete provider directly.
+
+## Products — public preview, provider-backed deliverable, buyer gets their own copy
 
 `DigitalProduct` splits its media into two arrays with two different
-visibility rules, distinguished by multipart field name (`forms.any()` in
-`app.ts` puts every attached file into one flat `req.files`, tagged with
-its own `.fieldname` — nothing about multer config forces the split, the
-controller just filters by fieldname):
+visibility rules and two different storage backends, distinguished by
+multipart field name (`forms.any()` in `app.ts` puts every attached file
+into one flat `req.files`, tagged with its own `.fieldname` — nothing
+about multer config forces the split, the controller just filters by
+fieldname):
 
-- `previewImages` (`FILE_VISIBILITY.PUBLIC`) — screenshots/renders anyone
+- `previewImages` (`FILE_VISIBILITY.PUBLIC`, always local disk via
+  `fileStorage.ts` — never goes through the provider abstraction above,
+  these are public and non-purchasable) — screenshots/renders anyone
   browsing can see, same as a `Product`'s images.
-- `files` (`FILE_VISIBILITY.PRIVATE`) — the actual deliverable. Required,
-  non-empty at creation. Never served directly and never in
-  `toPublicDigitalProduct`'s response — the only way to reach one is
-  `GET /api/digital-products/:id/download`.
+- `files` (whichever storage provider is configured, `IDigitalFile[]` —
+  see `models/digitalFile.ts`) — the actual deliverable. Required,
+  non-empty at creation, never in `toPublicDigitalProduct`'s response.
+  Never served directly — the creator reaches their own live files via
+  `GET /api/digital-products/:id/download`; a buyer never touches this
+  array at all (see Purchase below).
 
 **A creator can never hard-delete a listing.** `isActive: false` is the
 only removal mechanism — it hides the product from the feed, the creator
-page, and direct view, but the record and its files stay exactly as they
-were. This is the brief's requirement made structural: a past buyer's
-access must keep working regardless of what the creator does to the
-listing afterward.
+page, and direct view, but the record stays exactly as it was.
 
-**Files are append-only after creation** (`POST .../products/:id/files`) —
-deliberately no remove endpoint. A file already sold to a buyer shouldn't
-be pulled out from under them just because the creator is editing the
-listing (e.g. uploading a revised drawing). Preview images, being public
-and non-purchasable, keep the ordinary add/remove pair
-(`POST`/`DELETE .../preview-images/...`) `Product`'s images already use.
+**A creator can add, remove, or replace deliverable files** —
+`POST`/`DELETE .../products/:id/files[/:fileName]`, the same add/remove
+pair `previewImages` already uses ("replace" is remove-then-add; no
+separate endpoint). This is safe *because* a buyer never reads from the
+live product (see Purchase below) — removal moves the entry from
+`DigitalProduct.files` into `DigitalProduct.bin` (`helpers/
+digitalProductBin.ts`) instead of deleting it right away, with
+`deleteAt` set `BIN_GRACE_MS` (1 day) out. A purchase already in flight
+may still be entitled to copy it via its frozen `fileManifest`, which in
+practice resolves within seconds of a successful payment — a day is a
+generous, simple buffer, not a tuned value.
 
-## Purchase — direct, no Job, permanent once granted
+`clearProductBin` is the actual deletion: called lazily wherever a
+single product is read or written (`getDigitalProduct`,
+`getDigitalProductDownloadLink`, `updateDigitalProduct`,
+`addDigitalProductPreviewImages`/`Files`, `removeDigitalProductFile`
+itself), it deletes every bin entry whose `deleteAt` has passed (via
+`getDigitalStorageProvider().deleteDigitalFile`) and drops them from
+`bin`. Deliberately **not** a cron sweep like `DigitalPurchase` retention
+— a product nobody's touching has nothing time-sensitive riding on its
+bin being cleared promptly, so there's no need for a background job; the
+next time anyone looks at or edits that specific product, the check runs
+and anything overdue gets swept. `bin` is never included in
+`toPublicDigitalProduct` — like `files`, it holds a storage `key` that
+must never leave the server.
+
+## Purchase — direct, no Job, buyer gets their own time-limited copy
 
 Unlike every other paid interaction in this codebase, a digital purchase
 never spins up a `Job`. The brief is explicit: "purchase and download
@@ -118,18 +175,129 @@ interim state before payment is real" instinct as
 - a second purchase attempt while one already exists for that
   buyer+product, pending or successful.
 
-**Access, once granted, is permanent — deliberately decoupled from the
-creator's ongoing status.** `getDigitalProductDownloadLink` checks purely
-for a `DigitalPurchase{status: success}` record (or the requester being
-the product's own creator) and mints signed download links via
-`signFileUrl()` directly — bypassing `FileGrant` entirely, matching the
-"a domain with its own access rules calls `signFileUrl()` directly"
-pattern from `docs/file-uploads-plan.md`. It never re-checks the creator's
-live subscription/verification, and never re-checks `isActive`. Those two
-things only ever gate *discovery* (the feed, the creator page, a direct
-product view) — never a download someone already paid for. A creator
-lapsing their subscription the day after a sale, or later deactivating the
-listing, changes nothing about a completed purchase.
+Deliberately **not** blocked: purchasing itself is never gated on the
+*buyer's* own subscription. Subscription status only ever affects how
+long the buyer's copy is retained (below) — it's not a condition of being
+allowed to buy.
+
+**At checkout-start, `DigitalPurchase.fileManifest` freezes exactly which
+storage keys this purchase covers** — a snapshot of `product.files` taken
+before anything else can change it. This is the race-condition fix: no
+matter what the creator does to the listing while payment is still
+processing (Stripe confirmation, 3D Secure, webhook delay), this purchase
+is entitled to exactly these keys, and (combined with removal never
+deleting the object) they're guaranteed to still exist whenever the copy
+actually runs.
+
+**Once the webhook flips a purchase to `success`**, it calls
+`digitalPurchaseFiles.copyPurchaseFiles` — a standalone, directly
+unit-testable helper that calls `getDigitalStorageProvider().copyDigitalFile`
+for every file in `fileManifest`, copying each into a buyer-scoped key
+(`digital-purchases/<buyerId>/<purchaseId>/...`), populating
+`DigitalPurchase.files`: the buyer's own independent copy, from this
+point on completely decoupled from the creator's product. The webhook
+only calls this once per purchase —
+`DigitalPurchase.updateOne({status: pending}, {status: success})`'s own
+`modifiedCount` gates it, so a Stripe redelivery of an already-processed
+event is a pure no-op (same idempotency instinct already used for
+`Payment.status` one line above).
+
+**Two separate download routes, not one shared by role** —
+`GET /api/digital-products/:id/download` (`digitalProductController.
+getDigitalProductDownloadLink`) is creator-only now, keyed by the
+product, serving the live `product.files`. A buyer instead uses
+`GET /api/digital-purchases/:id/download`
+(`digitalPurchaseController.getDigitalPurchaseDownloadLink`), keyed by
+the *purchase*, reading only `purchase.files` — it never looks up
+`DigitalProduct` at all. This split matters beyond tidiness: the two
+routes used to share one `DigitalProduct.findById` lookup, which meant a
+buyer's download depended on the live product being found first, even
+though the bytes they'd actually get were already fully independent of
+it. Now a creator editing the price, swapping the file, deactivating the
+listing, or (per "Abandoned-seller cleanup" below) having their catalog
+cleared after a month unsubscribed literally cannot affect this route —
+there's no code path left that touches `DigitalProduct` for a buyer at
+all. If `purchase.files` is empty: `filesDeletedAt` set means the
+retention sweep deliberately wiped it (410 Gone); unset means the copy
+step hasn't completed yet — a rare operational gap, not an expiry (503,
+retry).
+
+## Retention — kept while subscribed, 7 days' grace after it lapses
+
+A buyer's copy isn't permanent. `helpers/digitalPurchaseRetention.ts`'s
+`sweepExpiredPurchaseFiles` wipes `DigitalPurchase.files` (via
+`getDigitalStorageProvider().deleteDigitalFile`) once the buyer's
+**own** subscription (`User.currentSubscription`, not a new profile
+requirement) has been inactive for 7+ days — or 7 days from the purchase
+itself if they were never subscribed at all. Everything is computed
+live, nothing cached: a buyer who resubscribes before the grace period
+elapses is simply never flagged on the next run. `fileManifest` and the
+`DigitalPurchase` record itself are never deleted — only `files` (the
+copy) and only once; the sweep's query (`files.0` must exist) makes
+re-running it harmless.
+
+This is the pure, directly-testable sweep logic — scheduling lives
+separately in `jobs/`, structured like house-maduekwe-backend's own
+cron setup: `jobs/status.ts` (a shared `{running, lastRun}` tracker per
+job), `jobs/tasks/digitalPurchaseRetentionTask.ts` (the `node-cron`
+registration + overlap guard, calling the helper above), and
+`jobs/cronIndex.ts`'s `startCronJobs()` (the single entry point
+`server.ts` calls once at boot). Runs weekly, Sunday ~3am UTC.
+
+## Abandoned-seller cleanup — a product's files, not just a purchase's
+
+Separate from buyer-side retention above: `helpers/profileProductCleanup.ts`'s
+`sweepInactiveProfileProducts`, scheduled every 2 hours by
+`jobs/tasks/profileProductCleanupTask.ts`, reclaims storage from a
+**creator's own listings** once their subscription (`DigitalCreatorProfile.
+currentSubscription`) has lapsed 30+ days — not a buyer's purchase copy,
+the creator's original catalog. Shared with the Store pillar (see
+store-plan.md's "Abandoned-store cleanup") — the same "lapsed since"
+aggregation (expiresAt if the subscription's nominally ACTIVE but timed
+out, else updatedAt; a profile that never subscribed at all is excluded
+entirely, not swept) runs against both `StoreProfile` and
+`DigitalCreatorProfile`, `BATCH_SIZE_PER_TYPE` (2) of each per run — a
+little at a time throughout the day rather than one large monthly sweep,
+specifically to avoid a thundering-herd spike once a month. The query
+only ever selects a profile that still has something left to clear
+(`"products.0"`/`"activeProducts.0"` must exist), so a profile that's
+already been fully processed naturally drops out of the next run's
+candidate pool — no field is ever written onto the profile itself to
+mark it "done."
+
+**Store and Digital are handled differently, deliberately matching each
+pillar's own already-established rule about hard-deleting:**
+
+- **Store**: `Product` documents (and their image files) are genuinely
+  hard-deleted. Safe to do — `StoreOrder` already snapshots
+  price/title/totals at checkout, never re-reading the live `Product`
+  for display, and `Review` never targets a `Product` at all. This is
+  the same pattern `storeProfileController`'s category-removal cascade
+  and `productController.deleteProduct` already use.
+- **Digital**: `DigitalProduct` is never hard-deleted, exactly per the
+  "creators can never hard-delete a listing" rule already stated on the
+  model. Instead, every file (`previewImages`, `files`, and anything
+  still sitting in `bin` — forced out immediately here rather than
+  waiting on its own `deleteAt`) gets deleted and the listing is
+  permanently set `isActive: false`. A buyer's own download
+  (`GET /api/digital-purchases/:id/download`) never looks up
+  `DigitalProduct` at all, so hard-deleting it wouldn't touch that route
+  either way — but `getMyDigitalPurchases` still populates
+  title/category/previewImages *live* off `DigitalProduct` rather than
+  snapshotting them, so hard-deleting it would blank those fields in a
+  buyer's own purchase history (price/status/date are fine — those are
+  snapshotted directly on `DigitalPurchase`). Deactivating instead of
+  deleting keeps that history intact too. (The `files` schema validator
+  was relaxed to allow an empty array specifically when `isActive` is
+  already `false`, so this emptying doesn't trip the model's own
+  min-one-file rule for active listings.)
+
+One accepted edge case, not engineered around: a purchase that starts
+checkout in the narrow window right before this runs could have its
+webhook-triggered copy fail if the source file was just deleted — logged,
+surfaced to that buyer as the existing 503 "still being prepared" state.
+Considered acceptable because a creator unsubscribed and untouched for a
+full month is, in practice, not actively making sales.
 
 ## Routes
 
@@ -147,16 +315,25 @@ listing, changes nothing about a completed purchase.
   `isActive` toggle only; no delete endpoint.
 - `POST /api/digital-creator-profiles/me/products/:id/preview-images` /
   `DELETE .../preview-images/:fileName` — add/remove one preview image.
-- `POST /api/digital-creator-profiles/me/products/:id/files` — append more
-  deliverable files; no remove endpoint.
+- `POST /api/digital-creator-profiles/me/products/:id/files` /
+  `DELETE .../files/:fileName` — add/remove a deliverable file (whichever
+  storage provider is configured); removal moves it into the product's
+  bin for a day before the underlying object is actually deleted (see
+  Products above).
 - `GET /api/digital-products/feed?category=` — the flat, cross-creator
   feed; the 2-hop `$lookup` aggregation above.
 - `GET /api/digital-products/:id` — a product directly; `{ available:
   false }` unless its creator is currently verified + subscribed.
-- `GET /api/digital-products/:id/download` — signed download links for
-  every deliverable file; requires being the creator or holding a
-  successful `DigitalPurchase`; access survives the creator's subscription
-  lapsing or the product going inactive.
+- `GET /api/digital-products/:id/download` — creator-only; short-lived
+  download links for the live `product.files`.
+- `GET /digital-store/download?token=...` — the internal storage
+  provider's own file-serving route (unused when
+  `DIGITAL_STORAGE_PROVIDER=aws`, where links point straight at S3).
 - `GET /api/digital-purchases/mine` — my purchase history.
+- `GET /api/digital-purchases/:id/download` — a buyer's own download
+  links, from their own `DigitalPurchase.files` copy; never looks up the
+  live product at all (410 once retention has wiped it, 503 if the copy
+  hasn't landed yet).
 - `POST /api/payments/intent` with `{targetType: "DigitalPurchase",
-  targetId}` — the checkout entry point; see "Purchase" above.
+  targetId}` — the checkout entry point; purchasing itself is never gated
+  on the buyer's own subscription (see "Purchase" above).

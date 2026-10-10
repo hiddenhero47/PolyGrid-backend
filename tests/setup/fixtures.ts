@@ -443,8 +443,10 @@ interface CreateDigitalProductOptions {
 }
 
 // `files` is a raw model insert, not a real upload — a fixture-shaped
-// stand-in is enough for tests that don't exercise getDownloadLink's
-// actual signed-URL minting against real bytes on disk.
+// stand-in (a key, never a real object on either storage provider) is
+// enough for tests that don't exercise getDownloadLink's actual link
+// minting against a real store (those mock
+// providers/digitalStorageProviders instead).
 export const createDigitalProduct = async ({
   creator,
   ...overrides
@@ -460,7 +462,7 @@ export const createDigitalProduct = async ({
     files: [
       {
         fileName: `deliverable-${n}.pdf`,
-        storagePath: `/tmp/deliverable-${n}.pdf`,
+        key: `digital-products/${creator._id}/test-deliverable-${n}.pdf`,
         mime: "application/pdf",
         size: 1024,
       },
@@ -477,22 +479,33 @@ interface CreateDigitalPurchaseOptions {
   [key: string]: unknown;
 }
 
+// Defaults `fileManifest`/`files` to mirror the product's own files
+// (same shape handleDigitalPurchasePaymentIntent/copyPurchaseFiles would
+// produce for a real SUCCESS purchase) so every existing call site that
+// doesn't care about the new fields keeps working unchanged. Pass
+// `files: []` explicitly to simulate a purchase whose copy hasn't
+// landed/been wiped yet.
 export const createDigitalPurchase = async ({
   product,
   buyer,
   creator,
   status = DIGITAL_PURCHASE_STATUS.SUCCESS,
   ...overrides
-}: CreateDigitalPurchaseOptions): Promise<IDigitalPurchase> =>
-  DigitalPurchase.create({
+}: CreateDigitalPurchaseOptions): Promise<IDigitalPurchase> => {
+  const manifest = product.files.map((f) => ({ fileName: f.fileName, key: f.key, mime: f.mime, size: f.size }));
+
+  return DigitalPurchase.create({
     product: product._id,
     buyer: buyer._id,
     creator: creator._id,
     priceSnapshot: product.price,
     currency: product.currency,
     status,
+    fileManifest: manifest,
+    files: status === DIGITAL_PURCHASE_STATUS.SUCCESS ? manifest : [],
     ...overrides,
   });
+};
 
 interface CreateContractorProfileOptions {
   user: IUser;

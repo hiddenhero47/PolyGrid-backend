@@ -9,14 +9,15 @@ import {
   MAX_PREVIEW_IMAGES,
   MAX_DELIVERABLE_FILES,
 } from "../models/digitalProductModel";
-import { DigitalCreatorProfile, IDigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
-import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
+import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
 import { PROFILE_STATUS } from "../constants/profileStatus";
 import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
-import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
+import { uploadHandler, deleteStoredFile, FILE_VISIBILITY, DEFAULT_ALLOWED_MIME_TYPES } from "../helpers/fileStorage";
+import { getDigitalStorageProvider } from "../providers/digitalStorageProviders";
+import { BIN_GRACE_MS, clearProductBin } from "../helpers/digitalProductBin";
+import { toDownloadLinks } from "../helpers/digitalFileLinks";
 
 // Never includes `files` — the actual deliverables are private and only
 // ever reachable through getDownloadLink's access check.
@@ -117,12 +118,14 @@ export const createDigitalProduct = asyncHandler(async (req: Request, res: Respo
     throw new Error(`You can attach at most ${MAX_DELIVERABLE_FILES} deliverable files`);
   }
 
-  const ownerId = profile.userId.toString();
-
-  const [{ files: previewImages, warnings: previewWarnings }, { files, warnings: fileWarnings }] =
+  const [{ files: previewImages, warnings: previewWarnings }, { results: files, errorLogs: fileWarnings }] =
     await Promise.all([
       saveFilesForField(req, "previewImages", FILE_VISIBILITY.PUBLIC),
-      saveFilesForField(req, "files", FILE_VISIBILITY.PRIVATE, ownerId),
+      getDigitalStorageProvider().uploadDigitalFiles(
+        filesForField(req, "files"),
+        `digital-products/${profile._id}`,
+        DEFAULT_ALLOWED_MIME_TYPES,
+      ),
     ]);
 
   if (files.length === 0) {
@@ -169,6 +172,8 @@ export const updateDigitalProduct = asyncHandler(async (req: Request, res: Respo
     throw new Error("Product not found");
   }
 
+  await clearProductBin(product);
+
   const { category, title, description, price, currency, isActive } = req.body;
 
   if (category !== undefined) product.category = category;
@@ -198,6 +203,8 @@ export const addDigitalProductPreviewImages = asyncHandler(async (req: Request, 
     res.status(404);
     throw new Error("Product not found");
   }
+
+  await clearProductBin(product);
 
   const attachedCount = filesForField(req, "previewImages").length;
   if (attachedCount === 0) {
@@ -255,10 +262,8 @@ export const removeDigitalProductPreviewImage = asyncHandler(async (req: Request
 });
 
 // @desc    Add more deliverable files to one of my digital products (e.g. an
-//          updated revision) — deliberately append-only, no remove
-//          endpoint: a file already sold to a past buyer shouldn't be
-//          pulled out from under them just because the creator is editing
-//          the listing.
+//          updated revision, or replacing a removed one — see
+//          removeDigitalProductFile right below).
 // @route   POST /api/digital-creator-profiles/me/products/:id/files
 // @access  Private
 export const addDigitalProductFiles = asyncHandler(async (req: Request, res: Response) => {
@@ -274,6 +279,8 @@ export const addDigitalProductFiles = asyncHandler(async (req: Request, res: Res
     throw new Error("Product not found");
   }
 
+  await clearProductBin(product);
+
   const attachedCount = filesForField(req, "files").length;
   if (attachedCount === 0) {
     res.status(400);
@@ -286,11 +293,10 @@ export const addDigitalProductFiles = asyncHandler(async (req: Request, res: Res
     );
   }
 
-  const { files, warnings } = await saveFilesForField(
-    req,
-    "files",
-    FILE_VISIBILITY.PRIVATE,
-    profile.userId.toString(),
+  const { results: files, errorLogs: warnings } = await getDigitalStorageProvider().uploadDigitalFiles(
+    filesForField(req, "files"),
+    `digital-products/${profile._id}`,
+    DEFAULT_ALLOWED_MIME_TYPES,
   );
   product.files.push(...files);
   await product.save();
@@ -299,6 +305,53 @@ export const addDigitalProductFiles = asyncHandler(async (req: Request, res: Res
     ...toPublicDigitalProduct(product),
     ...(warnings.length > 0 ? { warnings } : {}),
   });
+});
+
+// @desc    Remove one deliverable file from one of my digital products
+//          (e.g. to replace it — remove then addDigitalProductFiles).
+//          Moves the entry into `bin` with a deleteAt BIN_GRACE_MS from
+//          now, rather than deleting the underlying storage object
+//          immediately: a purchase already in flight may still reference
+//          this exact key via its frozen fileManifest, and the webhook's
+//          copy step needs it to still exist whenever it runs. Once
+//          deleteAt passes, clearProductBin (called lazily elsewhere in
+//          this file) actually deletes it. See
+//          docs/digital-storefront-plan.md.
+// @route   DELETE /api/digital-creator-profiles/me/products/:id/files/:fileName
+// @access  Private
+export const removeDigitalProductFile = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const { profile, product } = await loadMyProduct(requester.id, req.params.id as string);
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a digital creator profile yet");
+  }
+  if (!product) {
+    res.status(404);
+    throw new Error("Product not found");
+  }
+
+  await clearProductBin(product);
+
+  const fileName = req.params.fileName as string;
+  const file = product.files.find((f) => f.fileName === fileName);
+
+  if (!file) {
+    res.status(404);
+    throw new Error("File not found on this product");
+  }
+
+  if (product.files.length === 1) {
+    res.status(400);
+    throw new Error("A product must keep at least one deliverable file");
+  }
+
+  product.files = product.files.filter((f) => f.fileName !== fileName) as typeof product.files;
+  product.bin.push({ file, deleteAt: new Date(Date.now() + BIN_GRACE_MS) });
+  await product.save();
+
+  res.status(200).json(toPublicDigitalProduct(product));
 });
 
 const paginationParams = (req: Request) => {
@@ -396,7 +449,14 @@ export const getDigitalProduct = asyncHandler(async (req: Request, res: Response
   }
 
   const product = await DigitalProduct.findById(id);
-  if (!product || !product.isActive) {
+  if (!product) {
+    res.status(404);
+    throw new Error("Product not found");
+  }
+
+  await clearProductBin(product);
+
+  if (!product.isActive) {
     res.status(404);
     throw new Error("Product not found");
   }
@@ -455,17 +515,22 @@ export const setDigitalProductVerification = asyncHandler(async (req: Request, r
   res.status(200).json(toPublicDigitalProduct(product));
 });
 
-// @desc    Mint short-lived signed download links for every deliverable
-//          file on a digital product. Access is permanent once granted —
-//          checked purely off a DigitalPurchase{status: success} record
-//          (or the requester being the product's own creator), and
-//          deliberately never re-checks the creator's live subscription/
-//          verification or the product's isActive flag: those only ever
-//          gate discovery (the feed, the creator page, direct product
-//          view), never a download someone already paid for. See
-//          docs/digital-storefront-plan.md.
+// @desc    Mint short-lived download links for one of MY OWN digital
+//          product's live deliverable files. Creator-only — keyed by the
+//          product, which is exactly right here since it's the creator's
+//          own current files being requested. A buyer never uses this
+//          route: they download their own purchased copy via
+//          GET /api/digital-purchases/:id/download instead (see
+//          digitalPurchaseController.getDigitalPurchaseDownloadLink),
+//          which is keyed by the purchase itself and never needs this
+//          product to still exist at all — see docs/digital-storefront-
+//          plan.md for why that separation matters (this route used to
+//          serve both roles off one DigitalProduct lookup, which meant a
+//          buyer's download depended on the live product being found
+//          first, even though the actual bytes they'd get were already
+//          fully independent of it).
 // @route   GET /api/digital-products/:id/download
-// @access  Private
+// @access  Private (the product's own creator only)
 export const getDigitalProductDownloadLink = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
   const id = req.params.id as string;
@@ -481,30 +546,13 @@ export const getDigitalProductDownloadLink = asyncHandler(async (req: Request, r
     throw new Error("Product not found");
   }
 
+  await clearProductBin(product);
+
   const creator = await DigitalCreatorProfile.findById(product.creatorId);
-  const isCreator = creator?.userId.toString() === requester.id;
-
-  if (!isCreator) {
-    const purchase = await DigitalPurchase.findOne({
-      product: product._id,
-      buyer: requester._id,
-      status: DIGITAL_PURCHASE_STATUS.SUCCESS,
-    });
-
-    if (!purchase) {
-      res.status(403);
-      throw new Error("You don't have access to this product's files");
-    }
+  if (creator?.userId.toString() !== requester.id) {
+    res.status(403);
+    throw new Error("You don't have access to this product's files");
   }
 
-  const ownerId = (creator as IDigitalCreatorProfile).userId.toString();
-
-  const files = product.files.map((file) => ({
-    fileName: file.fileName,
-    mime: file.mime,
-    size: file.size,
-    downloadUrl: signFileUrl({ ownerId, fileName: file.fileName, mode: FILE_URL_MODE.DOWNLOAD }),
-  }));
-
-  res.status(200).json({ files });
+  res.status(200).json({ files: await toDownloadLinks(product.files) });
 });

@@ -14,6 +14,7 @@ import connectDB from "./config/db";
 import createApp from "./app";
 import { initSocket } from "./socket";
 import { loadTemplates } from "./helpers/emailSender";
+import { startCronJobs } from "./jobs/cronIndex";
 
 const port = process.env.PORT || 4000;
 
@@ -38,6 +39,10 @@ const startServer = async (): Promise<void> => {
     httpServer.listen(port, () => {
       console.log(`🚀 Server started on port ${port}`);
     });
+
+    // Mirrors house-maduekwe-backend's own server.js call to its
+    // jobs/cronIndex.js — see jobs/cronIndex.ts.
+    startCronJobs();
   } catch (error) {
     console.error("Startup failed:", (error as Error).message);
     process.exit(1);

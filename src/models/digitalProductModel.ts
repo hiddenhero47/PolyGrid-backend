@@ -1,6 +1,7 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { isValidCurrencyCode } from "../helpers/currencyReference";
 import { IMediaFile, mediaFileSchema } from "./mediaFile";
+import { IDigitalFile, digitalFileSchema } from "./digitalFile";
 
 // A downloadable listing — floor plans, structural drafting details, site
 // layout templates, BOQ sheets. See docs/digital-storefront-plan.md for
@@ -29,6 +30,28 @@ export type DigitalProductCategory =
 export const MAX_PREVIEW_IMAGES = 6;
 export const MAX_DELIVERABLE_FILES = 10;
 
+// A removed deliverable file, held for BIN_GRACE_MS (helpers/
+// digitalProductBin.ts) before its underlying storage object is actually
+// deleted — the grace period a purchase mid-checkout needs to still copy
+// it via its frozen fileManifest (see docs/digital-storefront-plan.md).
+// `deleteAt` is checked (and, once past, acted on) by
+// helpers/digitalProductBin.ts's clearProductBin, called lazily whenever
+// this product is read or written — never a cron sweep, since a product
+// this inactive/unvisited has nothing time-sensitive riding on its bin
+// being cleared promptly.
+export interface IBinEntry {
+  file: IDigitalFile;
+  deleteAt: Date;
+}
+
+const binEntrySchema = new Schema<IBinEntry>(
+  {
+    file: { type: digitalFileSchema, required: true },
+    deleteAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
 export interface IDigitalProduct extends Document {
   creatorId: Types.ObjectId;
   category: DigitalProductCategory;
@@ -41,17 +64,27 @@ export interface IDigitalProduct extends Document {
   previewImages: IMediaFile[];
   price: number;
   currency: string;
-  // The actual product — private files (visibility: FILE_VISIBILITY.PRIVATE
-  // at upload time is what makes `url` undefined here; see mediaFile.ts).
-  // Never served directly: only digitalProductController.getDownloadLink,
-  // after checking the requester actually bought this (or is its
-  // creator), mints a signed URL for one of these.
-  files: IMediaFile[];
+  // The actual product — lives wherever the configured storage provider
+  // puts it (see docs/digital-storefront-plan.md). Never served directly:
+  // only digitalProductController.getDigitalProductDownloadLink, after
+  // checking the requester actually bought this (or is its creator),
+  // mints a short-lived download link for one of these. A creator can add
+  // (addDigitalProductFiles) or remove (removeDigitalProductFile) entries
+  // here freely — removal moves the entry into `bin` rather than deleting
+  // it immediately, because a purchase already in flight may still be
+  // entitled to copy it (see DigitalPurchase.fileManifest). A past buyer's
+  // own access never reads this array at all once they've bought — see
+  // `files` on DigitalPurchase — so editing/removing here can never
+  // affect them.
+  files: IDigitalFile[];
+  // Removed files awaiting permanent deletion — see IBinEntry above and
+  // helpers/digitalProductBin.ts.
+  bin: IBinEntry[];
   // Creators can never hard-delete a listing (see docs/digital-storefront-
   // plan.md) — a past buyer's download access must keep working
   // regardless of what the creator does later. `isActive: false` just
-  // hides it from the feed/creator page/direct view; the record and its
-  // files stay exactly as they were.
+  // hides it from the feed/creator page/direct view; the record stays
+  // exactly as it was.
   isActive: boolean;
   // Separate from (and in addition to) `isActive` and the creator's own
   // isVerified/status — this is admin/customer_care confirming the
@@ -96,12 +129,21 @@ const digitalProductSchema = new Schema<IDigitalProduct>(
       },
     },
     files: {
-      type: [mediaFileSchema],
+      type: [digitalFileSchema],
       validate: {
-        validator: (files: IMediaFile[]) => files.length > 0 && files.length <= MAX_DELIVERABLE_FILES,
+        // An active listing always needs at least one file; a permanently
+        // deactivated one (helpers/profileProductCleanup.ts's
+        // deactivateAndClearDigitalProduct — reclaiming storage from a
+        // long-lapsed creator's catalog) has had everything deliberately
+        // emptied out, so the minimum doesn't apply to it.
+        validator: function (this: IDigitalProduct, files: IDigitalFile[]) {
+          if (!this.isActive) return files.length <= MAX_DELIVERABLE_FILES;
+          return files.length > 0 && files.length <= MAX_DELIVERABLE_FILES;
+        },
         message: `A product needs at least one deliverable file, and at most ${MAX_DELIVERABLE_FILES}`,
       },
     },
+    bin: { type: [binEntrySchema], default: [] },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
     verifiedBy: { type: Schema.Types.ObjectId, ref: "User" },

@@ -12,6 +12,7 @@ import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
 import { syncProfilesSubscription } from "../helpers/profileSubscriptionSync";
+import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -195,6 +196,14 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     priceSnapshot: product.price,
     currency: product.currency,
     status: DIGITAL_PURCHASE_STATUS.PENDING,
+    // Frozen now, before anything else can change — see
+    // DigitalPurchase.fileManifest and docs/digital-storefront-plan.md.
+    fileManifest: product.files.map((file) => ({
+      fileName: file.fileName,
+      key: file.key,
+      mime: file.mime,
+      size: file.size,
+    })),
   });
 
   const payment = await Payment.create({
@@ -310,15 +319,19 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
   }
 
   if (payment.targetType === PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE) {
-    // Flips permanently — this grant is never revoked by anything that
-    // happens later (the creator's subscription lapsing, the product
-    // going inactive). A completed purchase stays a completed purchase;
-    // subscription status only ever gates *discovery*, not access
-    // someone already paid for. See digitalProductController.getDownloadLink.
-    await DigitalPurchase.updateOne(
+    const result = await DigitalPurchase.updateOne(
       { _id: payment.targetId, status: DIGITAL_PURCHASE_STATUS.PENDING },
       { status: DIGITAL_PURCHASE_STATUS.SUCCESS },
     );
+
+    // Only the delivery that actually performed the PENDING->SUCCESS
+    // transition should copy files — a Stripe redelivery of an
+    // already-processed event must stay a pure no-op (matches the
+    // payment.status idempotency guard above), otherwise a retry would
+    // re-copy (harmless but wasteful) every time Stripe redelivers.
+    if (result.modifiedCount === 1) {
+      await copyPurchaseFiles(payment.targetId as mongoose.Types.ObjectId);
+    }
     return;
   }
 
