@@ -1,10 +1,16 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { isValidCurrencyCode } from "../helpers/currencyReference";
-import { IMediaFile, mediaFileSchema } from "./mediaFile";
 
 // A contractor's bid on a TenderProject — sealed from every other
 // contractor (see tenderProjectModel.ts); only the project's own poster
-// ever sees the full list (tenderProjectController.getProjectBids).
+// ever sees the full list (tenderProjectController.getProjectBids). A
+// bid is just its terms — amount/proposal/duration — never its own file
+// attachments; a project's own specs/drawings (TenderProject.files) are
+// the only attachments this pillar actually supports, and are plenty
+// for a contractor to bid against. (An earlier version of this model
+// did carry a `files` field, copied from the project/portfolio upload
+// pattern without ever actually being wired to any response — removed
+// since nothing could ever read it back.)
 export const BID_STATUS = {
   PENDING: "pending",
   ACCEPTED: "accepted",
@@ -12,9 +18,6 @@ export const BID_STATUS = {
   WITHDRAWN: "withdrawn",
 } as const;
 export type BidStatus = (typeof BID_STATUS)[keyof typeof BID_STATUS];
-
-// Same cap reasoning as every other media array in this codebase.
-export const MAX_BID_FILES = 5;
 
 export interface IBid extends Document {
   project: Types.ObjectId;
@@ -27,7 +30,6 @@ export interface IBid extends Document {
   currency: string;
   proposal: string;
   estimatedDurationDays?: number;
-  files: IMediaFile[];
   status: BidStatus;
   createdAt: Date;
   updatedAt: Date;
@@ -51,14 +53,6 @@ const bidSchema = new Schema<IBid>(
     },
     proposal: { type: String, required: [true, "Please add a proposal"] },
     estimatedDurationDays: { type: Number, min: 1 },
-    files: {
-      type: [mediaFileSchema],
-      default: [],
-      validate: {
-        validator: (files: IMediaFile[]) => files.length <= MAX_BID_FILES,
-        message: `A bid can have at most ${MAX_BID_FILES} attached files`,
-      },
-    },
     status: {
       type: String,
       enum: Object.values(BID_STATUS),

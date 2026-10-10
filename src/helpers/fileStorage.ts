@@ -14,8 +14,11 @@ export type FileVisibility = (typeof FILE_VISIBILITY)[keyof typeof FILE_VISIBILI
 // Kept outside src/ (and outside dist/) on purpose — this is runtime data,
 // not build output, so it shouldn't live inside a directory a rebuild could
 // reasonably be expected to touch. Override via STORAGE_ROOT (tests point
-// this at a throwaway directory — see tests/setup/env.ts).
-const STORAGE_ROOT = process.env.STORAGE_ROOT
+// this at a throwaway directory — see tests/setup/env.ts). Exported so
+// internalStorageProvider.ts (providers/digitalStorageProviders/) can lay
+// its own digital-store/ directory alongside public/ and private/ without
+// re-deriving this same env-var-or-default logic.
+export const STORAGE_ROOT = process.env.STORAGE_ROOT
   ? path.resolve(process.env.STORAGE_ROOT)
   : path.join(process.cwd(), "storage");
 
@@ -40,6 +43,18 @@ export const DEFAULT_ALLOWED_MIME_TYPES = [
   "image/webp",
   "application/pdf",
 ];
+
+export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+// Work-photo portfolio uploads (labor/contractor/consultancy profiles)
+// — real photos only, never a webp/pdf, which DEFAULT_ALLOWED_MIME_TYPES
+// would otherwise allow through.
+export const PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/avif"];
+
+// Any single-avatar/logo upload (store logo, digital creator avatar,
+// user avatar) — an image in any format we recognize, but never a pdf,
+// which DEFAULT_ALLOWED_MIME_TYPES would otherwise allow through.
+export const IMAGE_ONLY_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif"];
 
 export interface SavedFileInfo {
   fileName: string;
@@ -98,6 +113,29 @@ const saveBuffer = async (
   };
 };
 
+// Pure validation — no I/O. Shared by the local-disk save path below and
+// s3Storage.ts's upload path, so both enforce the exact same size cap +
+// magic-byte MIME check without duplicating it.
+export type FileDetectionResult = { ok: true; mime: string; ext: string } | { ok: false; error: string };
+
+export const detectAndValidateFile = (
+  buffer: Buffer,
+  originalName: string,
+  allowedMimeTypes: string[],
+): FileDetectionResult => {
+  if (buffer.length > MAX_FILE_SIZE_BYTES) {
+    return { ok: false, error: `${originalName}: file exceeds the ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB limit` };
+  }
+
+  const detected = detectFileSignature(buffer);
+
+  if (!detected || !allowedMimeTypes.includes(detected.mime)) {
+    return { ok: false, error: `${originalName}: unsupported or unrecognized file type` };
+  }
+
+  return { ok: true, mime: detected.mime, ext: detected.ext };
+};
+
 const validateAndSave = async (
   buffer: Buffer,
   originalName: string,
@@ -105,14 +143,10 @@ const validateAndSave = async (
   allowedMimeTypes: string[],
   ownerId?: string,
 ): Promise<{ saved?: SavedFileInfo; error?: string }> => {
-  if (buffer.length > MAX_FILE_SIZE_BYTES) {
-    return { error: `${originalName}: file exceeds the ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB limit` };
-  }
+  const detected = detectAndValidateFile(buffer, originalName, allowedMimeTypes);
 
-  const detected = detectFileSignature(buffer);
-
-  if (!detected || !allowedMimeTypes.includes(detected.mime)) {
-    return { error: `${originalName}: unsupported or unrecognized file type` };
+  if (!detected.ok) {
+    return { error: detected.error };
   }
 
   const saved = await saveBuffer(
@@ -130,6 +164,25 @@ export interface UploadOutcome {
   results: SavedFileInfo[];
   errorLogs: string[];
 }
+
+// uploadHandler (below) processes real multipart attachments
+// (req.files), req.body.base64, and req.body.url all together, in one
+// call, regardless of which ones a caller actually expected. A caller
+// that counts only `req.files.length` against a minimum/maximum —
+// "attach at least one image", "at most N images" — systematically
+// undercounts the moment a client uses base64/url instead of (or
+// alongside) a real attachment: a cap meant to block too many images can
+// be blown past entirely via base64, and a "must attach at least one"
+// check can wrongly reject a perfectly valid base64/url-only request.
+// Any such count/cap check should go through this instead of reading
+// req.files directly.
+export const countUploadCandidates = (req: Request): number => {
+  const fileCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
+  const base64Count = Array.isArray(req.body?.base64) ? req.body.base64.length : req.body?.base64 ? 1 : 0;
+  const urlCount = Array.isArray(req.body?.url) ? req.body.url.length : req.body?.url ? 1 : 0;
+
+  return fileCount + base64Count + urlCount;
+};
 
 // Mirrors house-maduekwe-backend's fileManager.uploadHandler: accepts real
 // multipart files (req.files, via multer's memory storage), base64 data

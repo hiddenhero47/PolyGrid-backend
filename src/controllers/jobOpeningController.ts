@@ -4,10 +4,6 @@ import { Request, Response } from "express";
 import {
   JobOpening,
   IJobOpening,
-  PAY_TYPE,
-  PayType,
-  EMPLOYMENT_TYPE,
-  EmploymentType,
   JOB_OPENING_STATUS,
   MAX_OPENING_FILES,
 } from "../models/jobOpeningModel";
@@ -24,10 +20,25 @@ import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
-import { uploadHandler, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+} from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
-import { parseMultipartData } from "../helpers/parseMultipartData";
 import { connectUsers } from "./contactController";
+
+// The one place opening.files gets turned into signed, servable links —
+// shared by getJobOpening/addOpeningFiles/removeOpeningFile so all three
+// return the exact same shape.
+const toFilesWithLinks = (opening: IJobOpening) =>
+  opening.files.map((file) => ({
+    fileName: file.fileName,
+    mime: file.mime,
+    size: file.size,
+    url: signFileUrl({ ownerId: opening.postedBy.toString(), fileName: file.fileName, mode: FILE_URL_MODE.VIEW }),
+  }));
 
 // Never includes the gated location tier (coordinates/address/
 // googleMapsUrl/contactInfo/files) — see getJobOpening for the one place
@@ -60,36 +71,19 @@ const toPublicApplication = (application: IJobApplication) => ({
   createdAt: application.createdAt,
 });
 
-interface OpeningPayload {
-  title?: string;
-  description?: string;
-  category?: string;
-  workersNeeded?: number;
-  payRate?: number;
-  payType?: string;
-  currency?: string;
-  employmentType?: string;
-  generalArea?: { country?: string; state?: string; city?: string };
-  coordinates?: { lat?: number; lng?: number };
-  address?: string;
-  googleMapsUrl?: string;
-  contactInfo?: string;
-  applicationDeadline?: string;
-}
-
-// @desc    Post a new job opening to the board. Requires a subscribed
-//          ClientProfile — same gate as createTenderProject, and the same
-//          reasoning: a bare subscription isn't enough once posters have
-//          a real profile to attach a reputation to.
+// @desc    Post a new job opening to the board. Requires a verified,
+//          subscribed ClientProfile — same gate as createTenderProject,
+//          and the same reasoning: a worker accepting this is about to
+//          travel to an address the poster controls.
 // @route   POST /api/job-openings
-// @access  Private — requires a subscribed client profile
+// @access  Private — requires a verified, subscribed client profile
 export const createJobOpening = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
 
   const clientProfile = await loadEligibleClientProfile(requester._id);
   if (!clientProfile) {
     res.status(402);
-    throw new Error("You need a client profile with an active subscription to post a job opening");
+    throw new Error("You need a verified client profile with an active subscription to post a job opening");
   }
 
   const {
@@ -107,37 +101,7 @@ export const createJobOpening = asyncHandler(async (req: Request, res: Response)
     googleMapsUrl,
     contactInfo,
     applicationDeadline,
-  } = parseMultipartData<OpeningPayload>(req);
-
-  if (!title || !description || !generalArea?.country) {
-    res.status(400);
-    throw new Error("Please add a title, description, and generalArea.country");
-  }
-
-  if (!category || !Object.values(LABOR_SKILL).includes(category as LaborSkill)) {
-    res.status(400);
-    throw new Error("Please add a valid category");
-  }
-
-  if (!payRate || payRate <= 0) {
-    res.status(400);
-    throw new Error("A positive payRate is required");
-  }
-
-  if (!payType || !Object.values(PAY_TYPE).includes(payType as PayType)) {
-    res.status(400);
-    throw new Error("Please add a valid payType");
-  }
-
-  if (!employmentType || !Object.values(EMPLOYMENT_TYPE).includes(employmentType as EmploymentType)) {
-    res.status(400);
-    throw new Error("Please add a valid employmentType");
-  }
-
-  if (applicationDeadline && new Date(applicationDeadline) <= new Date()) {
-    res.status(400);
-    throw new Error("applicationDeadline must be a date in the future");
-  }
+  } = req.body;
 
   const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
   if (attachedCount > MAX_OPENING_FILES) {
@@ -145,10 +109,18 @@ export const createJobOpening = asyncHandler(async (req: Request, res: Response)
     throw new Error(`You can attach at most ${MAX_OPENING_FILES} files to a job opening`);
   }
 
+  // Real multipart attachments only — req.files, never req.body's
+  // base64/url alternatives. Passing the whole `req` to uploadHandler
+  // would let those through too, silently saving files the caller never
+  // meant to attach and blowing past MAX_OPENING_FILES undetected
+  // (checked against req.files.length alone, just above). Same shim
+  // digitalProductController.ts's saveFilesForField already uses.
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
   const { results, errorLogs } = await uploadHandler({
-    req,
+    req: shimReq,
     visibility: FILE_VISIBILITY.PRIVATE,
     ownerId: requester.id,
+    allowedMimeTypes: PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
   });
 
   const files: IMediaFile[] = results.map((r) => ({
@@ -225,46 +197,118 @@ export const updateMyJobOpening = asyncHandler(async (req: Request, res: Respons
 
   if (title) opening.title = title;
   if (description) opening.description = description;
-  if (category !== undefined) {
-    if (!Object.values(LABOR_SKILL).includes(category)) {
-      res.status(400);
-      throw new Error("Please add a valid category");
-    }
-    opening.category = category;
-  }
+  if (category !== undefined) opening.category = category;
   if (workersNeeded !== undefined) opening.workersNeeded = workersNeeded;
   if (payRate !== undefined) opening.payRate = payRate;
-  if (payType !== undefined) {
-    if (!Object.values(PAY_TYPE).includes(payType)) {
-      res.status(400);
-      throw new Error("Please add a valid payType");
-    }
-    opening.payType = payType;
-  }
+  if (payType !== undefined) opening.payType = payType;
   if (currency) opening.currency = currency;
-  if (employmentType !== undefined) {
-    if (!Object.values(EMPLOYMENT_TYPE).includes(employmentType)) {
-      res.status(400);
-      throw new Error("Please add a valid employmentType");
-    }
-    opening.employmentType = employmentType;
-  }
+  if (employmentType !== undefined) opening.employmentType = employmentType;
   if (generalArea !== undefined) opening.generalArea = generalArea;
   if (coordinates !== undefined) opening.coordinates = coordinates;
   if (address !== undefined) opening.address = address;
   if (googleMapsUrl !== undefined) opening.googleMapsUrl = googleMapsUrl;
   if (contactInfo !== undefined) opening.contactInfo = contactInfo;
-  if (applicationDeadline !== undefined) {
-    if (new Date(applicationDeadline) <= new Date()) {
-      res.status(400);
-      throw new Error("applicationDeadline must be a date in the future");
-    }
-    opening.applicationDeadline = new Date(applicationDeadline);
-  }
+  if (applicationDeadline !== undefined) opening.applicationDeadline = applicationDeadline;
 
   await opening.save();
 
   res.status(200).json(toPublicJobOpening(opening));
+});
+
+// @desc    Add more files to my job opening (site photos) — only while
+//          still open, same editing window as updateMyJobOpening. Real
+//          multipart attachments only — req.files, never req.body's
+//          base64/url alternatives (see createJobOpening's shim and why
+//          it matters: passing the whole `req` to uploadHandler would
+//          let those through too, uncounted against MAX_OPENING_FILES).
+//          Images only — jpeg/png/avif — same rule as the portfolio
+//          uploads on labor/contractor/consultancy profiles.
+// @route   POST /api/job-openings/:id/files
+// @access  Private (poster only)
+export const addOpeningFiles = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const opening = await loadMyOpening(requester.id, req.params.id as string);
+
+  if (!opening) {
+    res.status(404);
+    throw new Error("Job opening not found");
+  }
+
+  if (opening.status !== JOB_OPENING_STATUS.OPEN) {
+    res.status(400);
+    throw new Error("This job opening can no longer be edited");
+  }
+
+  const attachedCount = (req.files as Express.Multer.File[] | undefined)?.length ?? 0;
+  if (attachedCount === 0) {
+    res.status(400);
+    throw new Error("Attach at least one file");
+  }
+
+  if (opening.files.length + attachedCount > MAX_OPENING_FILES) {
+    res.status(400);
+    throw new Error(
+      `This job opening already has ${opening.files.length} of ${MAX_OPENING_FILES} files allowed — attach fewer`,
+    );
+  }
+
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
+
+  const { results, errorLogs } = await uploadHandler({
+    req: shimReq,
+    visibility: FILE_VISIBILITY.PRIVATE,
+    ownerId: requester.id,
+    allowedMimeTypes: PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+  });
+
+  const newFiles: IMediaFile[] = results.map((r) => ({
+    fileName: r.fileName,
+    storagePath: r.storagePath,
+    mime: r.mime,
+    size: r.size,
+  }));
+
+  opening.files.push(...newFiles);
+  await opening.save();
+
+  res.status(201).json({
+    ...toPublicJobOpening(opening),
+    files: toFilesWithLinks(opening),
+    ...(errorLogs.length > 0 ? { fileWarnings: errorLogs } : {}),
+  });
+});
+
+// @desc    Remove one file from my job opening — only while still open,
+//          same editing window as updateMyJobOpening.
+// @route   DELETE /api/job-openings/:id/files/:fileName
+// @access  Private (poster only)
+export const removeOpeningFile = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const opening = await loadMyOpening(requester.id, req.params.id as string);
+
+  if (!opening) {
+    res.status(404);
+    throw new Error("Job opening not found");
+  }
+
+  if (opening.status !== JOB_OPENING_STATUS.OPEN) {
+    res.status(400);
+    throw new Error("This job opening can no longer be edited");
+  }
+
+  const fileName = req.params.fileName as string;
+  const file = opening.files.find((f) => f.fileName === fileName);
+
+  if (!file) {
+    res.status(404);
+    throw new Error("File not found on this job opening");
+  }
+
+  await deleteStoredFile(file.storagePath);
+  opening.files = opening.files.filter((f) => f.fileName !== fileName) as typeof opening.files;
+  await opening.save();
+
+  res.status(200).json({ ...toPublicJobOpening(opening), files: toFilesWithLinks(opening) });
 });
 
 // @desc    Cancel my job opening while still open — rejects every pending
@@ -409,26 +453,15 @@ export const getJobOpening = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  const files = opening.files.map((file) => ({
-    fileName: file.fileName,
-    mime: file.mime,
-    size: file.size,
-    url: signFileUrl({ ownerId: opening.postedBy.toString(), fileName: file.fileName, mode: FILE_URL_MODE.VIEW }),
-  }));
-
   res.status(200).json({
     ...toPublicJobOpening(opening),
     coordinates: opening.coordinates,
     address: opening.address,
     googleMapsUrl: opening.googleMapsUrl,
     contactInfo: opening.contactInfo,
-    files,
+    files: toFilesWithLinks(opening),
   });
 });
-
-interface ApplicationPayload {
-  message?: string;
-}
 
 // @desc    Apply to a job opening.
 // @route   POST /api/job-openings/:id/applications
@@ -473,7 +506,7 @@ export const applyToJobOpening = asyncHandler(async (req: Request, res: Response
     throw new Error("You've already applied to this job opening");
   }
 
-  const { message } = parseMultipartData<ApplicationPayload>(req);
+  const { message } = req.body;
 
   const application = await JobApplication.create({
     posting: opening._id,
@@ -595,10 +628,17 @@ export const getOpeningApplications = asyncHandler(async (req: Request, res: Res
     throw new Error("Job opening not found");
   }
 
+  // `applicant` is never populated with `email` — a formal Contact
+  // connection (connectUsers) only exists once this specific application
+  // is actually accepted (see acceptApplication below), same as
+  // awardBid's identical gate in tenderProjectController.ts. Handing the
+  // poster a worker's email while merely reviewing pending applications
+  // would let them skip that gate entirely, for every applicant, by
+  // just listing the applications.
   const applications = await JobApplication.find({ posting: opening._id })
     .sort({ createdAt: -1 })
     .populate("workerId", "headline slug ratingAverage ratingCount")
-    .populate("applicant", "fullName email");
+    .populate("applicant", "fullName");
 
   res.status(200).json(applications.map(toPublicApplication));
 });

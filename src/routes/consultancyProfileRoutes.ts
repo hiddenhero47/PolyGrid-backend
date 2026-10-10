@@ -11,14 +11,20 @@ import {
   removePortfolioItem,
 } from "../controllers/consultancyProfileController";
 import { protect } from "../middleware/authMiddleware";
+import { validateBody } from "../validators/validate";
+import {
+  createConsultancyProfileSchema,
+  updateConsultancyProfileSchema,
+  addPortfolioItemSchema,
+} from "../validators/consultancyProfile/consultancyProfileValidator";
 
 const router = express.Router();
 
-router.post("/", protect, createProfile);
+router.post("/", protect, validateBody(createConsultancyProfileSchema), createProfile);
 router.get("/", searchConsultants);
 router.get("/me", protect, getMyProfile);
-router.patch("/me", protect, updateMyProfile);
-router.post("/me/portfolio", protect, addPortfolioItem);
+router.patch("/me", protect, validateBody(updateConsultancyProfileSchema), updateMyProfile);
+router.post("/me/portfolio", protect, validateBody(addPortfolioItemSchema), addPortfolioItem);
 router.post("/me/portfolio/:itemId/media", protect, addPortfolioMedia);
 router.delete("/me/portfolio/:itemId/media/:fileName", protect, removePortfolioMedia);
 router.delete("/me/portfolio/:itemId", protect, removePortfolioItem);

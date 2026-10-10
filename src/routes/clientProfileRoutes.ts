@@ -6,12 +6,17 @@ import {
   getClientProfile,
 } from "../controllers/clientProfileController";
 import { protect } from "../middleware/authMiddleware";
+import { validateBody } from "../validators/validate";
+import {
+  createClientProfileSchema,
+  updateClientProfileSchema,
+} from "../validators/clientProfile/clientProfileValidator";
 
 const router = express.Router();
 
-router.post("/", protect, createClientProfile);
+router.post("/", protect, validateBody(createClientProfileSchema), createClientProfile);
 router.get("/me", protect, getMyClientProfile);
-router.patch("/me", protect, updateMyClientProfile);
+router.patch("/me", protect, validateBody(updateClientProfileSchema), updateMyClientProfile);
 
 // Catch-all by id — must stay last so it doesn't shadow /me.
 router.get("/:id", getClientProfile);

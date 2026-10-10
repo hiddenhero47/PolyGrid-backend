@@ -211,3 +211,20 @@ browsing — so it's documented separately in
   own orders / a store owner's received orders — each includes the linked
   `job` id; use `GET /api/jobs/:id` for the Job itself (payment status,
   confirmation, contract/invoice).
+
+## Abandoned-store cleanup
+
+`jobs/tasks/profileProductCleanupTask.ts` (`helpers/profileProductCleanup.ts`
+has the actual sweep logic, shared with the Digital pillar — see
+digital-storefront-plan.md's "Abandoned-seller cleanup" section for the
+full design) runs every 2 hours and hard-deletes every `Product` (plus
+its image files) belonging to a store whose subscription lapsed 30+ days
+ago, a couple of stores at a time rather than one big monthly sweep. Safe
+to hard-delete here, unlike `DigitalProduct`: `StoreOrder` already
+snapshots price/title/totals at checkout (`items.product` is kept only as
+a traceability ref, never re-read for display), and `Review` never
+targets a `Product` at all — this is the same hard-delete-and-cleanup
+pattern `storeProfileController`'s category-removal cascade and
+`productController.deleteProduct` already use, just triggered by
+inactivity instead of a creator's own action. The `StoreProfile` itself
+is never touched — only its products.

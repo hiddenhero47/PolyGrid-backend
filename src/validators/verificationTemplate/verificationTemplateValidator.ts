@@ -1,12 +1,6 @@
 import * as yup from "yup";
-import { TEMPLATE_FIELD_TYPE, TEMPLATE_DOCUMENT_FORMAT } from "../models/verificationTemplateModel";
-
-const optionalTrimmed = () =>
-  yup
-    .string()
-    .trim()
-    .transform((value) => (value === "" ? undefined : value))
-    .notRequired();
+import { TEMPLATE_FIELD_TYPE, TEMPLATE_DOCUMENT_FORMAT } from "../../models/verificationTemplateModel";
+import { optionalTrimmedString as optionalTrimmed } from "../common";
 
 const templateFieldSchema = yup
   .object({

@@ -15,17 +15,23 @@ import {
   removeProductImage,
 } from "../controllers/productController";
 import { protect } from "../middleware/authMiddleware";
+import { validateBody } from "../validators/validate";
+import {
+  createStoreProfileSchema,
+  updateStoreProfileSchema,
+} from "../validators/storeProfile/storeProfileValidator";
+import { createProductSchema, updateProductSchema } from "../validators/product/productValidator";
 
 const router = express.Router();
 
-router.post("/", protect, createStoreProfile);
+router.post("/", protect, validateBody(createStoreProfileSchema), createStoreProfile);
 router.get("/", searchStores);
 router.get("/me", protect, getMyStoreProfile);
-router.patch("/me", protect, updateMyStoreProfile);
+router.patch("/me", protect, validateBody(updateStoreProfileSchema), updateMyStoreProfile);
 router.post("/me/logo", protect, uploadStoreLogo);
 
-router.post("/me/products", protect, createProduct);
-router.patch("/me/products/:id", protect, updateProduct);
+router.post("/me/products", protect, validateBody(createProductSchema), createProduct);
+router.patch("/me/products/:id", protect, validateBody(updateProductSchema), updateProduct);
 router.delete("/me/products/:id", protect, deleteProduct);
 router.post("/me/products/:id/images", protect, addProductImages);
 router.delete("/me/products/:id/images/:fileName", protect, removeProductImage);

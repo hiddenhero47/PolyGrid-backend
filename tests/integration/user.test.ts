@@ -7,6 +7,7 @@ jest.mock("../../src/helpers/emailSender", () => ({
 }));
 
 import request from "supertest";
+import { authenticator } from "otplib";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import { createUser, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
@@ -85,6 +86,33 @@ describe("POST /api/users/login", () => {
       .send({ email: user.email, password: "wrong-password" });
 
     expect(res.status).toBe(400);
+  });
+
+  it("requires a 2FA code once it's enabled, and rejects a wrong one", async () => {
+    const secret = authenticator.generateSecret();
+    const password = "password123";
+    const user = await createUser({
+      password: await bcrypt.hash(password, 4),
+      user2fa: { enable: true, secret },
+    });
+
+    const noToken = await request(app)
+      .post("/api/users/login")
+      .send({ email: user.email, password });
+    expect(noToken.status).toBe(400);
+    expect(noToken.body.code).toBe("2FA_REQUIRED");
+
+    const wrongToken = await request(app)
+      .post("/api/users/login")
+      .send({ email: user.email, password, token: "000000" });
+    expect(wrongToken.status).toBe(400);
+    expect(wrongToken.body.code).toBe("2FA_INVALID");
+
+    const res = await request(app)
+      .post("/api/users/login")
+      .send({ email: user.email, password, token: authenticator.generate(secret) });
+    expect(res.status).toBe(200);
+    expect(res.body.token).toEqual(expect.any(String));
   });
 });
 
@@ -270,6 +298,184 @@ describe("PATCH /api/users/account-type", () => {
       .send({ activeAccountType: ACCOUNT_TYPE.BUSINESS });
 
     expect(res.body.activeAccountType).toBe(ACCOUNT_TYPE.BUSINESS);
+  });
+});
+
+describe("2FA setup -> verify -> toggle", () => {
+  it("requires the current password to start setup", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app).post("/api/users/2fa/setup").set("Authorization", `Bearer ${token}`).send({});
+
+    expect(res.status).toBe(400);
+  });
+
+  it("walks through generate -> verify -> enabled", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const setup = await request(app)
+      .post("/api/users/2fa/setup")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ currentPassword: "password123" });
+
+    expect(setup.status).toBe(200);
+    expect(setup.body.tempSecret).toEqual(expect.any(String));
+    expect(setup.body.qrCodeDataURL).toEqual(expect.any(String));
+
+    const wrongCode = await request(app)
+      .post("/api/users/2fa/verify")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ token: "000000" });
+    expect(wrongCode.status).toBe(400);
+
+    const verify = await request(app)
+      .post("/api/users/2fa/verify")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ token: authenticator.generate(setup.body.tempSecret) });
+
+    expect(verify.status).toBe(200);
+    expect(verify.body.user2fa.enable).toBe(true);
+
+    const me = await request(app).get("/api/users/me").set("Authorization", `Bearer ${token}`);
+    expect(me.body.user2fa.enable).toBe(true);
+  });
+
+  it("rejects verify before setup has ever run", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .post("/api/users/2fa/verify")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ token: "123456" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("restarting setup while already enabled needs a valid code from the existing authenticator, not just the password", async () => {
+    const secret = authenticator.generateSecret();
+    const user = await createUser({ user2fa: { enable: true, secret } });
+    const token = generateToken(user);
+
+    const withPasswordOnly = await request(app)
+      .post("/api/users/2fa/setup")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ currentPassword: "password123" });
+    expect(withPasswordOnly.status).toBe(400);
+
+    const withValidCode = await request(app)
+      .post("/api/users/2fa/setup")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ otpToken: authenticator.generate(secret) });
+    expect(withValidCode.status).toBe(200);
+  });
+
+  it("toggle off requires it to already be enabled", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/2fa/toggle")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ enable: false, currentPassword: "password123" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("toggle off needs a valid code, then toggle on needs only the secret already confirmed by setup", async () => {
+    const secret = authenticator.generateSecret();
+    const user = await createUser({ user2fa: { enable: true, secret } });
+    const token = generateToken(user);
+
+    const wrongCode = await request(app)
+      .put("/api/users/2fa/toggle")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ enable: false, otpToken: "000000" });
+    expect(wrongCode.status).toBe(403);
+
+    const disabled = await request(app)
+      .put("/api/users/2fa/toggle")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ enable: false, otpToken: authenticator.generate(secret) });
+    expect(disabled.status).toBe(200);
+    expect(disabled.body.user2fa.enable).toBe(false);
+
+    const reEnabled = await request(app)
+      .put("/api/users/2fa/toggle")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ enable: true, currentPassword: "password123" });
+    expect(reEnabled.status).toBe(200);
+    expect(reEnabled.body.user2fa.enable).toBe(true);
+  });
+});
+
+describe("PUT /api/users/payout-account", () => {
+  const payoutAccountPayload = {
+    accountName: "Jane Doe",
+    accountNumber: "0123456789",
+    bankName: "Test Bank",
+    country: "NG",
+  };
+
+  it("requires the current password when 2FA isn't enabled", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send(payoutAccountPayload);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an incorrect password", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, currentPassword: "wrong-password" });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("sets the payout account once the current password checks out", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, currentPassword: "password123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.payoutAccount.accountNumber).toBe("0123456789");
+
+    const me = await request(app).get("/api/users/me").set("Authorization", `Bearer ${token}`);
+    expect(me.body.payoutAccount.bankName).toBe("Test Bank");
+  });
+
+  it("takes a 2FA code instead of a password once 2FA is enabled", async () => {
+    const secret = authenticator.generateSecret();
+    const user = await createUser({ user2fa: { enable: true, secret } });
+    const token = generateToken(user);
+
+    const wrongCode = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, otpToken: "000000" });
+    expect(wrongCode.status).toBe(403);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, otpToken: authenticator.generate(secret) });
+
+    expect(res.status).toBe(200);
   });
 });
 

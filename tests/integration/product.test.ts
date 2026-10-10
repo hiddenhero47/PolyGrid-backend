@@ -8,6 +8,7 @@ import {
   createProduct,
   generateToken,
   TEST_PNG_BUFFER,
+  TEST_PNG_BASE64,
 } from "../setup/fixtures";
 import { MATERIAL_CATEGORY } from "../../src/models/storeProfileModel";
 import { MAX_PRODUCT_IMAGES } from "../../src/models/productModel";
@@ -181,6 +182,32 @@ describe("POST /api/store-profiles/me/products", () => {
     const res = await req;
     expect(res.status).toBe(400);
   });
+
+  // Product images are real multipart attachments only — base64/url
+  // (uploadHandler's two other input methods) must not be silently
+  // saved just because they rode along in the same multipart request.
+  it("ignores a base64 image instead of silently saving it", async () => {
+    const user = await createUser();
+    await createStoreProfile({ user, categories: [MATERIAL_CATEGORY.CEMENT_CONCRETE] });
+
+    const res = await request(app)
+      .post("/api/store-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({
+          category: MATERIAL_CATEGORY.CEMENT_CONCRETE,
+          title: "Cement",
+          price: 10,
+          unit: "bag",
+          shippingLocations: [{ country: "NG", price: 5 }],
+        }),
+      )
+      .field("base64", TEST_PNG_BASE64);
+
+    expect(res.status).toBe(201);
+    expect(res.body.images).toHaveLength(0);
+  });
 });
 
 describe("PATCH/DELETE /api/store-profiles/me/products/:id", () => {
@@ -266,6 +293,20 @@ describe("images sub-resource", () => {
 
     expect(removed.status).toBe(200);
     expect(removed.body.images).toHaveLength(0);
+  });
+
+  it("rejects a base64/url-only request instead of silently saving it", async () => {
+    const user = await createUser();
+    const store = await createStoreProfile({ user, categories: [MATERIAL_CATEGORY.CEMENT_CONCRETE] });
+    const product = await createProduct({ store });
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .post(`/api/store-profiles/me/products/${product.id}/images`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ base64: TEST_PNG_BASE64 });
+
+    expect(res.status).toBe(400);
   });
 });
 

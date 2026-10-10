@@ -208,6 +208,28 @@ export const TEST_PNG_BUFFER = Buffer.from(
   "base64",
 );
 
+// Enough to pass fileSignature.ts's "%PDF-" check — not a structurally
+// complete PDF, same "just enough to pass the sniffer" spirit as the PNG
+// fixture above.
+export const TEST_PDF_BUFFER = Buffer.from("%PDF-1.4\n%%EOF");
+
+// Enough to pass fileSignature.ts's docx check (a zip signature followed
+// somewhere by the "word/document.xml" part name) — not a real, openable
+// .docx, same "just enough to pass the sniffer" spirit as TEST_PDF_BUFFER.
+export const TEST_DOCX_BUFFER = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from("word/document.xml"),
+]);
+
+// Enough to pass fileSignature.ts's AVIF check (an ISOBMFF "ftyp" box
+// whose brand is "avif") — not a real, decodable AVIF image, same
+// "just enough to pass the sniffer" spirit as TEST_PDF_BUFFER.
+export const TEST_AVIF_BUFFER = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x1c]),
+  Buffer.from("ftyp", "ascii"),
+  Buffer.from("avif", "ascii"),
+]);
+
 interface CreatePrivateFileOptions {
   uploader: IUser;
   allowedUsers?: IUser[];
@@ -421,8 +443,10 @@ interface CreateDigitalProductOptions {
 }
 
 // `files` is a raw model insert, not a real upload — a fixture-shaped
-// stand-in is enough for tests that don't exercise getDownloadLink's
-// actual signed-URL minting against real bytes on disk.
+// stand-in (a key, never a real object on either storage provider) is
+// enough for tests that don't exercise getDownloadLink's actual link
+// minting against a real store (those mock
+// providers/digitalStorageProviders instead).
 export const createDigitalProduct = async ({
   creator,
   ...overrides
@@ -438,7 +462,7 @@ export const createDigitalProduct = async ({
     files: [
       {
         fileName: `deliverable-${n}.pdf`,
-        storagePath: `/tmp/deliverable-${n}.pdf`,
+        key: `digital-products/${creator._id}/test-deliverable-${n}.pdf`,
         mime: "application/pdf",
         size: 1024,
       },
@@ -455,22 +479,33 @@ interface CreateDigitalPurchaseOptions {
   [key: string]: unknown;
 }
 
+// Defaults `fileManifest`/`files` to mirror the product's own files
+// (same shape handleDigitalPurchasePaymentIntent/copyPurchaseFiles would
+// produce for a real SUCCESS purchase) so every existing call site that
+// doesn't care about the new fields keeps working unchanged. Pass
+// `files: []` explicitly to simulate a purchase whose copy hasn't
+// landed/been wiped yet.
 export const createDigitalPurchase = async ({
   product,
   buyer,
   creator,
   status = DIGITAL_PURCHASE_STATUS.SUCCESS,
   ...overrides
-}: CreateDigitalPurchaseOptions): Promise<IDigitalPurchase> =>
-  DigitalPurchase.create({
+}: CreateDigitalPurchaseOptions): Promise<IDigitalPurchase> => {
+  const manifest = product.files.map((f) => ({ fileName: f.fileName, key: f.key, mime: f.mime, size: f.size }));
+
+  return DigitalPurchase.create({
     product: product._id,
     buyer: buyer._id,
     creator: creator._id,
     priceSnapshot: product.price,
     currency: product.currency,
     status,
+    fileManifest: manifest,
+    files: status === DIGITAL_PURCHASE_STATUS.SUCCESS ? manifest : [],
     ...overrides,
   });
+};
 
 interface CreateContractorProfileOptions {
   user: IUser;

@@ -119,6 +119,37 @@ describe("GET /api/contractor-profiles/me and PATCH", () => {
     expect(res.body.headline).toBe("15 years of residential builds");
     expect(res.body.specialties).toEqual([CONTRACTOR_SPECIALTY.ROOFING]);
   });
+
+  // Full status (active/inactive/banned) behavior — self-service toggle,
+  // admin-only ban, search/eligibility exclusion, banned-hides-the-page —
+  // is covered in depth once in consultancyProfile.test.ts (identical
+  // shared logic); this just confirms the same wiring exists here too.
+  it("lets me toggle my own status, but not to 'banned'; a banned profile rejects any update", async () => {
+    const user = await createUser();
+    await createContractorProfile({ user });
+    const token = generateToken(user);
+
+    const toInactive = await request(app)
+      .patch("/api/contractor-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "inactive" });
+    expect(toInactive.status).toBe(200);
+    expect(toInactive.body.status).toBe("inactive");
+
+    const selfBan = await request(app)
+      .patch("/api/contractor-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "banned" });
+    expect(selfBan.status).toBe(400);
+
+    const bannedUser = await createUser();
+    await createContractorProfile({ user: bannedUser, status: "banned" });
+    const bannedUpdate = await request(app)
+      .patch("/api/contractor-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(bannedUser)}`)
+      .send({ headline: "Trying to sneak an edit in" });
+    expect(bannedUpdate.status).toBe(403);
+  });
 });
 
 describe("GET /api/contractor-profiles/:idOrSlug", () => {

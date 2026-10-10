@@ -1,5 +1,5 @@
 import * as yup from "yup";
-import { ITemplateField, TEMPLATE_FIELD_TYPE } from "../models/verificationTemplateModel";
+import { ITemplateField, TEMPLATE_FIELD_TYPE } from "../../models/verificationTemplateModel";
 
 // Builds a Yup object schema from a VerificationTemplate's field
 // definitions, at request time — these are the same definitions the

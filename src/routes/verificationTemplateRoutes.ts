@@ -3,7 +3,7 @@ import { createTemplate, getTemplates, lookupTemplate } from "../controllers/ver
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
 import { validateBody } from "../validators/validate";
-import { createTemplateSchema } from "../validators/verificationTemplateValidator";
+import { createTemplateSchema } from "../validators/verificationTemplate/verificationTemplateValidator";
 
 const router = express.Router();
 

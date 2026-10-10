@@ -50,20 +50,9 @@ export const addContact = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
   const { userId, email } = req.body;
 
-  let target = null;
-
-  if (userId) {
-    if (!mongoose.Types.ObjectId.isValid(userId)) {
-      res.status(400);
-      throw new Error("Invalid user id");
-    }
-    target = await User.findById(userId);
-  } else if (email) {
-    target = await User.findOne({ email: String(email).toLowerCase().trim() });
-  } else {
-    res.status(400);
-    throw new Error("Provide a userId or email");
-  }
+  const target = userId
+    ? await User.findById(userId)
+    : await User.findOne({ email: String(email).toLowerCase().trim() });
 
   if (!target) {
     res.status(404);

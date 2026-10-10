@@ -65,21 +65,6 @@ export const createReview = asyncHandler(async (req: Request, res: Response) => 
   const requester = req.user as IUser;
   const { sourceType, sourceId, rating, comment } = req.body;
 
-  if (!sourceType || !Object.values(REVIEW_SOURCE_TYPE).includes(sourceType)) {
-    res.status(400);
-    throw new Error("sourceType must be 'Job' or 'DigitalPurchase'");
-  }
-
-  if (!sourceId || !mongoose.Types.ObjectId.isValid(sourceId)) {
-    res.status(400);
-    throw new Error("A valid sourceId is required");
-  }
-
-  if (!rating || rating < 1 || rating > 5) {
-    res.status(400);
-    throw new Error("rating must be between 1 and 5");
-  }
-
   let profileType: ProfileType;
   let profileId: mongoose.Types.ObjectId;
 

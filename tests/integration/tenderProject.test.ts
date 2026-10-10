@@ -9,8 +9,12 @@ import {
   createTenderProject,
   createBid,
   generateToken,
+  TEST_PNG_BUFFER,
+  TEST_PDF_BUFFER,
+  TEST_DOCX_BUFFER,
 } from "../setup/fixtures";
-import { TENDER_CATEGORY } from "../../src/models/tenderProjectModel";
+import { TENDER_CATEGORY, MAX_PROJECT_FILES } from "../../src/models/tenderProjectModel";
+import { ContractorProfile } from "../../src/models/contractorProfileModel";
 import { Bid } from "../../src/models/bidModel";
 import { Job } from "../../src/models/jobModel";
 
@@ -39,11 +43,11 @@ const createEligibleContractor = async () => {
   return { user, profile };
 };
 
-// A poster eligible to post a project: a subscribed ClientProfile — no
-// `isVerified` required (see clientProfileModel.ts).
+// A poster eligible to post a project: a verified, subscribed
+// ClientProfile (see clientProfileModel.ts).
 const createEligiblePoster = async () => {
   const user = await createUserWithActiveSubscription();
-  await createClientProfile({ user, currentSubscription: user.currentSubscription });
+  await createClientProfile({ user, currentSubscription: user.currentSubscription, isVerified: true });
   return user;
 };
 
@@ -79,7 +83,64 @@ describe("POST /api/tender-projects", () => {
     }
   });
 
-  it("posts a project once I have a subscribed client profile", async () => {
+  it("requires the client profile to be verified, not just subscribed", async () => {
+    const user = await createUserWithActiveSubscription();
+    await createClientProfile({ user, currentSubscription: user.currentSubscription }); // isVerified: false
+
+    const res = await request(app)
+      .post("/api/tender-projects")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({
+          title: "New roof",
+          description: "Replace the roof",
+          category: TENDER_CATEGORY.ROOFING,
+          location: { country: "NG" },
+          bidDeadline: futureDeadline(),
+        }),
+      );
+
+    expect(res.status).toBe(402);
+  });
+
+  it("requires the client profile to be active — inactive (on a break) or banned also blocks posting", async () => {
+    const inactiveUser = await createUserWithActiveSubscription();
+    await createClientProfile({
+      user: inactiveUser,
+      currentSubscription: inactiveUser.currentSubscription,
+      isVerified: true,
+      status: "inactive",
+    });
+
+    const bannedUser = await createUserWithActiveSubscription();
+    await createClientProfile({
+      user: bannedUser,
+      currentSubscription: bannedUser.currentSubscription,
+      isVerified: true,
+      status: "banned",
+    });
+
+    for (const user of [inactiveUser, bannedUser]) {
+      const res = await request(app)
+        .post("/api/tender-projects")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .field(
+          "data",
+          JSON.stringify({
+            title: "New roof",
+            description: "Replace the roof",
+            category: TENDER_CATEGORY.ROOFING,
+            location: { country: "NG" },
+            bidDeadline: futureDeadline(),
+          }),
+        );
+
+      expect(res.status).toBe(402);
+    }
+  });
+
+  it("posts a project once I have a verified, subscribed client profile", async () => {
     const user = await createEligiblePoster();
 
     const res = await request(app)
@@ -220,6 +281,117 @@ describe("GET /api/tender-projects/:id", () => {
   });
 });
 
+describe("POST /api/tender-projects/:id/files and DELETE .../files/:fileName", () => {
+  it("adds a pdf, image, or docx file, and lets the poster remove one again", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const token = generateToken(poster);
+
+    const added = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file1", TEST_PDF_BUFFER, "spec.pdf")
+      .attach("file2", TEST_PNG_BUFFER, "site.png")
+      .attach("file3", TEST_DOCX_BUFFER, "scope.docx");
+
+    expect(added.status).toBe(201);
+    expect(added.body.files).toHaveLength(3);
+    expect(added.body.files.map((f: { url: string }) => f.url)).toEqual(
+      expect.arrayContaining([expect.any(String)]),
+    );
+
+    const fileName = added.body.files[0].fileName;
+    const removed = await request(app)
+      .delete(`/api/tender-projects/${project.id}/files/${fileName}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(removed.status).toBe(200);
+    expect(removed.body.files).toHaveLength(2);
+  });
+
+  // Same "never fail the whole request for a bad optional attachment"
+  // philosophy as every other media-upload endpoint in this codebase
+  // (see fileStorage.uploadHandler's own comment) — a file that isn't a
+  // pdf/image/docx surfaces as a non-blocking fileWarnings entry, not a
+  // 400, and simply never gets added.
+  it("surfaces a file that isn't a pdf, image, or docx as a non-blocking fileWarnings entry", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .attach("file", Buffer.from("just some text"), "notes.txt");
+
+    expect(res.status).toBe(201);
+    expect(res.body.files).toHaveLength(0);
+    expect(res.body.fileWarnings).toBeDefined();
+  });
+
+  it("requires at least one file, and caps at MAX_PROJECT_FILES", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const token = generateToken(poster);
+
+    const noFile = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+    expect(noFile.status).toBe(400);
+
+    let tooMany = request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`);
+    for (let i = 0; i < MAX_PROJECT_FILES + 1; i++) {
+      tooMany = tooMany.attach(`file${i}`, TEST_PDF_BUFFER, `spec${i}.pdf`);
+    }
+    expect((await tooMany).status).toBe(400);
+  });
+
+  it("ignores a base64 file instead of silently saving it", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .send({ base64: "data:application/pdf;base64,anything" });
+
+    // No real attachment present — same as attaching nothing at all.
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a non-poster from adding or removing files", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const stranger = await createUser();
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${generateToken(stranger)}`)
+      .attach("file", TEST_PDF_BUFFER, "spec.pdf");
+
+    expect(res.status).toBe(404);
+  });
+
+  it("blocks editing files once the project is no longer open", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const token = generateToken(poster);
+
+    await request(app)
+      .patch(`/api/tender-projects/${project.id}/cancel`)
+      .set("Authorization", `Bearer ${token}`);
+
+    const res = await request(app)
+      .post(`/api/tender-projects/${project.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PDF_BUFFER, "spec.pdf");
+
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
   it("blocks a non-eligible contractor from bidding", async () => {
     const poster = await createUserWithActiveSubscription();
@@ -232,6 +404,29 @@ describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
       .field("data", JSON.stringify({ amount: 5000, proposal: "I can do this" }));
 
     expect(res.status).toBe(403);
+  });
+
+  it("blocks a contractor who's inactive (on a break) or banned from bidding", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+
+    const { user: inactiveContractor } = await createEligibleContractor();
+    await ContractorProfile.updateOne({ userId: inactiveContractor._id }, { status: "inactive" });
+
+    const inactiveRes = await request(app)
+      .post(`/api/tender-projects/${project.id}/bids`)
+      .set("Authorization", `Bearer ${generateToken(inactiveContractor)}`)
+      .field("data", JSON.stringify({ amount: 5000, proposal: "I can do this" }));
+    expect(inactiveRes.status).toBe(403);
+
+    const { user: bannedContractor } = await createEligibleContractor();
+    await ContractorProfile.updateOne({ userId: bannedContractor._id }, { status: "banned" });
+
+    const bannedRes = await request(app)
+      .post(`/api/tender-projects/${project.id}/bids`)
+      .set("Authorization", `Bearer ${generateToken(bannedContractor)}`)
+      .field("data", JSON.stringify({ amount: 5000, proposal: "I can do this" }));
+    expect(bannedRes.status).toBe(403);
   });
 
   it("blocks the poster from bidding on their own project", async () => {
@@ -315,6 +510,11 @@ describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
     expect(visibleForPoster.status).toBe(200);
     expect(visibleForPoster.body).toHaveLength(1);
     expect(visibleForPoster.body[0].proposal).toBe("From A");
+    // The bidder's name is fine for the poster to review by, but their
+    // email stays hidden until a real Contact connection exists — which
+    // only happens at awardBid, not just by listing pending bids.
+    expect(visibleForPoster.body[0].bidder.fullName).toEqual(expect.any(String));
+    expect(visibleForPoster.body[0].bidder.email).toBeUndefined();
   });
 });
 

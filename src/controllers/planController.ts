@@ -1,7 +1,7 @@
 import asyncHandler from "express-async-handler";
 import mongoose from "mongoose";
 import { Request, Response } from "express";
-import { Plan, PLAN_TIER } from "../models/planModel";
+import { Plan } from "../models/planModel";
 
 // @desc    List available plans (active only, unless includeInactive=true)
 // @route   GET /api/plans
@@ -42,16 +42,6 @@ export const getPlan = asyncHandler(async (req: Request, res: Response) => {
 // @access  Private (Super Admin only)
 export const createPlan = asyncHandler(async (req: Request, res: Response) => {
   const { planTier, name, privileges, duration, maxUsers, price, currency } = req.body;
-
-  if (!planTier || !name || !duration || price === undefined) {
-    res.status(400);
-    throw new Error("Please add planTier, name, duration and price");
-  }
-
-  if (!Object.values(PLAN_TIER).includes(planTier)) {
-    res.status(400);
-    throw new Error("Invalid plan tier");
-  }
 
   const existing = await Plan.findOne({ planTier });
   if (existing) {

@@ -7,7 +7,6 @@ import {
   IShippingOption,
   MAX_PRODUCT_IMAGES,
   MAX_SHIPPING_LOCATIONS,
-  STOCK_STATUS,
   StockStatus,
 } from "../models/productModel";
 import { StoreProfile, MaterialCategory } from "../models/storeProfileModel";
@@ -15,7 +14,6 @@ import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
 import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
-import { parseMultipartData } from "../helpers/parseMultipartData";
 import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
 import { AppError } from "../middleware/errorMiddleware";
 
@@ -91,7 +89,14 @@ const loadMyStore = async (requesterId: string) => StoreProfile.findOne({ userId
 const saveProductImages = async (
   req: Request,
 ): Promise<{ images: IMediaFile[]; warnings: string[] }> => {
-  const { results, errorLogs } = await uploadHandler({ req, visibility: FILE_VISIBILITY.PUBLIC });
+  // Real multipart attachments only — req.files, never req.body's
+  // base64/url alternatives. Passing the whole `req` to uploadHandler
+  // would let those through too, silently saving images the caller
+  // never meant to attach and blowing past MAX_PRODUCT_IMAGES undetected
+  // (checked against req.files.length alone). Same shim
+  // digitalProductController.ts's saveFilesForField already uses.
+  const shimReq = { files: req.files, body: {} } as unknown as Request;
+  const { results, errorLogs } = await uploadHandler({ req: shimReq, visibility: FILE_VISIBILITY.PUBLIC });
 
   return {
     images: results.map((r) => ({
@@ -104,18 +109,6 @@ const saveProductImages = async (
     warnings: errorLogs,
   };
 };
-
-interface ProductPayload {
-  category?: string;
-  subCategory?: string;
-  title?: string;
-  description?: string;
-  price?: number;
-  currency?: string;
-  unit?: string;
-  stockStatus?: string;
-  shippingLocations?: unknown;
-}
 
 // @desc    Create a product under my store — its category must be one the
 //          store itself declared it sells
@@ -130,13 +123,7 @@ export const createProduct = asyncHandler(async (req: Request, res: Response) =>
     throw new Error("You don't have a store profile yet");
   }
 
-  const { category, subCategory, title, description, price, currency, unit, shippingLocations } =
-    parseMultipartData<ProductPayload>(req);
-
-  if (!title || price === undefined || !unit) {
-    res.status(400);
-    throw new Error("Please add a title, price, and unit");
-  }
+  const { category, subCategory, title, description, price, currency, unit, shippingLocations } = req.body;
 
   if (!category || !store.categories.includes(category as MaterialCategory)) {
     res.status(400);
@@ -220,13 +207,7 @@ export const updateProduct = asyncHandler(async (req: Request, res: Response) =>
     product.shippingLocations = resolveShippingLocations(shippingLocations) as typeof product.shippingLocations;
   }
 
-  if (stockStatus !== undefined) {
-    if (!Object.values(STOCK_STATUS).includes(stockStatus)) {
-      res.status(400);
-      throw new Error("Invalid stockStatus");
-    }
-    product.stockStatus = stockStatus as StockStatus;
-  }
+  if (stockStatus !== undefined) product.stockStatus = stockStatus as StockStatus;
 
   await product.save();
 

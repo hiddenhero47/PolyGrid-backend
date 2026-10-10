@@ -3,6 +3,8 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import asyncHandler from "express-async-handler";
+import { authenticator } from "otplib";
+import qrcode from "qrcode";
 import { Request, Response } from "express";
 import { OAuth2Client } from "google-auth-library";
 import appleSignin from "apple-signin-auth";
@@ -15,8 +17,15 @@ import {
   AuthProviderName,
   TOKENS,
 } from "../models/userModel";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  IMAGE_ONLY_MIME_TYPES,
+  countUploadCandidates,
+} from "../helpers/fileStorage";
 import { sendTemplatedEmail } from "../helpers/emailSender";
+import { AppError } from "../middleware/errorMiddleware";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -45,18 +54,48 @@ const toPublicUser = (user: IUser) => ({
   user2fa: {
     enable: user.user2fa?.enable || false,
   },
+  payoutAccount: user.payoutAccount,
 });
+
+// Shared by loginUser/googleLogin/appleLogin — whichever path actually
+// authenticated the caller (a password, a verified Google/Apple token),
+// a second factor still isn't optional once the account has one on
+// file. `code` lets the frontend tell "no code sent yet" (prompt for
+// one) apart from "the code sent was wrong" (reject it), matching
+// house-maduekwe-backend's same distinction. A brand-new OAuth account
+// (just created by createOAuthUser) can never have 2FA enabled yet, so
+// this is a no-op for that case — safe to call unconditionally on every
+// login path, not just the password one.
+const enforceTwoFactor = (user: IUser, token: string | undefined, res: Response): void => {
+  if (!user.user2fa?.enable) return;
+
+  if (!token) {
+    res.status(400);
+    const error: AppError = new Error("A 2FA code is required");
+    error.code = "2FA_REQUIRED";
+    throw error;
+  }
+
+  let isValid: boolean;
+  try {
+    isValid = authenticator.verify({ token, secret: user.user2fa.secret as string });
+  } catch {
+    isValid = false;
+  }
+
+  if (!isValid) {
+    res.status(400);
+    const error: AppError = new Error("Invalid 2FA code");
+    error.code = "2FA_INVALID";
+    throw error;
+  }
+};
 
 // @desc    Register a new user
 // @route   POST /api/users
 // @access  Public
 export const registerUser = asyncHandler(async (req: Request, res: Response) => {
   const { fullName, email, password, phoneNumber } = req.body;
-
-  if (!fullName || !email || !password) {
-    res.status(400);
-    throw new Error("Please add all fields");
-  }
 
   const userExists = await User.findOne({ email });
   if (userExists) {
@@ -85,7 +124,7 @@ export const registerUser = asyncHandler(async (req: Request, res: Response) => 
 // @route   POST /api/users/login
 // @access  Public
 export const loginUser = asyncHandler(async (req: Request, res: Response) => {
-  const { email, password } = req.body;
+  const { email, password, token } = req.body;
 
   const user = await User.findOne({ email });
 
@@ -93,6 +132,8 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
     res.status(400);
     throw new Error("Invalid user credentials");
   }
+
+  enforceTwoFactor(user, token, res);
 
   res.json({
     ...toPublicUser(user),
@@ -162,12 +203,7 @@ const createOAuthUser = async ({
 // @route   POST /api/users/social/google
 // @access  Public
 export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
-  const { idToken } = req.body;
-
-  if (!idToken) {
-    res.status(400);
-    throw new Error("idToken is required");
-  }
+  const { idToken, token } = req.body;
 
   const ticket = await googleClient.verifyIdToken({
     idToken,
@@ -244,6 +280,8 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  enforceTwoFactor(user, token, res);
+
   res.json({
     ...toPublicUser(user),
     token: generateToken(user),
@@ -257,12 +295,7 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
 // later logins may omit it entirely, which is exactly why lookups here fall
 // back to authProviders.providerId (Apple's `sub`) instead of email alone.
 export const appleLogin = asyncHandler(async (req: Request, res: Response) => {
-  const { identityToken } = req.body;
-
-  if (!identityToken) {
-    res.status(400);
-    throw new Error("identityToken is required");
-  }
+  const { identityToken, token } = req.body;
 
   const appleUser = await appleSignin.verifyIdToken(identityToken, {
     audience: process.env.APPLE_CLIENT_ID,
@@ -311,6 +344,8 @@ export const appleLogin = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  enforceTwoFactor(user, token, res);
+
   res.json({
     ...toPublicUser(user),
     token: generateToken(user),
@@ -356,11 +391,6 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
     user.sessionId = crypto.randomUUID();
   }
 
-  if (phoneNumber && !phoneNumber.number && !phoneNumber.country) {
-    res.status(400);
-    throw new Error("Both phone number and country code are required");
-  }
-
   if (fullName) user.fullName = fullName;
   if (phoneNumber) user.phoneNumber = phoneNumber;
 
@@ -368,15 +398,22 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
   // things — a bad/missing image must never fail the whole profile update.
   // uploadHandler already never throws; it just reports what it couldn't
   // save in errorLogs, which we surface as a soft warning instead of an
-  // error response.
-  const hasIncomingFile =
-    (req.files as Express.Multer.File[] | undefined)?.length || req.body?.base64 || req.body?.url;
+  // error response. Same reasoning for more than one source at once
+  // (a file, base64, *and* url all attached) — rather than let
+  // uploadHandler save every one of them and only keep the first
+  // (silently orphaning the rest on disk, same bug
+  // jobController.uploadContract had), this skips the upload
+  // entirely and surfaces it as a warning instead.
+  const candidateCount = countUploadCandidates(req);
   let avatarWarnings: string[] = [];
 
-  if (hasIncomingFile) {
+  if (candidateCount > 1) {
+    avatarWarnings = ["Attach exactly one avatar image — no image was saved"];
+  } else if (candidateCount === 1) {
     const { results, errorLogs } = await uploadHandler({
       req,
       visibility: FILE_VISIBILITY.PUBLIC, // avatars are always public
+      allowedMimeTypes: IMAGE_ONLY_MIME_TYPES,
     });
 
     if (results.length > 0) {
@@ -419,11 +456,6 @@ export const toggleAccountType = asyncHandler(async (req: Request, res: Response
 
   const { activeAccountType } = req.body;
 
-  if (activeAccountType && !Object.values(ACCOUNT_TYPE).includes(activeAccountType)) {
-    res.status(400);
-    throw new Error("Invalid account type");
-  }
-
   user.activeAccountType = activeAccountType
     ? activeAccountType
     : user.activeAccountType === ACCOUNT_TYPE.NORMAL
@@ -436,6 +468,146 @@ export const toggleAccountType = asyncHandler(async (req: Request, res: Response
     message: "Active account type updated",
     activeAccountType: user.activeAccountType,
   });
+});
+
+// @desc    Set/replace where my verified refunds/payouts actually get
+//          sent. Gated behind verifyIdentityMiddleware (current password,
+//          or a 2FA code once that's ever enabled) — see jobController's
+//          approveRefundRequest/approvePayoutRequest, which snapshot
+//          whatever's on file here onto a SystemPayout record at approval
+//          time, not a live reference, so a later change here never
+//          silently redirects an already-approved payout.
+// @route   PUT /api/users/payout-account
+// @access  Private
+export const updatePayoutAccount = asyncHandler(async (req: Request, res: Response) => {
+  const user = await User.findById((req.user as IUser).id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  const { accountName, accountNumber, bankName, bankCode, country } = req.body;
+
+  user.payoutAccount = { accountName, accountNumber, bankName, bankCode, country };
+  await user.save();
+
+  res.status(200).json({ payoutAccount: user.payoutAccount });
+});
+
+// @desc    Start (or restart) 2FA enrollment — generates a fresh TOTP
+//          secret and a scannable QR code, but doesn't enable anything
+//          yet; that only happens once verifyTwoFactor confirms the
+//          caller actually has it loaded into an authenticator app.
+//          Gated behind verifyIdentityMiddleware: if 2FA is already
+//          enabled, restarting setup (which would overwrite the current
+//          secret) requires a valid code from the *existing*
+//          authenticator, not just a bearer token — otherwise a stolen
+//          session could silently swap in an attacker's own secret.
+// @route   POST /api/users/2fa/setup
+// @access  Private
+export const setupTwoFactor = asyncHandler(async (req: Request, res: Response) => {
+  const user = await User.findById((req.user as IUser).id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  const tempSecret = authenticator.generateSecret();
+  const otpauth = authenticator.keyuri(user.email, process.env.APP_NAME as string, tempSecret);
+  const qrCodeDataURL = await qrcode.toDataURL(otpauth);
+
+  user.user2fa = { enable: false, tempSecret };
+  await user.save();
+
+  res.status(200).json({ tempSecret, otpauth, qrCodeDataURL });
+});
+
+// @desc    Confirm 2FA enrollment — a 6-digit code from whatever
+//          authenticator app just scanned setupTwoFactor's QR code,
+//          checked against the *temporary* secret that set. Success is
+//          what actually flips user2fa.enable on and promotes
+//          tempSecret to the permanent secret; nothing before this point
+//          ever enabled 2FA, no matter how setup went.
+// @route   POST /api/users/2fa/verify
+// @access  Private
+export const verifyTwoFactor = asyncHandler(async (req: Request, res: Response) => {
+  const user = await User.findById((req.user as IUser).id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  const { token } = req.body;
+
+  if (!user.user2fa?.tempSecret) {
+    res.status(400);
+    throw new Error("Start 2FA setup first");
+  }
+
+  const isValid = authenticator.verify({ token, secret: user.user2fa.tempSecret });
+
+  if (!isValid) {
+    res.status(400);
+    throw new Error("Invalid authentication code");
+  }
+
+  user.user2fa = { enable: true, secret: user.user2fa.tempSecret };
+  await user.save();
+
+  res.status(200).json({ user2fa: { enable: true } });
+});
+
+// @desc    Turn 2FA on (re-enable, using the secret a previous setup
+//          already confirmed — no fresh enrollment needed) or off.
+//          Gated behind verifyIdentityMiddleware either way: turning it
+//          off needs a valid code from the authenticator being removed,
+//          not just a bearer token; turning it back on needs the
+//          current password, same as any other sensitive change while
+//          2FA is off.
+// @route   PUT /api/users/2fa/toggle
+// @access  Private
+export const toggleTwoFactor = asyncHandler(async (req: Request, res: Response) => {
+  const user = await User.findById((req.user as IUser).id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  const { enable } = req.body;
+
+  if (enable) {
+    if (user.user2fa?.enable) {
+      res.status(400);
+      throw new Error("2FA is already enabled");
+    }
+
+    if (!user.user2fa?.secret) {
+      res.status(400);
+      throw new Error("Please complete 2FA setup first");
+    }
+
+    // A full reassignment, not `user.user2fa.enable = true` — `user2fa`
+    // is a loosely-typed `Object` field (see userModel.ts's IUser2fa
+    // comment), and Mongoose only detects a *whole-field* reassignment on
+    // one of those as a change, not a mutation of one of its properties
+    // in place; the latter would silently never get saved.
+    user.user2fa = { ...user.user2fa, enable: true };
+  } else {
+    if (!user.user2fa?.enable) {
+      res.status(400);
+      throw new Error("2FA is already disabled");
+    }
+
+    user.user2fa = { ...user.user2fa, enable: false };
+  }
+
+  await user.save();
+
+  res.status(200).json({ user2fa: { enable: user.user2fa.enable } });
 });
 
 // @desc    Invalidate every session for the logged-in user
@@ -460,11 +632,6 @@ export const logoutAll = asyncHandler(async (req: Request, res: Response) => {
 // @access  Public
 export const requestReset = asyncHandler(async (req: Request, res: Response) => {
   const { email } = req.body;
-
-  if (!email) {
-    res.status(400);
-    throw new Error("Email is required");
-  }
 
   const user = await User.findOne({ email: String(email).toLowerCase().trim() });
 
@@ -525,11 +692,6 @@ export const requestReset = asyncHandler(async (req: Request, res: Response) => 
 export const resetPassword = asyncHandler(async (req: Request, res: Response) => {
   const { token, password } = req.body;
 
-  if (!token || !password) {
-    res.status(400);
-    throw new Error("Token and password are required");
-  }
-
   let decoded: { email: string; code: string };
 
   try {
@@ -579,11 +741,6 @@ export const resetPassword = asyncHandler(async (req: Request, res: Response) =>
 // @access  Private (Super Admin only)
 export const registerAdmin = asyncHandler(async (req: Request, res: Response) => {
   const { fullName, email, password } = req.body;
-
-  if (!fullName || !email || !password) {
-    res.status(400);
-    throw new Error("Please add all fields");
-  }
 
   const userExists = await User.findOne({ email });
   if (userExists) {
@@ -657,14 +814,11 @@ export const changeUserRole = asyncHandler(async (req: Request, res: Response) =
   const { systemRole } = req.body;
   const requester = req.user as IUser;
 
+  // id is a route param, not a body field — validateBody can't see it,
+  // so this one stays a plain inline check.
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400);
     throw new Error("Invalid user id");
-  }
-
-  if (!Object.values(SYSTEM_ROLE).includes(systemRole)) {
-    res.status(400);
-    throw new Error("Invalid role");
   }
 
   const user = await User.findById(id);

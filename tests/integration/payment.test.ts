@@ -1,3 +1,19 @@
+// No real storage call in tests — same "mock the third-party integration
+// entirely" boundary tests/README.md documents for helpers/emailSender,
+// applied at the provider-dispatch boundary. copyDigitalFile resolves to
+// undefined so copyPurchaseFiles's real logic (one new key per manifest
+// entry) is still exercised end-to-end.
+jest.mock("../../src/providers/digitalStorageProviders", () => {
+  const adapter = {
+    uploadDigitalFiles: jest.fn(),
+    copyDigitalFile: jest.fn().mockResolvedValue(undefined),
+    deleteDigitalFile: jest.fn().mockResolvedValue(undefined),
+    getDigitalFileDownloadUrl: jest.fn(async (key: string) => `https://mock-digital-store.test/${key}`),
+  };
+
+  return { getDigitalStorageProvider: () => adapter };
+});
+
 import request from "supertest";
 import mongoose from "mongoose";
 import Stripe from "stripe";
@@ -520,15 +536,23 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     });
     expect(webhookRes.status).toBe(200);
 
-    await waitFor(async () => (await DigitalPurchase.findById(purchaseId))?.status === "success");
+    // The webhook's own work continues after the response it already sent
+    // above — status flips first, then copyPurchaseFiles populates `files`,
+    // so wait for the actual last write, not just the status flip.
+    await waitFor(async () => ((await DigitalPurchase.findById(purchaseId))?.files.length ?? 0) > 0);
 
     purchase = await DigitalPurchase.findById(purchaseId);
     expect(purchase?.status).toBe("success");
+    expect(purchase?.files).toHaveLength(1);
+    expect(purchase?.files[0].key).not.toBe(purchase?.fileManifest[0].key);
 
-    // The grant this just produced downloads immediately.
+    // The grant this just produced downloads immediately, from the
+    // buyer's own copy, not the live product — keyed by the purchase
+    // itself (see digitalPurchaseController.getDigitalPurchaseDownloadLink).
     const download = await request(app)
-      .get(`/api/digital-products/${product.id}/download`)
+      .get(`/api/digital-purchases/${purchaseId}/download`)
       .set("Authorization", `Bearer ${generateToken(buyer)}`);
     expect(download.status).toBe(200);
+    expect(download.body.files).toHaveLength(1);
   });
 });

@@ -74,6 +74,37 @@ describe("GET /api/client-profiles/me and PATCH", () => {
     expect(res.status).toBe(200);
     expect(res.body.bio).toBe("I manage three sites in Lagos");
   });
+
+  // Full status (active/inactive/banned) behavior — self-service toggle,
+  // admin-only ban, posting-eligibility exclusion — is covered in depth
+  // once in consultancyProfile.test.ts (identical shared logic); this
+  // just confirms the same wiring exists here too.
+  it("lets me toggle my own status, but not to 'banned'; a banned profile rejects any update", async () => {
+    const user = await createUser();
+    await createClientProfile({ user });
+    const token = generateToken(user);
+
+    const toInactive = await request(app)
+      .patch("/api/client-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "inactive" });
+    expect(toInactive.status).toBe(200);
+    expect(toInactive.body.status).toBe("inactive");
+
+    const selfBan = await request(app)
+      .patch("/api/client-profiles/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "banned" });
+    expect(selfBan.status).toBe(400);
+
+    const bannedUser = await createUser();
+    await createClientProfile({ user: bannedUser, status: "banned" });
+    const bannedUpdate = await request(app)
+      .patch("/api/client-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(bannedUser)}`)
+      .send({ bio: "Trying to sneak an edit in" });
+    expect(bannedUpdate.status).toBe(403);
+  });
 });
 
 describe("GET /api/client-profiles/:id", () => {
@@ -86,6 +117,21 @@ describe("GET /api/client-profiles/:id", () => {
     expect(res.status).toBe(200);
     expect(res.body.displayName).toBeTruthy();
     expect(res.body.available).toBeUndefined();
+  });
+
+  it("hides a banned poster's page outright, but an inactive (on-a-break) poster's page stays visible", async () => {
+    const bannedUser = await createUser();
+    const bannedProfile = await createClientProfile({ user: bannedUser, status: "banned" });
+
+    const inactiveUser = await createUser();
+    const inactiveProfile = await createClientProfile({ user: inactiveUser, status: "inactive" });
+
+    const bannedRes = await request(app).get(`/api/client-profiles/${bannedProfile.id}`);
+    expect(bannedRes.body.available).toBe(false);
+
+    const inactiveRes = await request(app).get(`/api/client-profiles/${inactiveProfile.id}`);
+    expect(inactiveRes.body.available).toBeUndefined();
+    expect(inactiveRes.body.displayName).toBeTruthy();
   });
 
   it("404s for an unknown id", async () => {

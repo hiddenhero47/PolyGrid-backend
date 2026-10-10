@@ -60,14 +60,17 @@ fixes that: a lightweight profile (`displayName`, `bio?`, `country`/
 `PROFILE_MODEL_REGISTRY` so Reviews can target it the same generic way
 they target a provider's profile.
 
-Posting (`TenderProject` or `JobOpening`) now requires a `ClientProfile`
-with an active subscription — `loadEligibleClientProfile`
-(`clientProfileController.ts`), shared by both pillars. `isVerified` is
-**not** required to post, deliberately: per lever #1 above, no real
-platform background-checks the person issuing the invitation, only the
-person walking into an unfamiliar property. `tenderProjectController.createTenderProject`
-was retrofitted to this same check, replacing the bare
-`requireActiveSubscription` gate it used before `ClientProfile` existed.
+Posting (`TenderProject` or `JobOpening`) now requires a verified
+`ClientProfile` with an active subscription — `loadEligibleClientProfile`
+(`clientProfileController.ts`), shared by both pillars. `isVerified`
+**is** required to post: a worker/contractor accepting the posting is
+the one walking into an unfamiliar property, but it's the *poster's*
+identity behind that address and that invitation — leaving that side
+unverified would be exactly the safety gap lever #1 above exists to
+close, just pointed the other direction.
+`tenderProjectController.createTenderProject` was retrofitted to this
+same check, replacing the bare `requireActiveSubscription` gate it used
+before `ClientProfile` existed.
 
 `GET /api/client-profiles/:id` is deliberately never subscription-gated
 the way a provider profile's page is — a poster isn't discoverable

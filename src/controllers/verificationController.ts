@@ -13,7 +13,7 @@ import { ITemplateDocument, DOCUMENT_FORMAT_MIME } from "../models/verificationT
 import { IUser } from "../models/userModel";
 import { PROFILE_MODEL_REGISTRY, ProfileType, isKnownProfileType } from "../constants/profileTypes";
 import { findActiveTemplate } from "../helpers/verificationTemplateLookup";
-import { buildFormSchema } from "../validators/templateFormSchema";
+import { buildFormSchema } from "../validators/verification/templateFormSchema";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
 import { pickDefinedFields } from "../helpers/sanitize";
 import { parseMultipartData } from "../helpers/parseMultipartData";

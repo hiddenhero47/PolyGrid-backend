@@ -15,10 +15,13 @@ import {
   createCustomerCare,
   generateToken,
   TEST_PNG_BUFFER,
+  TEST_PDF_BUFFER,
+  TEST_DOCX_BUFFER,
 } from "../setup/fixtures";
 import { Contact } from "../../src/models/contactModel";
-import { FileGrant } from "../../src/models/fileGrantModel";
+import { Job } from "../../src/models/jobModel";
 import { Payment } from "../../src/models/paymentModel";
+import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE } from "../../src/models/systemPayoutModel";
 import { IUser } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 
@@ -41,6 +44,17 @@ const createJobAs = (
   creatorToken: string,
   body: Record<string, unknown>,
 ) => request(app).post("/api/jobs").set("Authorization", `Bearer ${creatorToken}`).send(body);
+
+// approveRefundRequest/approvePayoutRequest refuse to approve without a
+// payoutAccount on file for the beneficiary (nowhere to record a
+// SystemPayout going) — this is a valid shape for any test that needs
+// one set up to get past that check.
+const TEST_PAYOUT_ACCOUNT = {
+  accountName: "Test Beneficiary",
+  accountNumber: "0123456789",
+  bankName: "Test Bank",
+  country: "NG",
+};
 
 // Creates + confirms a job in one go, returning it (status: active, one
 // implicit 100%-payment stage unless `stages` is passed).
@@ -329,7 +343,22 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
     expect(blocked.status).toBe(403);
   });
 
-  it("lists jobs for both the client and the provider, filterable by status", async () => {
+  it("getJob returns full detail with no contract files when none uploaded yet", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .get(`/api/jobs/${job._id}`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.stages).toHaveLength(1);
+    expect(res.body.client.contractFile).toBeUndefined();
+    expect(res.body.provider.contractFile).toBeUndefined();
+  });
+
+  it("lists jobs for both the client and the provider, filterable by status — as a trimmed summary, not the full job", async () => {
     const clientUser = await createUser();
     const providerUser = await createUser();
     await createActiveJob(clientUser, providerUser);
@@ -343,6 +372,15 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
 
     expect(asClient.body.data).toHaveLength(1);
     expect(asProvider.body.data).toHaveLength(1);
+
+    const summary = asClient.body.data[0];
+    expect(summary.jobTitle).toEqual(expect.any(String));
+    expect(summary.status).toBe("active");
+    expect(summary.client.userId).toBe(clientUser.id);
+    expect(summary.provider.isConfirmed).toBe(true);
+    expect(summary.stages).toBeUndefined();
+    expect(summary.amountHistory).toBeUndefined();
+    expect(summary.disputeHistory).toBeUndefined();
   });
 });
 
@@ -440,7 +478,51 @@ describe("stage done/verify and payment math", () => {
 });
 
 describe("POST /api/jobs/:id/contract", () => {
-  it("uploads a private contract file and grants the other party access", async () => {
+  it("uploads a private contract file — no FileGrant involved, getJob mints both parties' links directly", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/contract`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .attach("file", TEST_PDF_BUFFER, "contract.pdf");
+
+    expect(res.status).toBe(201);
+    expect(res.body.client.contractFile.fileName).toEqual(expect.any(String));
+    expect(res.body.client.contractFile.mime).toBe("application/pdf");
+
+    const detail = await request(app)
+      .get(`/api/jobs/${job._id}`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+
+    expect(detail.status).toBe(200);
+    expect(detail.body.client.contractFile.requestUrl).toEqual(expect.any(String));
+    expect(detail.body.client.contractFile.downloadUrl).toEqual(expect.any(String));
+
+    // That signed link works with no Authorization header at all.
+    const requestUrl = new URL(detail.body.client.contractFile.requestUrl);
+    const view = await request(app).get(requestUrl.pathname + requestUrl.search);
+    expect(view.status).toBe(200);
+  });
+
+  it("accepts a .docx contract too", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/contract`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .attach("file", TEST_DOCX_BUFFER, "contract.docx");
+
+    expect(res.status).toBe(201);
+    expect(res.body.client.contractFile.mime).toBe(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+  });
+
+  it("rejects a contract that isn't a pdf or docx", async () => {
     const clientUser = await createUser();
     const providerUser = await createUser();
     const job = await createActiveJob(clientUser, providerUser);
@@ -450,23 +532,24 @@ describe("POST /api/jobs/:id/contract", () => {
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
       .attach("file", TEST_PNG_BUFFER, "contract.png");
 
-    expect(res.status).toBe(201);
-    const fileName = res.body.client.contractFile.fileName;
-    expect(fileName).toEqual(expect.any(String));
+    expect(res.status).toBe(400);
+  });
 
-    const grant = await FileGrant.findOne({ fileName });
-    expect(grant?.ownerId.toString()).toBe(clientUser.id);
-    expect(grant?.allowedUsers.map((id) => id.toString())).toEqual([providerUser.id]);
+  it("rejects more than one attached file, saving none of them", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
 
-    // The provider (granted via that FileGrant) can mint a link for it...
-    const link = await request(app)
-      .get(`/api/files/private/${clientUser.id}/${fileName}/link`)
-      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
-    expect(link.status).toBe(200);
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/contract`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .attach("file", TEST_PDF_BUFFER, "contract-1.pdf")
+      .attach("file2", TEST_PDF_BUFFER, "contract-2.pdf");
 
-    // ...and that signed link works with no Authorization header at all.
-    const view = await request(app).get(new URL(link.body.requestUrl).pathname + new URL(link.body.requestUrl).search);
-    expect(view.status).toBe(200);
+    expect(res.status).toBe(400);
+
+    const after = await Job.findById(job._id);
+    expect(after?.client.contractFile).toBeFalsy();
   });
 
   it("blocks a non-party from uploading a contract", async () => {
@@ -478,7 +561,7 @@ describe("POST /api/jobs/:id/contract", () => {
     const res = await request(app)
       .post(`/api/jobs/${job._id}/contract`)
       .set("Authorization", `Bearer ${generateToken(stranger)}`)
-      .attach("file", TEST_PNG_BUFFER, "contract.png");
+      .attach("file", TEST_PDF_BUFFER, "contract.pdf");
 
     expect(res.status).toBe(403);
   });
@@ -705,50 +788,90 @@ describe("POST /api/jobs/:id/refund-requests", () => {
     const asProvider = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(providerUser)}`)
-      .send({ amount: 100, reason: "x" });
+      .send({ reason: "x" });
     expect(asProvider.status).toBe(403);
 
     const asStranger = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(stranger)}`)
-      .send({ amount: 100, reason: "x" });
+      .send({ reason: "x" });
     expect(asStranger.status).toBe(403);
   });
 
-  it("requires a positive amount and a reason", async () => {
+  it("requires a reason", async () => {
     const clientUser = await createUser();
     const providerUser = await createUser();
     const job = await createActiveJob(clientUser, providerUser);
-    const clientToken = generateToken(clientUser);
-
-    const noAmount = await request(app)
-      .post(`/api/jobs/${job._id}/refund-requests`)
-      .set("Authorization", `Bearer ${clientToken}`)
-      .send({ reason: "x" });
-    expect(noAmount.status).toBe(400);
-
-    const noReason = await request(app)
-      .post(`/api/jobs/${job._id}/refund-requests`)
-      .set("Authorization", `Bearer ${clientToken}`)
-      .send({ amount: 100 });
-    expect(noReason.status).toBe(400);
-  });
-
-  it("rejects requesting more than has actually been paid into the job", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
-    const admin = await createAdmin();
-    const job = await createActiveJob(clientUser, providerUser);
-
-    await request(app)
-      .post(`/api/jobs/${job._id}/payments`)
-      .set("Authorization", `Bearer ${generateToken(admin)}`)
-      .send({ amount: 500 });
 
     const res = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 600, reason: "overpaid correction" });
+      .send({});
+
+    expect(res.status).toBe(400);
+  });
+
+  // There's no amount field at all anymore — PolyGrid computes exactly
+  // what's refundable itself, excluding whatever's already been
+  // disbursed to the provider (and the fee collected on it), never a
+  // caller-supplied number.
+  it("computes the refundable amount itself, excluding anything already disbursed to the provider", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser, {
+      totalAmount: 1000,
+      stages: [{ details: ["a"], payment: 40 }, { details: ["b"], payment: 60 }],
+    });
+    const stageA = job.stages[0]._id;
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 1000 });
+
+    // 40% of 1000 = 400, minus the 5% test-default fee = 380 disbursed —
+    // that share must not be reclaimable.
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stageA}/done`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stageA}/verify`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "overpaid correction" });
+
+    expect(res.status).toBe(201);
+    // 1000 paid - 380 disbursed - 20 fee collected = 600 still in escrow.
+    expect(res.body.refunds[0].amount).toBeCloseTo(600);
+  });
+
+  it("rejects when there's nothing left to refund (everything already disbursed)", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser, { totalAmount: 1000 });
+    const stageId = job.stages[0]._id;
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 1000 });
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stageId}/done`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stageId}/verify`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    const res = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "nothing to refund" });
 
     expect(res.status).toBe(400);
   });
@@ -768,12 +891,12 @@ describe("POST /api/jobs/:id/refund-requests", () => {
     await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${clientToken}`)
-      .send({ amount: 100, reason: "first" });
+      .send({ reason: "first" });
 
     const res = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${clientToken}`)
-      .send({ amount: 100, reason: "second" });
+      .send({ reason: "second" });
 
     expect(res.status).toBe(400);
   });
@@ -792,13 +915,14 @@ describe("POST /api/jobs/:id/refund-requests", () => {
     const res = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 500, reason: "client cancelled" });
+      .send({ reason: "client cancelled" });
 
     expect(res.status).toBe(201);
     expect(res.body.status).toBe("active");
     expect(res.body.totalRefunded).toBe(0);
     expect(res.body.refunds).toHaveLength(1);
     expect(res.body.refunds[0].status).toBe("pending");
+    expect(res.body.refunds[0].amount).toBe(500);
     expect(res.body.refunds[0].requestedBy).toBe(clientUser.id);
   });
 });
@@ -818,7 +942,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 500, reason: "client cancelled" });
+      .send({ reason: "client cancelled" });
 
     for (const viewer of [admin, customerCare]) {
       const res = await request(app)
@@ -836,7 +960,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     expect(blocked.status).toBe(401);
   });
 
-  it("approving closes the job and moves totalRefunded, and a later correction appends without re-closing", async () => {
+  it("refuses to approve when the client has no payout account on file", async () => {
     const clientUser = await createUser();
     const providerUser = await createUser();
     const admin = await createAdmin();
@@ -850,7 +974,31 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     const requested = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 500, reason: "client cancelled" });
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("approving closes the job, moves totalRefunded, and records a SystemPayout; a later correction appends without re-closing", async () => {
+    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
     const refundId = requested.body.refunds[0]._id;
 
     const approved = await request(app)
@@ -872,6 +1020,13 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
       }),
     );
 
+    const systemPayout = await SystemPayout.findOne({ requestId: refundId });
+    expect(systemPayout?.requestType).toBe(SYSTEM_PAYOUT_REQUEST_TYPE.REFUND);
+    expect(systemPayout?.user.toString()).toBe(clientUser.id);
+    expect(systemPayout?.amount).toBe(500);
+    expect(systemPayout?.status).toBe("pending");
+    expect(systemPayout?.payoutAccount.accountNumber).toBe(TEST_PAYOUT_ACCOUNT.accountNumber);
+
     // A second, corrective request on an already-closed job — approving
     // it should append, not fail or re-close/move closedAt.
     await request(app)
@@ -881,7 +1036,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     const secondRequest = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 200, reason: "found an extra duplicate payment" });
+      .send({ reason: "found an extra duplicate payment" });
     const secondRefundId = secondRequest.body.refunds[1]._id;
 
     const secondApproved = await request(app)
@@ -893,6 +1048,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     expect(secondApproved.body.totalRefunded).toBe(700);
     expect(secondApproved.body.refunds).toHaveLength(2);
     expect(secondApproved.body.closedAt).toBe(closedAt);
+    expect(await SystemPayout.countDocuments({ targetId: job._id })).toBe(2);
   });
 
   it("declining requires a reason and leaves the job untouched", async () => {
@@ -909,7 +1065,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     const requested = await request(app)
       .post(`/api/jobs/${job._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 500, reason: "client cancelled" });
+      .send({ reason: "client cancelled" });
     const refundId = requested.body.refunds[0]._id;
 
     const missingReason = await request(app)
@@ -996,7 +1152,7 @@ describe("POST /api/jobs/:id/payout-requests", () => {
   });
 
   it("blocks a request on a disputed, cancelled, or closed job", async () => {
-    const clientUser = await createUser();
+    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const providerUser = await createUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
@@ -1035,7 +1191,7 @@ describe("POST /api/jobs/:id/payout-requests", () => {
     const refundReq = await request(app)
       .post(`/api/jobs/${closedJob._id}/refund-requests`)
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
-      .send({ amount: 500, reason: "cancelled by agreement" });
+      .send({ reason: "cancelled by agreement" });
     await request(app)
       .patch(`/api/jobs/${closedJob._id}/refund-requests/${refundReq.body.refunds[0]._id}/approve`)
       .set("Authorization", `Bearer ${generateToken(admin)}`);
@@ -1048,9 +1204,9 @@ describe("POST /api/jobs/:id/payout-requests", () => {
 });
 
 describe("GET /api/jobs/payout-requests + approve/decline", () => {
-  it("approving pays out exactly what's available (capped by whichever of amountPaid/amountDisbursed is smaller), across multiple stages", async () => {
+  it("approving pays out exactly what's available (capped by whichever of amountPaid/amountDisbursed is smaller), across multiple stages, and records a SystemPayout each time", async () => {
     const clientUser = await createUser();
-    const providerUser = await createUser();
+    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser, {
       totalAmount: 1000,
@@ -1097,6 +1253,12 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
       }),
     );
 
+    const firstSystemPayout = await SystemPayout.findOne({ requestId: firstPayoutId });
+    expect(firstSystemPayout?.requestType).toBe(SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT);
+    expect(firstSystemPayout?.user.toString()).toBe(providerUser.id);
+    expect(firstSystemPayout?.amount).toBeCloseTo(380);
+    expect(firstSystemPayout?.payoutAccount.accountNumber).toBe(TEST_PAYOUT_ACCOUNT.accountNumber);
+
     const nothingLeft = await request(app)
       .post(`/api/jobs/${job._id}/payout-requests`)
       .set("Authorization", `Bearer ${providerToken}`);
@@ -1113,12 +1275,6 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
     expect(secondRequest.status).toBe(201);
     const secondPayoutId = secondRequest.body.payouts[1]._id;
 
-    const overshoot = await request(app)
-      .patch(`/api/jobs/${job._id}/payout-requests/${secondPayoutId}/approve`)
-      .set("Authorization", `Bearer ${adminToken}`)
-      .send({ amount: 999999 });
-    expect(overshoot.status).toBe(400);
-
     const secondApproved = await request(app)
       .patch(`/api/jobs/${job._id}/payout-requests/${secondPayoutId}/approve`)
       .set("Authorization", `Bearer ${adminToken}`);
@@ -1126,6 +1282,7 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
     expect(secondApproved.status).toBe(200);
     expect(secondApproved.body.payouts[1].note).toBe("please wire to my bank");
     expect(secondApproved.body.amountPaidOut).toBeCloseTo(950);
+    expect(await SystemPayout.countDocuments({ targetId: job._id })).toBe(2);
   });
 
   it("declining requires a reason and leaves amountPaidOut untouched", async () => {
@@ -1170,9 +1327,9 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
         variables: expect.objectContaining({
           requestType: "payout",
           approved: false,
-          // The request never specified an amount, so the decline email
-          // falls back to this description rather than `undefined`.
-          amount: "the full available amount",
+          // requestPayout computed this itself — the single implicit
+          // 100% stage released 1000 minus the 5% test platform fee.
+          amount: 950,
           declineReason: "wrong bank details on file",
         }),
       }),

@@ -1,5 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { IDigitalFile, digitalFileSchema } from "./digitalFile";
 
 // A direct purchase — no Job involved at all, unlike every other pillar's
 // paid interaction. See docs/digital-storefront-plan.md: the brief
@@ -29,6 +30,26 @@ export interface IDigitalPurchase extends Document {
   priceSnapshot: number;
   currency: string;
   status: DigitalPurchaseStatus;
+  // Frozen the moment checkout starts (handleDigitalPurchasePaymentIntent)
+  // — exactly which creator-side S3 keys this purchase is entitled to,
+  // captured before the creator can add/remove anything. This is what
+  // makes the eventual copy race-safe: no matter what the creator does to
+  // `DigitalProduct.files` while payment is still processing, the webhook
+  // always copies from these exact keys, which removeDigitalProductFile
+  // guarantees are never deleted.
+  fileManifest: IDigitalFile[];
+  // The buyer's OWN copied objects, independent of the product afterward.
+  // Empty until digitalPurchaseFiles.copyPurchaseFiles runs (triggered by
+  // the webhook on a successful payment), emptied again by the weekly
+  // retention sweep (helpers/digitalPurchaseRetention.ts) once this buyer's
+  // subscription has lapsed for 7+ days. getDigitalProductDownloadLink
+  // reads from here, never from DigitalProduct.files, for a buyer.
+  files: IDigitalFile[];
+  // Set only by the retention sweep when it wipes `files` — distinguishes
+  // "deliberately expired" (this set) from "the purchase-time copy never
+  // completed" (files empty, this still null — an operational gap, not an
+  // expiry).
+  filesDeletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -54,6 +75,9 @@ const digitalPurchaseSchema = new Schema<IDigitalPurchase>(
       enum: Object.values(DIGITAL_PURCHASE_STATUS),
       default: DIGITAL_PURCHASE_STATUS.PENDING,
     },
+    fileManifest: { type: [digitalFileSchema], default: [] },
+    files: { type: [digitalFileSchema], default: [] },
+    filesDeletedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
@@ -63,6 +87,9 @@ const digitalPurchaseSchema = new Schema<IDigitalPurchase>(
 // this ever needs.
 digitalPurchaseSchema.index({ buyer: 1, product: 1 });
 digitalPurchaseSchema.index({ buyer: 1, createdAt: -1 });
+// The retention sweep's read pattern (helpers/digitalPurchaseRetention.ts):
+// every successful purchase still holding a live copy.
+digitalPurchaseSchema.index({ status: 1 });
 
 export const DigitalPurchase: Model<IDigitalPurchase> = mongoose.model<IDigitalPurchase>(
   "DigitalPurchase",

@@ -27,7 +27,9 @@ import reviewRoutes from "./routes/reviewRoutes";
 import clientProfileRoutes from "./routes/clientProfileRoutes";
 import laborProfileRoutes from "./routes/laborProfileRoutes";
 import jobOpeningRoutes from "./routes/jobOpeningRoutes";
+import adminProfileRoutes from "./routes/adminProfileRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
+import { downloadDigitalStoreFile } from "./controllers/digitalStoreController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
 
 // Buffers files in memory (req.files) rather than writing to a temp dir —
@@ -60,6 +62,11 @@ const createApp = (): Express => {
   // custom header. See docs/file-uploads-plan.md.
   app.get("/private/view/:ownerId/:fileName", viewPrivateFile);
   app.get("/private/download/:ownerId/:fileName", downloadPrivateFile);
+  // The internal (local-disk) digital-storage provider's own counterpart
+  // to the route above — see providers/digitalStorageProviders/index.ts
+  // and digitalStoreController.ts. Only ever reached when
+  // DIGITAL_STORAGE_PROVIDER=internal (the default).
+  app.get("/digital-store/download", downloadDigitalStoreFile);
 
   app.get("/api/health", (_req, res) => {
     res.json({ server: "running" });
@@ -90,6 +97,7 @@ const createApp = (): Express => {
   app.use("/api/client-profiles", clientProfileRoutes);
   app.use("/api/labor-profiles", laborProfileRoutes);
   app.use("/api/job-openings", jobOpeningRoutes);
+  app.use("/api/admin/profiles", adminProfileRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

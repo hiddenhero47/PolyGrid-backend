@@ -40,8 +40,45 @@ export const detectFileSignature = (buffer: Buffer): DetectedFileType | null => 
     return { mime: "image/webp", ext: "webp" };
   }
 
+  // AVIF is an ISOBMFF/HEIF container — no fixed magic bytes at offset 0
+  // the way JPEG/PNG have, just a box structure: a 4-byte size, then an
+  // ASCII "ftyp" box type, then a 4-byte brand. "avif" (still image) and
+  // "avis" (an image sequence) are AVIF's own major brands; other
+  // ISOBMFF formats (HEIC, MP4) use a different brand in that same slot,
+  // so checking it is enough to tell AVIF apart without a real ISOBMFF
+  // parser.
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 4, 8) === "ftyp" &&
+    (buffer.toString("ascii", 8, 12) === "avif" || buffer.toString("ascii", 8, 12) === "avis")
+  ) {
+    return { mime: "image/avif", ext: "avif" };
+  }
+
   if (buffer.length >= 5 && buffer.toString("ascii", 0, 5) === "%PDF-") {
     return { mime: "application/pdf", ext: "pdf" };
+  }
+
+  // .docx (and every other OOXML format — .xlsx, .pptx) is a zip archive,
+  // so the first 4 bytes alone only prove "some zip", not "a Word doc". A
+  // zip entry's *name* is always stored as cleartext in its local file
+  // header and again in the central directory, regardless of whether the
+  // entry's own content is compressed — so a plain substring search for
+  // the one part-name unique to a Word package ("word/document.xml", vs.
+  // "xl/workbook.xml" for Excel or "ppt/presentation.xml" for PowerPoint)
+  // tells a .docx apart from any other zip without a real zip parser.
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x50 &&
+    buffer[1] === 0x4b &&
+    buffer[2] === 0x03 &&
+    buffer[3] === 0x04 &&
+    buffer.toString("latin1").includes("word/document.xml")
+  ) {
+    return {
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ext: "docx",
+    };
   }
 
   return null;

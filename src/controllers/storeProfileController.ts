@@ -12,8 +12,15 @@ import {
 import { Product, IProduct } from "../models/productModel";
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
+import { PROFILE_STATUS } from "../constants/profileStatus";
 import { toPublicMediaFile } from "../models/mediaFile";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  IMAGE_ONLY_MIME_TYPES,
+  countUploadCandidates,
+} from "../helpers/fileStorage";
 import { toPublicProduct } from "./productController";
 
 const slugify = (value: string): string =>
@@ -38,6 +45,7 @@ export const toPublicStoreProfile = (profile: IStoreProfile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
+  status: profile.status,
   slug: profile.slug,
   storeName: profile.storeName,
   description: profile.description,
@@ -86,11 +94,6 @@ export const createStoreProfile = asyncHandler(async (req: Request, res: Respons
   }
 
   const { storeName, description, categories, country, city, links } = req.body;
-
-  if (!storeName || !country) {
-    res.status(400);
-    throw new Error("Please add a store name and country");
-  }
 
   const resolvedCategories = filterValidCategories(categories);
   if (resolvedCategories.length === 0) {
@@ -166,7 +169,12 @@ export const updateMyStoreProfile = asyncHandler(async (req: Request, res: Respo
     throw new Error("You don't have a store profile yet");
   }
 
-  const { storeName, description, categories, country, city, links } = req.body;
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(403);
+    throw new Error("This profile has been banned — contact support");
+  }
+
+  const { storeName, description, categories, country, city, links, status } = req.body;
 
   if (storeName) profile.storeName = storeName;
   if (description !== undefined) profile.description = description;
@@ -197,6 +205,11 @@ export const updateMyStoreProfile = asyncHandler(async (req: Request, res: Respo
     profile.categories = resolvedCategories;
   }
 
+  // Validated (updateStoreProfileSchema) to only ever be
+  // 'active'/'inactive' — self-service never reaches 'banned', same as
+  // every other pillar profile's own update endpoint.
+  if (status !== undefined) profile.status = status;
+
   await profile.save();
 
   res.status(200).json(toPublicStoreProfile(profile));
@@ -213,7 +226,20 @@ export const uploadStoreLogo = asyncHandler(async (req: Request, res: Response) 
     throw new Error("You don't have a store profile yet");
   }
 
-  const { results, errorLogs } = await uploadHandler({ req, visibility: FILE_VISIBILITY.PUBLIC });
+  // Exactly one source — a logo is one image, never a batch. Without
+  // this, uploadHandler would save every file/base64/url candidate
+  // present and only keep results[0], silently orphaning the rest on
+  // disk (same bug jobController.uploadContract had).
+  if (countUploadCandidates(req) !== 1) {
+    res.status(400);
+    throw new Error("Attach exactly one logo image");
+  }
+
+  const { results, errorLogs } = await uploadHandler({
+    req,
+    visibility: FILE_VISIBILITY.PUBLIC,
+    allowedMimeTypes: IMAGE_ONLY_MIME_TYPES,
+  });
   const saved = results[0];
 
   if (!saved) {
@@ -264,7 +290,11 @@ export const searchStores = asyncHandler(async (req: Request, res: Response) => 
   const { page, limit, skip } = paginationParams(req);
   const { category, country } = req.query as { category?: string; country?: string };
 
-  const match: Record<string, unknown> = { isVerified: true, currentSubscription: { $ne: null } };
+  const match: Record<string, unknown> = {
+    isVerified: true,
+    status: PROFILE_STATUS.ACTIVE,
+    currentSubscription: { $ne: null },
+  };
 
   if (category && Object.values(MATERIAL_CATEGORY).includes(category as MaterialCategory)) {
     match.categories = category;
@@ -335,6 +365,15 @@ export const getStore = asyncHandler(async (req: Request, res: Response) => {
   if (!profile) {
     res.status(404);
     throw new Error("Store not found");
+  }
+
+  // Banned hides the page outright — a moderation action, not a
+  // subscription lapse. Inactive (on a break) falls through to the
+  // normal subscription check below instead, same as any other
+  // unsubscribed store.
+  if (profile.status === PROFILE_STATUS.BANNED) {
+    res.status(200).json({ available: false, message: "This store is not currently available." });
+    return;
   }
 
   const subscription = profile.currentSubscription

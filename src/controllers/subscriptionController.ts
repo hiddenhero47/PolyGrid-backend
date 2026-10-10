@@ -28,16 +28,6 @@ export const grantSubscription = asyncHandler(async (req: Request, res: Response
   const admin = req.user as IUser;
   const { userId, planTier, paymentProviderId, paymentId, autoRenew } = req.body;
 
-  if (!userId || !planTier) {
-    res.status(400);
-    throw new Error("Please add userId and planTier");
-  }
-
-  if (!mongoose.Types.ObjectId.isValid(userId)) {
-    res.status(400);
-    throw new Error("Invalid user id");
-  }
-
   const user = await User.findById(userId);
   if (!user) {
     res.status(404);

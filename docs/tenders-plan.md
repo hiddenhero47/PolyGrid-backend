@@ -62,11 +62,13 @@ that became possible).
 
 ### Who can do what
 
-**Posting** a `TenderProject` requires a subscribed `ClientProfile`
-(`loadEligibleClientProfile`, `clientProfileController.ts`) — never
-`isVerified`, since posting doesn't carry the same physical-safety stakes
-bidding/applying does (see siteforce-plan.md's research). This replaced
-an earlier version gated on the bare `User` via `authMiddleware.requireActiveSubscription`
+**Posting** a `TenderProject` requires a verified, subscribed
+`ClientProfile` (`loadEligibleClientProfile`, `clientProfileController.ts`)
+— a contractor who's awarded the project is about to travel to an
+address the poster controls, the same physical-safety stakes
+bidding/applying carries (see siteforce-plan.md's research), just on the
+other side of the transaction. This replaced an earlier version gated on
+the bare `User` via `authMiddleware.requireActiveSubscription`
 (built in Phase 1.5, unused until Tenders first shipped) — once
 `ClientProfile` existed as a real profile posters could be reviewed
 through, checking it directly became the more consistent choice, the
