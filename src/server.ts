@@ -22,6 +22,15 @@ const startServer = async (): Promise<void> => {
   try {
     await connectDB();
 
+    // Deployment setup (first Super Admin, placeholder verification
+    // templates — see helpers/deploymentSetup.ts) is deliberately NOT run
+    // here. PM2 restarts this process on every deploy (every push to
+    // main), and the tasks are idempotent no-ops after the first real
+    // run — running them on every single restart would just be dead
+    // weight forever. Call POST /api/deployment/setup (time-window-
+    // guarded, see routes/deploymentRoutes.ts) instead, the one time it's
+    // actually needed.
+
     // Same reasoning as house-maduekwe-backend's server.js: compile every
     // email template once at boot, so a broken/missing template file fails
     // loudly at startup instead of the first time something tries to send
