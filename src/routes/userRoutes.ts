@@ -17,6 +17,7 @@ import {
   registerAdmin,
   getUsers,
   changeUserRole,
+  setAccountStatus,
 } from "../controllers/userController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { verifyIdentity } from "../middleware/verifyIdentityMiddleware";
@@ -37,6 +38,7 @@ import {
   resetPasswordSchema,
   registerAdminSchema,
   changeUserRoleSchema,
+  setAccountStatusSchema,
 } from "../validators/user/userValidator";
 
 const router = express.Router();
@@ -89,6 +91,12 @@ router.patch(
   secureRole(SYSTEM_ROLE.SUPER_ADMIN),
   validateBody(changeUserRoleSchema),
   changeUserRole,
+);
+router.patch(
+  "/:id/account-status",
+  secureRole(SYSTEM_ROLE.SUPER_ADMIN),
+  validateBody(setAccountStatusSchema),
+  setAccountStatus,
 );
 
 export default router;

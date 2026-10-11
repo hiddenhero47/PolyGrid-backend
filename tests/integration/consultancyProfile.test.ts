@@ -252,6 +252,131 @@ describe("GET /api/consultancy-profiles/me and PATCH", () => {
   });
 });
 
+describe("POST /api/consultancy-profiles/me/avatar and account-avatar fallback", () => {
+  it("uploads an avatar and replaces the old one on disk", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+    const token = generateToken(user);
+
+    const uploaded = await request(app)
+      .post("/api/consultancy-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar.png");
+
+    expect(uploaded.status).toBe(200);
+    expect(uploaded.body.avatar.mime).toBe("image/png");
+    expect(uploaded.body.avatar.storagePath).toBeUndefined();
+    const firstFileName = uploaded.body.avatar.fileName;
+    const publicDir = path.join(process.env.STORAGE_ROOT as string, "public");
+    expect(fs.readdirSync(publicDir)).toContain(firstFileName);
+
+    const replaced = await request(app)
+      .post("/api/consultancy-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar2.png");
+
+    expect(replaced.status).toBe(200);
+    expect(fs.readdirSync(publicDir)).not.toContain(firstFileName);
+  });
+
+  it("rejects an upload with no file and with more than one file", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+    const token = generateToken(user);
+
+    const none = await request(app)
+      .post("/api/consultancy-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`);
+    expect(none.status).toBe(400);
+
+    const two = await request(app)
+      .post("/api/consultancy-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "a.png")
+      .attach("file2", TEST_PNG_BUFFER, "b.png");
+    expect(two.status).toBe(400);
+  });
+
+  it("falls back to the account avatar on /me and the public view when the profile has none of its own", async () => {
+    const user = await createUser();
+    const profile = await createConsultancyProfile({ user, slug: "fallback-check" });
+
+    await User.updateOne(
+      { _id: user._id },
+      { avatar: { fileName: "acct.png", storagePath: "/tmp/acct.png", mime: "image/png", size: 10, url: "/public/acct.png" } },
+    );
+
+    const mine = await request(app)
+      .get("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+    expect(mine.body.avatar.url).toBe("/public/acct.png");
+
+    // The public single-view endpoint applies the same fallback — but only
+    // once actually viewable (verified + subscribed), same gate every other
+    // field on this profile is already behind.
+    await ConsultancyProfile.updateOne({ _id: profile._id }, { isVerified: true });
+    const subscribedUser = await createUserWithActiveSubscription();
+    await ConsultancyProfile.updateOne(
+      { _id: profile._id },
+      { currentSubscription: subscribedUser.currentSubscription },
+    );
+
+    const publicView = await request(app).get("/api/consultancy-profiles/fallback-check");
+    expect(publicView.body.avatar?.url).toBe("/public/acct.png");
+  });
+
+  it("prefers the profile's own avatar over the account avatar once one is set", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+    const token = generateToken(user);
+
+    await User.updateOne(
+      { _id: user._id },
+      { avatar: { fileName: "acct.png", storagePath: "/tmp/acct.png", mime: "image/png", size: 10, url: "/public/acct.png" } },
+    );
+
+    await request(app)
+      .post("/api/consultancy-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "own.png");
+
+    const mine = await request(app)
+      .get("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(mine.body.avatar.url).not.toBe("/public/acct.png");
+    expect(mine.body.avatar.mime).toBe("image/png");
+  });
+
+  it("leaves avatar undefined when neither the profile nor the account has one", async () => {
+    const user = await createUser();
+    await createConsultancyProfile({ user });
+
+    const mine = await request(app)
+      .get("/api/consultancy-profiles/me")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(mine.body.avatar).toBeUndefined();
+  });
+
+  it("does NOT apply the account-avatar fallback in search results", async () => {
+    const user = await createUserWithActiveSubscription();
+    await createConsultancyProfile({
+      user,
+      currentSubscription: user.currentSubscription,
+      isVerified: true,
+    });
+
+    await User.updateOne(
+      { _id: user._id },
+      { avatar: { fileName: "acct.png", storagePath: "/tmp/acct.png", mime: "image/png", size: 10, url: "/public/acct.png" } },
+    );
+
+    const res = await request(app).get("/api/consultancy-profiles");
+    expect(res.body.data[0].avatar).toBeUndefined();
+  });
+});
+
 describe("GET /api/consultancy-profiles/:idOrSlug", () => {
   it("resolves the URL (200) but withholds content when not currently subscribed", async () => {
     const user = await createUser();

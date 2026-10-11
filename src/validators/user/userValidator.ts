@@ -1,5 +1,5 @@
 import * as yup from "yup";
-import { ACCOUNT_TYPE, SYSTEM_ROLE } from "../../models/userModel";
+import { ACCOUNT_TYPE, ACCOUNT_STATUS, SYSTEM_ROLE } from "../../models/userModel";
 import { optionalTrimmedString } from "../common";
 
 // Same scope as every other validator here: shape/required-ness only.
@@ -120,6 +120,15 @@ export const changeUserRoleSchema = yup
       .string()
       .oneOf(Object.values(SYSTEM_ROLE), "Invalid role")
       .required("Invalid role"),
+  })
+  .noUnknown(true);
+
+export const setAccountStatusSchema = yup
+  .object({
+    accountStatus: yup
+      .string()
+      .oneOf(Object.values(ACCOUNT_STATUS), "accountStatus must be 'active' or 'suspended'")
+      .required("accountStatus must be 'active' or 'suspended'"),
   })
   .noUnknown(true);
 

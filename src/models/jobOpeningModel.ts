@@ -57,6 +57,17 @@ export interface ICoordinates {
   lng: number;
 }
 
+// GeoJSON mirror of `coordinates`, kept in sync by the pre-save hook
+// below — MongoDB's geospatial queries ($geoNear, used by
+// jobOpeningController.listJobOpenings' lat/lng/radiusKm search) need
+// this shape and a 2dsphere index; `coordinates` itself stays the
+// plain {lat,lng} the rest of this model already uses everywhere else.
+// Never serialized to a client — same gated tier as `coordinates` itself.
+export interface IGeoPoint {
+  type: "Point";
+  coordinates: [number, number]; // [lng, lat] — GeoJSON order, not [lat,lng]
+}
+
 export interface IJobOpening extends Document {
   postedBy: Types.ObjectId;
   title: string;
@@ -74,6 +85,7 @@ export interface IJobOpening extends Document {
   generalArea: IGeneralArea;
   // Gated — see the file-level comment above.
   coordinates?: ICoordinates;
+  location?: IGeoPoint;
   address?: string;
   googleMapsUrl?: string;
   contactInfo?: string;
@@ -138,6 +150,10 @@ const jobOpeningSchema = new Schema<IJobOpening>(
     employmentType: { type: String, enum: Object.values(EMPLOYMENT_TYPE), required: true },
     generalArea: { type: generalAreaSchema, required: true },
     coordinates: { type: coordinatesSchema },
+    location: {
+      type: { type: String, enum: ["Point"] },
+      coordinates: { type: [Number] },
+    },
     address: { type: String },
     googleMapsUrl: { type: String },
     contactInfo: { type: String },
@@ -161,6 +177,20 @@ const jobOpeningSchema = new Schema<IJobOpening>(
 
 jobOpeningSchema.index({ status: 1, category: 1, createdAt: -1 });
 jobOpeningSchema.index({ postedBy: 1, createdAt: -1 });
+jobOpeningSchema.index({ location: "2dsphere" });
+
+// Keeps `location` (GeoJSON, what $geoNear needs) derived from
+// `coordinates` (the plain {lat,lng} every create/update path already
+// sets) — one place, so neither createJobOpening nor updateMyJobOpening
+// has to remember to set both.
+jobOpeningSchema.pre("save", function (this: IJobOpening, next) {
+  if (this.isModified("coordinates")) {
+    this.location = this.coordinates
+      ? { type: "Point", coordinates: [this.coordinates.lng, this.coordinates.lat] }
+      : undefined;
+  }
+  next();
+});
 
 export const JobOpening: Model<IJobOpening> = mongoose.model<IJobOpening>(
   "JobOpening",

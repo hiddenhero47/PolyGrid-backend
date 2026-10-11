@@ -855,3 +855,47 @@ export const changeUserRole = asyncHandler(async (req: Request, res: Response) =
     user: { id: user._id, email: user.email, systemRole: user.systemRole },
   });
 });
+
+// @desc    Suspend or reinstate a user's account — a platform-wide kill
+//          switch, independent of any one business profile's own status
+//          (constants/profileStatus.ts, which only hides that profile).
+//          Enforced in authMiddleware.getAuthenticatedUser, so it takes
+//          effect on the very next request. Same self/Super-Admin guards
+//          as changeUserRole above.
+// @route   PATCH /api/users/:id/account-status
+// @access  Private (Super Admin only)
+export const setAccountStatus = asyncHandler(async (req: Request, res: Response) => {
+  const id = req.params.id as string;
+  const { accountStatus } = req.body;
+  const requester = req.user as IUser;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid user id");
+  }
+
+  const user = await User.findById(id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  if (user._id.toString() === requester._id.toString()) {
+    res.status(400);
+    throw new Error("You cannot suspend your own account");
+  }
+
+  if (user.systemRole === SYSTEM_ROLE.SUPER_ADMIN) {
+    res.status(400);
+    throw new Error("Cannot suspend the Super Admin");
+  }
+
+  user.accountStatus = accountStatus;
+  await user.save();
+
+  res.status(200).json({
+    message: "Account status updated successfully",
+    user: { id: user._id, email: user.email, accountStatus: user.accountStatus },
+  });
+});

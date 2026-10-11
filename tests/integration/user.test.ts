@@ -10,7 +10,7 @@ import request from "supertest";
 import { authenticator } from "otplib";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
+import { createUser, createAdmin, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 import bcrypt from "bcryptjs";
@@ -618,5 +618,71 @@ describe("admin-only user management", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.user.systemRole).toBe(SYSTEM_ROLE.CUSTOMER_CARE);
+  });
+});
+
+describe("PATCH /api/users/:id/account-status", () => {
+  it("suspends a user, and their very next request gets rejected", async () => {
+    const superAdmin = await createSuperAdmin();
+    const adminToken = generateToken(superAdmin);
+    const user = await createUser();
+    const userToken = generateToken(user);
+
+    const before = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(before.status).toBe(200);
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/account-status`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ accountStatus: "suspended" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.accountStatus).toBe("suspended");
+
+    const after = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(after.status).toBe(403);
+  });
+
+  it("reinstates a suspended user", async () => {
+    const superAdmin = await createSuperAdmin();
+    const adminToken = generateToken(superAdmin);
+    const user = await createUser({ accountStatus: "suspended" });
+    const userToken = generateToken(user);
+
+    const blocked = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(blocked.status).toBe(403);
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/account-status`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ accountStatus: "active" });
+    expect(res.status).toBe(200);
+
+    const restored = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(restored.status).toBe(200);
+  });
+
+  it("prevents suspending your own account", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+
+    const res = await request(app)
+      .patch(`/api/users/${superAdmin.id}/account-status`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ accountStatus: "suspended" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a non-super-admin from suspending anyone", async () => {
+    const admin = await createAdmin();
+    const user = await createUser();
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/account-status`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ accountStatus: "suspended" });
+
+    expect(res.status).toBe(401);
   });
 });

@@ -5,12 +5,22 @@ import { ClientProfile, IClientProfile } from "../models/clientProfileModel";
 import { Subscription } from "../models/subscriptionModel";
 import { IUser } from "../models/userModel";
 import { PROFILE_STATUS } from "../constants/profileStatus";
+import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
+import { getAccountAvatar } from "../helpers/profileAvatarFallback";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  IMAGE_ONLY_MIME_TYPES,
+  countUploadCandidates,
+} from "../helpers/fileStorage";
 
-export const toPublicClientProfile = (profile: IClientProfile) => ({
+export const toPublicClientProfile = (profile: IClientProfile, fallbackAvatar?: IMediaFile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
   status: profile.status,
+  avatar: profile.avatar ? toPublicMediaFile(profile.avatar) : fallbackAvatar ? toPublicMediaFile(fallbackAvatar) : undefined,
   displayName: profile.displayName,
   bio: profile.bio,
   country: profile.country,
@@ -79,6 +89,54 @@ export const getMyClientProfile = asyncHandler(async (req: Request, res: Respons
   if (!profile) {
     res.status(404);
     throw new Error("You don't have a client profile yet");
+  }
+
+  const fallbackAvatar = profile.avatar ? undefined : await getAccountAvatar(profile.userId);
+  res.status(200).json(toPublicClientProfile(profile, fallbackAvatar));
+});
+
+// @desc    Replace my profile's own avatar — optional; the profile page
+//          falls back to the account avatar until one is set here.
+// @route   POST /api/client-profiles/me/avatar
+// @access  Private
+export const uploadAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await ClientProfile.findOne({ userId: (req.user as IUser)._id });
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a client profile yet");
+  }
+
+  if (countUploadCandidates(req) !== 1) {
+    res.status(400);
+    throw new Error("Attach exactly one avatar image");
+  }
+
+  const { results, errorLogs } = await uploadHandler({
+    req,
+    visibility: FILE_VISIBILITY.PUBLIC,
+    allowedMimeTypes: IMAGE_ONLY_MIME_TYPES,
+  });
+  const saved = results[0];
+
+  if (!saved) {
+    res.status(400);
+    throw new Error(errorLogs[0] || "No valid image provided");
+  }
+
+  const oldAvatar = profile.avatar;
+
+  profile.avatar = {
+    fileName: saved.fileName,
+    storagePath: saved.storagePath,
+    mime: saved.mime,
+    size: saved.size,
+    url: saved.url,
+  };
+  await profile.save();
+
+  if (oldAvatar) {
+    await deleteStoredFile(oldAvatar.storagePath);
   }
 
   res.status(200).json(toPublicClientProfile(profile));
@@ -150,5 +208,6 @@ export const getClientProfile = asyncHandler(async (req: Request, res: Response)
     return;
   }
 
-  res.status(200).json(toPublicClientProfile(profile));
+  const fallbackAvatar = profile.avatar ? undefined : await getAccountAvatar(profile.userId);
+  res.status(200).json(toPublicClientProfile(profile, fallbackAvatar));
 });

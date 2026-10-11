@@ -1,6 +1,7 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { PROFILE_STATUS, ProfileStatus } from "../constants/profileStatus";
 import { isValidCountryCode } from "../helpers/countryReference";
+import { IMediaFile, mediaFileSchema } from "./mediaFile";
 
 // The poster-side identity for pillars with a genuine "post something,
 // others respond" flow — PolyGrid Tenders' Project Bidding Board and
@@ -34,6 +35,9 @@ export interface IClientProfile extends Document {
   // See constants/profileStatus.ts — active by default, inactive is
   // self-service, banned is admin-only.
   status: ProfileStatus;
+  // Optional — unset by default. Falls back to the account-level
+  // User.avatar when unset (see helpers/profileAvatarFallback.ts).
+  avatar?: IMediaFile;
   displayName: string;
   bio?: string;
   country: string;
@@ -53,6 +57,7 @@ const clientProfileSchema = new Schema<IClientProfile>(
     isVerified: { type: Boolean, default: false },
     verification: { type: Schema.Types.ObjectId, ref: "Verification", default: null },
     status: { type: String, enum: Object.values(PROFILE_STATUS), default: PROFILE_STATUS.ACTIVE },
+    avatar: { type: mediaFileSchema },
     displayName: { type: String, required: [true, "Please add a display name"], trim: true },
     bio: { type: String },
     country: {

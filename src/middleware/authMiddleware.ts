@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import asyncHandler from "express-async-handler";
 import { Request, Response, NextFunction } from "express";
-import { User, IUser, SystemRole } from "../models/userModel";
+import { User, IUser, SystemRole, ACCOUNT_STATUS } from "../models/userModel";
 import { Subscription, ISubscription } from "../models/subscriptionModel";
 import { AppError } from "./errorMiddleware";
 
@@ -28,6 +28,15 @@ export const getAuthenticatedUser = async (token: string): Promise<IUser> => {
     throw new Error("SESSION_INVALID");
   }
 
+  // Platform-wide kill switch (userModel.ts's ACCOUNT_STATUS) — checked
+  // here, not in individual controllers, so a suspension takes effect on
+  // literally every route (and the Socket.IO handshake, which calls this
+  // same function) the moment it's set, with nothing else to remember to
+  // guard.
+  if (user.accountStatus === ACCOUNT_STATUS.SUSPENDED) {
+    throw new Error("ACCOUNT_SUSPENDED");
+  }
+
   return user;
 };
 
@@ -44,6 +53,11 @@ const handleAuthError = (error: unknown, res: Response): never => {
 
   if (err.message === "SESSION_INVALID") {
     throw new Error("Session expired. Please login again.");
+  }
+
+  if (err.message === "ACCOUNT_SUSPENDED") {
+    res.status(403);
+    throw new Error("Your account has been suspended. Contact support.");
   }
 
   if (err.message === "USER_NOT_FOUND") {

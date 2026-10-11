@@ -29,6 +29,8 @@ import laborProfileRoutes from "./routes/laborProfileRoutes";
 import jobOpeningRoutes from "./routes/jobOpeningRoutes";
 import adminProfileRoutes from "./routes/adminProfileRoutes";
 import deploymentRoutes from "./routes/deploymentRoutes";
+import statsRoutes from "./routes/statsRoutes";
+import notificationRoutes from "./routes/notificationRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { downloadDigitalStoreFile } from "./controllers/digitalStoreController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
@@ -100,6 +102,8 @@ const createApp = (): Express => {
   app.use("/api/job-openings", jobOpeningRoutes);
   app.use("/api/admin/profiles", adminProfileRoutes);
   app.use("/api/deployment", deploymentRoutes);
+  app.use("/api/stats", statsRoutes);
+  app.use("/api/notifications", notificationRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

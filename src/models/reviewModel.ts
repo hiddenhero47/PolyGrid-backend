@@ -35,6 +35,15 @@ export interface IReview extends Document {
   comment?: string;
   sourceType: ReviewSourceType;
   sourceId: Types.ObjectId;
+  // Moderation — soft hide (reversible, keeps the record) and hard delete
+  // (reviewController.deleteReview) are both supported; a hidden review's
+  // rating is backed out of its profile's ratingAverage/ratingCount
+  // (reviewController.reverseReviewFromProfile) and reapplied if unhidden,
+  // so a profile's visible rating never includes a review nobody can see.
+  isHidden: boolean;
+  hiddenBy?: Types.ObjectId;
+  hiddenReason?: string;
+  hiddenAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,6 +61,10 @@ const reviewSchema = new Schema<IReview>(
       enum: Object.values(REVIEW_SOURCE_TYPE),
     },
     sourceId: { type: Schema.Types.ObjectId, required: true, refPath: "sourceType" },
+    isHidden: { type: Boolean, default: false },
+    hiddenBy: { type: Schema.Types.ObjectId, ref: "User" },
+    hiddenReason: { type: String },
+    hiddenAt: { type: Date },
   },
   { timestamps: true },
 );

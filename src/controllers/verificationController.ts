@@ -17,6 +17,8 @@ import { buildFormSchema } from "../validators/verification/templateFormSchema";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
 import { pickDefinedFields } from "../helpers/sanitize";
 import { parseMultipartData } from "../helpers/parseMultipartData";
+import { NOTIFICATION_TYPE } from "../models/notificationModel";
+import { notify } from "../helpers/notify";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -329,6 +331,16 @@ export const approveVerification = asyncHandler(async (req: Request, res: Respon
     { isVerified: true, verification: verification._id },
   );
 
+  const profile = await ProfileModel.findById(verification.profileId).select("userId");
+  if (profile) {
+    await notify(
+      profile.userId as mongoose.Types.ObjectId,
+      NOTIFICATION_TYPE.VERIFICATION_APPROVED,
+      "Your verification was approved",
+      { verificationId: verification.id },
+    );
+  }
+
   res.status(200).json(verification);
 });
 
@@ -356,6 +368,17 @@ export const rejectVerification = asyncHandler(async (req: Request, res: Respons
   verification.reviewedBy = admin._id as mongoose.Types.ObjectId;
   verification.reviewedAt = new Date();
   await verification.save();
+
+  const ProfileModel = PROFILE_MODEL_REGISTRY[verification.profileType as ProfileType];
+  const profile = await ProfileModel.findById(verification.profileId).select("userId");
+  if (profile) {
+    await notify(
+      profile.userId as mongoose.Types.ObjectId,
+      NOTIFICATION_TYPE.VERIFICATION_REJECTED,
+      "Your verification was rejected",
+      { verificationId: verification.id, reason },
+    );
+  }
 
   res.status(200).json(verification);
 });

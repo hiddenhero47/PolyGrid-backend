@@ -20,6 +20,8 @@ import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
+import { NOTIFICATION_TYPE } from "../models/notificationModel";
+import { notify } from "../helpers/notify";
 import {
   uploadHandler,
   deleteStoredFile,
@@ -365,8 +367,20 @@ export const getMyJobOpenings = asyncHandler(async (req: Request, res: Response)
 //          + subscribed) worker. Only ever returns the public tier
 //          (generalArea, never exact coordinates/address/contact) — see
 //          getJobOpening for why.
-// @route   GET /api/job-openings?category=&country=
+// @route   GET /api/job-openings?category=&country=&lat=&lng=&radiusKm=
 // @access  Private (eligible worker only)
+//
+// `lat`/`lng` are plain numbers, however the caller got them — their own
+// browser's geolocation, a typed-in coordinate, whatever the frontend's
+// location picker produced. This endpoint doesn't care, and never asked
+// for an address lookup provider; it just runs a $geoNear against
+// JobOpening.location (see that model's pre-save hook). `distanceKm` is
+// the only location detail this ever returns for a non-accepted worker —
+// never the opening's actual coordinates, same gated-tier rule
+// toPublicJobOpening already enforces everywhere else.
+const DEFAULT_RADIUS_KM = 50;
+const MAX_RADIUS_KM = 500;
+
 export const listJobOpenings = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
   const eligible = await loadEligibleLaborProfile(requester._id);
@@ -380,7 +394,13 @@ export const listJobOpenings = asyncHandler(async (req: Request, res: Response) 
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const skip = (page - 1) * limit;
 
-  const { category, country } = req.query as { category?: string; country?: string };
+  const { category, country, lat, lng, radiusKm } = req.query as {
+    category?: string;
+    country?: string;
+    lat?: string;
+    lng?: string;
+    radiusKm?: string;
+  };
 
   const filter: Record<string, unknown> = { status: JOB_OPENING_STATUS.OPEN };
 
@@ -391,6 +411,59 @@ export const listJobOpenings = asyncHandler(async (req: Request, res: Response) 
     filter["generalArea.country"] = String(country).toUpperCase();
   }
 
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  const hasGeo =
+    lat !== undefined &&
+    lng !== undefined &&
+    Number.isFinite(latNum) &&
+    Number.isFinite(lngNum) &&
+    latNum >= -90 &&
+    latNum <= 90 &&
+    lngNum >= -180 &&
+    lngNum <= 180;
+
+  if (hasGeo) {
+    // $geoNear hard-requires the 2dsphere index to already exist server-side
+    // (it errors outright otherwise) — unlike an ordinary query, which just
+    // degrades to a collection scan if its index isn't built yet. Mongoose
+    // builds indexes in the background on connect; `.init()` just awaits
+    // that (and is a no-op once it's done), so this never races a cold
+    // start.
+    await JobOpening.init();
+
+    const radiusMeters = Math.min(Number(radiusKm) > 0 ? Number(radiusKm) : DEFAULT_RADIUS_KM, MAX_RADIUS_KM) * 1000;
+
+    const pipeline = [
+      {
+        $geoNear: {
+          near: { type: "Point" as const, coordinates: [lngNum, latNum] as [number, number] },
+          distanceField: "distanceMeters",
+          maxDistance: radiusMeters,
+          query: filter,
+          spherical: true,
+        },
+      },
+    ];
+
+    const [openings, totalResult] = await Promise.all([
+      JobOpening.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
+      JobOpening.aggregate([...pipeline, { $count: "total" }]),
+    ]);
+
+    const total = totalResult[0]?.total ?? 0;
+
+    res.status(200).json({
+      data: openings.map((doc) => ({
+        ...toPublicJobOpening(doc as IJobOpening),
+        id: doc._id,
+        distanceKm: Math.round((doc.distanceMeters / 1000) * 10) / 10,
+      })),
+      pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    });
+    return;
+  }
+
   const [openings, total] = await Promise.all([
     JobOpening.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
     JobOpening.countDocuments(filter),
@@ -399,6 +472,37 @@ export const listJobOpenings = asyncHandler(async (req: Request, res: Response) 
   res.status(200).json({
     data: openings.map(toPublicJobOpening),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+  });
+});
+
+// @desc    Public teaser for the SiteForce job board — counts only, same
+//          "give an anonymous visitor a reason to subscribe without
+//          exposing any single listing" shape as
+//          tenderProjectController.getPublicTenderSummary. The board
+//          itself stays gated behind a verified, subscribed LaborProfile
+//          (listJobOpenings above).
+// @route   GET /api/job-openings/public-summary?country=
+// @access  Public
+export const getPublicJobOpeningSummary = asyncHandler(async (req: Request, res: Response) => {
+  const { country } = req.query as { country?: string };
+
+  const match: Record<string, unknown> = { status: JOB_OPENING_STATUS.OPEN };
+  if (country) {
+    match["generalArea.country"] = String(country).toUpperCase();
+  }
+
+  const [totalOpen, byCategory] = await Promise.all([
+    JobOpening.countDocuments(match),
+    JobOpening.aggregate([
+      { $match: match },
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]),
+  ]);
+
+  res.status(200).json({
+    totalOpen,
+    byCategory: byCategory.map((c) => ({ category: c._id, count: c.count })),
   });
 });
 
@@ -707,6 +811,13 @@ export const acceptApplication = asyncHandler(async (req: Request, res: Response
   }
   await opening.save();
 
+  await notify(
+    application.applicant as mongoose.Types.ObjectId,
+    NOTIFICATION_TYPE.JOB_APPLICATION_ACCEPTED,
+    `Your application for "${opening.title}" was accepted`,
+    { jobOpeningId: opening.id, jobId: job.id },
+  );
+
   res.status(200).json({ ...toPublicApplication(application), job, opening: toPublicJobOpening(opening) });
 });
 
@@ -740,6 +851,13 @@ export const rejectApplication = asyncHandler(async (req: Request, res: Response
 
   application.status = APPLICATION_STATUS.REJECTED;
   await application.save();
+
+  await notify(
+    application.applicant as mongoose.Types.ObjectId,
+    NOTIFICATION_TYPE.JOB_APPLICATION_REJECTED,
+    `Your application for "${opening.title}" was not accepted`,
+    { jobOpeningId: opening.id },
+  );
 
   res.status(200).json(toPublicApplication(application));
 });

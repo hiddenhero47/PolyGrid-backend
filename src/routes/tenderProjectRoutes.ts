@@ -14,6 +14,7 @@ import {
   getMyBids,
   getProjectBids,
   awardBid,
+  getPublicTenderSummary,
 } from "../controllers/tenderProjectController";
 import { protect } from "../middleware/authMiddleware";
 import { validateBody } from "../validators/validate";
@@ -35,6 +36,9 @@ router.post("/", protect, validateBody(createTenderProjectSchema), createTenderP
 router.get("/", protect, listTenderProjects);
 router.get("/me", protect, getMyTenderProjects);
 router.get("/bids/mine", protect, getMyBids);
+// Public, unauthenticated — must stay registered before the "/:id"
+// wildcard below, or that catch-all would swallow this literal path.
+router.get("/public-summary", getPublicTenderSummary);
 
 router.get("/:id", protect, getTenderProject);
 router.patch("/:id", protect, validateBody(updateTenderProjectSchema), updateMyTenderProject);

@@ -21,3 +21,9 @@ export const reportMessageSchema = yup
     reason: yup.string().trim().required("A reason is required"),
   })
   .noUnknown(true);
+
+export const resolveMessageReportSchema = yup
+  .object({
+    redactMessage: yup.boolean().notRequired(),
+  })
+  .noUnknown(true);
