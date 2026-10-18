@@ -7,11 +7,19 @@ time if you'd rather design incrementally instead of all at once.
 **Platform:** Responsive web — one set of pages, designed to work on a
 phone browser and a laptop, not a separate native app.
 
-**Visual direction:** left open for Stitch to propose. One steer: this is
-a construction/engineering marketplace — the mood should read as
-professional, trustworthy, and industrial-but-modern (think site safety
-signage, structural drafting, steel/concrete materials — not a flashy
-consumer app). No fixed palette/logo yet.
+**Visual direction:** led by color, not by a prescriptive layout
+metaphor — §5 (Theming) gives the actual palette for Light and Dark,
+extracted/sourced from real reference sites rather than described in
+the abstract. Beyond the palette and the form-state spec in §3,
+treat composition, motif, and page rhythm as open — the first pass at
+this doc was too constraining for Stitch's first attempt, so from here
+on, give it (and any human builder) room to interpret rather than a
+fixed metaphor to follow literally. §A.1 (Home) does call out one
+concrete structural steer — a hero section leads the page, full stop —
+sourced from a specific reference site; everything past that is open.
+Two concept marks exist (`docs/assets/brand/logo-concept-a.svg`,
+`-b.svg`) but neither the final mark nor the exact typography is locked
+in yet — see the open questions at the end of this doc.
 
 **How to read the route notes:** every action below has a small
 `→ METHOD /path` note. That's the backend endpoint it already calls —
@@ -206,11 +214,239 @@ One thing still true as before:
   library choice only — nothing here changes any route or payload shape.
 - **Public teaser, gated board.** Both the Tenders bidding board and the
   SiteForce job board follow the same shape: a public, unauthenticated
-  counts-only page (open total + per-category breakdown, see §A.5a/
-  §A.15a) that exists purely to show there's real activity, next to the
+  counts-only page (open total + per-category breakdown, see §A.18/
+  §A.19) that exists purely to show there's real activity, next to the
   actual board, which still 403s until the viewer has an eligible,
   subscribed profile. Never let the teaser page link directly into a
   specific listing — there isn't one to show.
+
+---
+
+## 3. Form components — states & specs
+
+Every form control in this product — text input, textarea, select, date
+select, checkbox, radio, toggle, multi-select/chips, the two file-upload
+flavors from §2, search/filter inputs — is specified against the same
+five states, so Stitch (or whoever builds this by hand) only ever
+designs a component once per state, not once per page:
+
+1. **Normal** — resting, unfocused. Empty fields show placeholder text
+   in the muted/secondary text color; never rely on the placeholder as
+   a label substitute — every field keeps its real label visible above
+   or beside it even when empty.
+2. **Filled / Selected** — has a value, not currently focused. A select
+   shows the chosen option's label (not a placeholder); a date select
+   shows the formatted date; a checkbox/radio shows its checked mark; a
+   toggle shows its on position. Distinguish this from Normal mainly
+   through the value itself, not a different border/background — unless
+   the design specifically wants a "has a value" affordance (e.g. a
+   filled vs. outline input look), keep the container identical so nothing
+   jumps when a field goes from empty to filled.
+3. **Active** — currently focused: keyboard tab-in, a click, or an open
+   dropdown/date-picker panel. Gets the most visually assertive
+   treatment — a focus ring/border in the accent color — meeting WCAG's
+   visible-focus requirement. This is the one state that must never be
+   dropped or left to the browser's default outline, since that default
+   won't match either theme.
+4. **Error** — failed validation, whether a client-side shape check or a
+   400 from the matching backend endpoint. Border/icon in the semantic
+   error color (never the brand accent — keep those two visually
+   distinct), an inline error message directly below the field, and
+   `aria-invalid`/`aria-describedby` wired to that message. Error can
+   combine with Filled (a value was entered and it's still wrong) or
+   with Normal (a required field left empty on submit) — design both
+   combinations, not just one.
+5. **Disabled** — not editable right now, and visually distinct from an
+   empty Normal field. Covers: a field gated on another field (`state`
+   disabled until `country` is chosen), a field locked by a business
+   rule (self-service `status` can never reach `banned`), or a submit
+   button while its request is in flight. Lower contrast/reduced
+   opacity, never the same visual weight as Normal, and never
+   focusable.
+
+**Two controls get an extra note, since this product's selects and
+dates are narrower than a generic form library's:**
+
+- **Select.** Every select here (specialization, specialty, skill(s),
+  category, country/state/city, pay type, employment type, profile
+  type, …) is a closed enumerated list straight from a model's own
+  `Object.values(ENUM)` or a `GET /api/reference/...` lookup — never
+  free text, and never a list the frontend invents on its own. Only add
+  search/typeahead once a list is long enough to need it (country,
+  state, city); the short fixed enums (specialization, category,
+  status) are fine as a plain dropdown.
+- **Date select.** Every date here (`startedAt`/`completedAt` on a
+  portfolio item, `applicationDeadline`, …) is a calendar date with no
+  time component — one calendar-picker control is enough, don't build
+  separate day/month/year dropdowns. `completedAt` must visually carry
+  the "can't be before `startedAt`" rule the backend already enforces —
+  grey out the earlier dates once `startedAt` is picked, rather than
+  only surfacing that as an Error state after submit.
+
+Reuse this same five-state spec for the two file-upload flavors from
+§2: Normal = empty dropzone, Filled/Selected = the attached file's name
+plus a thumbnail for images, Active = drag-hover highlighted, Error =
+wrong file type/too large with the specific reason shown inline,
+Disabled = the relevant cap already reached (`MAX_PORTFOLIO_ITEMS`,
+`MAX_MEDIA_PER_ITEM`, `MAX_OPENING_FILES`, …).
+
+---
+
+## 4. Build roadmap — phases, priority, and Stitch vs. hand-built
+
+Some pages are good first-pass candidates for Stitch — it's strong at a
+static visual layout, weaker at an interactive state machine; others
+are easier to just hand-build directly against the state spec in §3.
+"Priority" here means "what has to exist before the next phase is even
+testable," not importance in the abstract — Phase 0 blocks everything
+else, so it goes first regardless of how exciting it is.
+
+| Phase | Contents | Priority | Stitch? | Why |
+|---|---|---|---|---|
+| **0 — Foundation** | Theming tokens (§5), the form-component state set (§3), shared patterns (§2): pagination, the "unavailable" state, status badges | Must exist first — every later phase reuses it | Yes, for the static look of each state; the state *logic* (which state fires when) is hand-built regardless | Doing this once, correctly, is what stops every later page from reinventing its own input/button/badge look |
+| **1 — Public / Basic View (§A)** | Home, Register, Login, Forgot/Reset, all four pillars' browse + profile pages, the two public board teasers (§A.18/§A.19), the top-rated strip (§A.1a) | Highest — nobody can sign up or be found without it | Yes — these are mostly static/read-only pages, Stitch's strongest case | Conversion-facing, first impression, worth the most visual polish per hour spent |
+| **2 — Account & Business Profile core (§B.1–B.5)** | Dashboard Home, Account Settings, Business Profile Hub + all six profile editors, Verification Center, Subscription & Billing | High — a provider can't go live without this | Mixed — the editors' forms are good Stitch candidates (apply §3 directly); Verification Center's "look up what's required, render that" dynamic form isn't a static layout — build that one by hand | Everything downstream (posting a tender, applying to a job, selling a product) needs a verified, subscribed profile first |
+| **3 — Transactional dashboard (§B.6–B.17)** | My Jobs, Tenders both sides, SiteForce both sides (incl. geo search/location picker), Store Orders, Digital Purchases, Contacts, Messages, Notifications | High — this is the actual product | No, mostly hand-built | Sealed bidding/applications, the two-tier reveal, real-time chat, and the live notification feed are all interaction-heavy; a static Stitch mock would need near-total rebuilding anyway |
+| **4 — Admin Dashboard (§SECTION C)** | Everything in §C, including review moderation (§C.3b) and platform stats (§C.15) | Lower — internal-only; can trail Phase 3 a little if the team handles moderation manually/via API meanwhile | Yes — data-table-heavy utility screens are a fast, low-risk Stitch case; visual polish matters least here | Nobody outside the team ever sees these pages |
+
+This isn't strict phase-by-phase with zero overlap — §0 and the first
+few §1 pages (Home, Register, Login) can go into Stitch the same week.
+It means: don't start §B.6's job detail page before §B.3's profile
+editors exist, since the former needs a real profile to test against.
+
+---
+
+## 5. Theming
+
+Two themes for now — **Light** and **Dark** — built on one shared token
+*structure* from day one, so a future seasonal theme (x-mas, Easter, …)
+is a palette swap, not a rebuild. This section leads with color,
+deliberately — the previous version of this section described a mood/
+metaphor ("blueprint sketch," "folded paper panels") instead of giving
+real values, and that was too constraining for Stitch to work from.
+What follows is sourced from four real reference images instead
+(saved under `docs/assets/inspiration/`), with concrete starting hex
+values. Composition, motif, and how literally any one reference gets
+followed are all open — see the intro's Visual direction note.
+
+### 5.1 Reference images
+
+- `dark-theme-inspiration-halden.jpg` — a dark fraud-detection SaaS
+  landing page. Source for the **Dark** theme's near-black surfaces and
+  its warm red-orange accent (used there for data-viz dots and
+  highlight numbers against the dark background).
+- `dark-theme-inspiration-accent-grid.webp` — a 2x2 brand-reference
+  grid: a black-and-white portrait, a glossy orange-red abstract 3D
+  mark, and a dark dashboard mockup with the same orange accent.
+  Reinforces the same red-orange accent family and shows it paired with
+  monochrome photography and a near-black dashboard UI.
+- `light-theme-palette.png` — a direct 4-color palette (not a UI
+  screenshot) — see §5.2 below, used as-is rather than extracted by eye.
+- `home-page-style-reference-exery.webp` — a dark e-commerce homepage
+  (leather goods brand). Structural reference for §A.1 Home (hero
+  section first, trust-badge row, alternating image/text feature
+  blocks, bold condensed headline type) and another real sample of the
+  same warm orange accent on a dark/black UI.
+
+### 5.2 The two themes — palettes
+
+**Light** — taken directly from `light-theme-palette.png`, a 4-color
+set, used as given rather than reinterpreted:
+
+| Token | Hex | Role |
+|---|---|---|
+| `neutral-50` (background) | `#F7F7F7` | Page background |
+| `neutral-100` (surface) | `#EEEEEE` | Card/elevated surface, default border |
+| `neutral-900` (ink) | `#393E46` | Primary text, dark UI elements |
+| `neutral-500` (muted) | `#929AAB` | Secondary text, placeholder, muted border |
+
+That palette has no accent color in it on its own — it's four
+neutrals. Pull the brand accent (below) in on top of it for anything
+that needs to read as "clickable" or "active."
+
+**Dark** — estimated by eye from the three dark-theme references above
+(not pixel-sampled — treat these as a starting point to fine-tune with
+an actual eyedropper against the saved files, not final locked values):
+
+| Token | Hex (approx.) | Role |
+|---|---|---|
+| `neutral-900` (background) | `#0B0D12` | Page background — near-black, faint cool undertone |
+| `neutral-800` (surface) | `#14171F` | Card/elevated surface |
+| `neutral-50` (ink) | `#F2F2F2` | Primary text |
+| `neutral-400` (muted) | `#9CA3AF` | Secondary text, muted border |
+
+**Shared brand accent** — the one color family all three dark
+references and the Exery home-page reference converge on
+independently: a warm red-orange. Estimated starting values, same
+caveat as Dark above:
+
+| Token | Hex (approx.) | Role |
+|---|---|---|
+| `accent-default` | `#FF5B3D` | Primary actions, active/focus state (§3), links |
+| `accent-emphasis` | `#E8482C` | Hover/pressed on top of `accent-default` |
+| `accent-subtle` | `#FF8C70` | Tints/backgrounds behind accent content, light-mode-friendly variant |
+
+Use the same three accent tokens in both themes to start — re-tune
+`accent-default` per theme only if contrast testing says it has to
+(a vivid coral that pops on near-black in Dark may need to shift
+slightly for comfortable contrast against Light's `#F7F7F7`).
+
+### 5.3 Token groups
+
+Each theme is the same flat set of token *names* (as tabulated above),
+with different values per theme — this is what makes "add a theme" a
+one-file palette swap instead of a hunt through every component. Group
+by role, not by raw color family:
+
+- **Color — Neutral scale.** The four-to-five-step ramp from §5.2
+  (background → surface → muted → ink), extended with a couple more
+  intermediate steps as real components need them.
+- **Color — Brand/Accent.** `accent-default` / `accent-emphasis` /
+  `accent-subtle` from §5.2 — carries both "this is clickable" and
+  "this is active" in different places (e.g. a selected nav item that's
+  also hoverable), so needs both a resting and a pressed/hover value.
+- **Color — Semantic/status.** Success, warning, error, info — kept
+  visually distinct from the brand accent in both themes (see §3's
+  Error state note) and tuned per theme for contrast, not shared
+  verbatim between Light and Dark. Not sourced from a reference image;
+  pick standard, accessible values and move on.
+- **Color — Surface.** Background, elevated surface/card, overlay/modal
+  scrim — at least two elevation steps per theme (`neutral-50`/
+  `neutral-100` in Light, `neutral-900`/`neutral-800` in Dark).
+- **Color — Text.** Primary (`ink`), secondary/muted, placeholder,
+  inverse (text-on-accent, e.g. a button label), link (`accent-default`).
+- **Color — Border.** Default (`neutral-100`/`neutral-800`), focus
+  (`accent-default` — see §3's Active state), error (semantic error
+  color).
+- **Color — Interactive state overlays.** Hover, active/pressed,
+  disabled — ideally as an opacity/overlay rule applied on top of a
+  base color rather than a fully separate hand-picked color per state,
+  so a new component automatically gets correct hover/disabled
+  behavior for free.
+- **Typography.** Not finalized — direction only: a technical/
+  industrial-leaning sans-serif, comfortable at both a bold condensed
+  display size (hero headlines, per the Exery reference) and a smaller
+  UI size. Exact family is an open question below.
+- **Spacing / radius / elevation.** Not finalized yet either; flagged
+  here so the token file has a slot for them once decided, rather than
+  being bolted on later as inline values.
+
+### 5.4 Brand marks (concept stage)
+
+Two concept marks exist, AI-generated drafts with no final palette
+chosen — treat both as directional, not decided:
+
+- `docs/assets/brand/logo-concept-a.svg` — a two-tone mark (rust
+  `#BE7745` + dark navy `#12263E` in the draft file).
+- `docs/assets/brand/logo-concept-b.svg` — a single-tone mark (dark navy
+  `#0D2038` in the draft file).
+
+Those hex values are whatever the generation tool happened to output —
+not the chosen brand palette; re-color both to the real
+`accent-default` (or a `currentColor` single-tone version, so the mark
+sits on either theme's ink color without a separate light/dark export)
+once §5.2's estimates are confirmed. Don't treat either file's current
+colors as final anywhere in the frontend build.
 
 ---
 
@@ -222,9 +458,17 @@ inline). This is "go find and search for what you need."
 ### A.1 Home
 **Purpose:** entry point — explain the four pillars, route into each
 one's search/browse page, and into Register/Login.
-**Layout:** hero + a card per pillar (Engineering, Tenders, Store,
-SiteForce), each linking to its browse page below. Secondary nav:
-Register, Login.
+**Layout:** a hero section leads the page, before anything else —
+that's the one non-negotiable structural rule here, per
+`docs/assets/inspiration/home-page-style-reference-exery.webp`
+(§5.1). Past the hero, loosely follow that same reference's rhythm:
+trust-badge/logo row, then alternating image/text feature blocks (one
+per pillar works well — Engineering, Tenders, Store, SiteForce — each
+getting its own section rather than being squeezed into a 4-up card
+grid), a closing CTA band, footer. Treat the exact section order/count
+past the hero as open — it's a reference for *feel and rhythm*, not a
+section-by-section template to copy exactly. Secondary nav: Register,
+Login.
 
 ### A.1a "Top rated" strip (Home + any browse page)
 Optional, reusable: "Top 5/10" cards for any one profile type, ranked by
@@ -741,3 +985,17 @@ assembled in one call instead of several.
 2. §A.1a/§A.18/§A.19 are all new, optional "give people a reason to
    subscribe" surfaces (top-rated strips, board teasers) — do you want
    all three live on launch, or held back for a later pass?
+3. §5.2's Dark palette and the shared accent are by-eye estimates off
+   the reference images, not pixel-sampled — want these run through an
+   actual eyedropper against the saved files for exact values before
+   anything gets built, or are the estimates close enough to start
+   from and refine later?
+4. Between the two concept marks (§5.4) — is one of them closer to
+   right, should both go back for another pass, or is it still too
+   early to choose between them?
+5. §4's roadmap assumes Phase 0 (theming + form states) gets built
+   before any real page — fine to lock that in, or is there a reason
+   to prototype a Phase 1 page first to pressure-test the tokens?
+6. Typography is still a placeholder description, not a chosen family
+   — any fonts you already have in mind, or leave that one to Stitch/a
+   designer to propose against §5.2's palette?

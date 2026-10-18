@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && cp -r src/emails dist/emails",
     "production": "node dist/server.js",
-    "serve": "nodemon --watch src --ext ts --exec ts-node src/server.ts",
+    "server": "nodemon --watch src --ext ts --exec ts-node src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand tests/unit",
