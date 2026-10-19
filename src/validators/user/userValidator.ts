@@ -106,6 +106,18 @@ export const resetPasswordSchema = yup
   })
   .noUnknown(true);
 
+export const resendVerificationSchema = yup
+  .object({
+    email: yup.string().trim().required("Email is required"),
+  })
+  .noUnknown(true);
+
+export const verifyEmailSchema = yup
+  .object({
+    token: yup.string().required("Token is required"),
+  })
+  .noUnknown(true);
+
 export const registerAdminSchema = yup
   .object({
     fullName: yup.string().trim().required("fullName is required"),

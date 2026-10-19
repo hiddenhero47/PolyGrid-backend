@@ -21,6 +21,7 @@ Handlebars.registerHelper("year", () => new Date().getFullYear());
 const templateRegistry: Record<string, string> = {
   forgotPassword: "../emails/forgot-password.html",
   paymentRequestDecision: "../emails/payment-request-decision.html",
+  verifyEmail: "../emails/verify-email.html",
 };
 
 const compiledTemplates: Record<string, Handlebars.TemplateDelegate> = {};

@@ -4,7 +4,12 @@ import { Request, Response, NextFunction } from "express";
 // same origins for its own handshake — one list, not two to keep in sync.
 export const ALLOWED_ORIGINS = [
   "http://localhost:3000",
-  "http://localhost:5173",
+  // polygrid-frontend's Vite dev server is fixed to :5009 (strictPort,
+  // see its vite.config.ts) — plain /api calls are proxied around CORS
+  // entirely in dev, but Socket.IO's handshake connects directly to this
+  // origin (ALLOWED_ORIGINS is shared with it, see below), so it still
+  // needs to be on this list for chat to work locally.
+  "http://localhost:5009",
   "https://polygrid.com",
   "https://www.polygrid.com",
 ]; // update to match the deployed frontend origin(s)

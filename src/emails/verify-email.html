@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Verify Your Email</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Space+Grotesk:wght@500;600&family=Hanken+Grotesk:wght@400;500&display=swap");
+      a.pg-btn:hover {
+        background-color: #e8482c !important;
+      }
+    </style>
+  </head>
+
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background: #f7f7f7;
+      font-family: 'Hanken Grotesk', Arial, sans-serif;
+    "
+  >
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding: 48px 16px">
+      <tr>
+        <td align="center">
+          <table
+            role="presentation"
+            width="560"
+            cellpadding="0"
+            cellspacing="0"
+            style="
+              width: 100%;
+              max-width: 560px;
+              background: #ffffff;
+              border: 1px solid #e2e3e7;
+              border-radius: 16px;
+            "
+          >
+            <tr>
+              <td style="padding: 36px 40px 24px">
+                <span
+                  style="
+                    font-family: 'Oswald', 'Arial Narrow', sans-serif;
+                    font-size: 18px;
+                    font-weight: 600;
+                    letter-spacing: 0.06em;
+                    text-transform: uppercase;
+                    color: #393e46;
+                  "
+                >
+                  Poly<span style="color: #ff5b3d">Grid</span>
+                </span>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 0 40px">
+                <div style="height: 1px; background: #eeeeee"></div>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 28px 40px 0">
+                <p
+                  style="
+                    margin: 0 0 10px;
+                    font-family: 'Space Grotesk', Arial, sans-serif;
+                    font-size: 12px;
+                    font-weight: 600;
+                    letter-spacing: 0.16em;
+                    text-transform: uppercase;
+                    color: #ff5b3d;
+                  "
+                >
+                  Welcome to PolyGrid
+                </p>
+                <h1
+                  style="
+                    margin: 0;
+                    font-family: 'Oswald', 'Arial Narrow', sans-serif;
+                    font-size: 24px;
+                    font-weight: 600;
+                    color: #393e46;
+                  "
+                >
+                  Verify your email
+                </h1>
+                <p
+                  style="
+                    margin: 14px 0 0;
+                    font-family: 'Hanken Grotesk', Arial, sans-serif;
+                    font-size: 14px;
+                    line-height: 1.6;
+                    color: #5e6573;
+                  "
+                >
+                  Hi {{uppercase name}}, confirm this is your email address to
+                  finish setting up your account.
+                </p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 28px 40px 0">
+                <a
+                  href="{{verifyUrl}}"
+                  class="pg-btn"
+                  style="
+                    display: inline-block;
+                    background: #ff5b3d;
+                    color: #ffffff;
+                    font-family: 'Space Grotesk', Arial, sans-serif;
+                    font-size: 13px;
+                    font-weight: 600;
+                    letter-spacing: 0.1em;
+                    text-transform: uppercase;
+                    text-decoration: none;
+                    padding: 15px 30px;
+                    border-radius: 8px;
+                  "
+                >
+                  Verify Email
+                </a>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 24px 40px 0">
+                <p
+                  style="
+                    margin: 0;
+                    font-family: 'Hanken Grotesk', Arial, sans-serif;
+                    font-size: 13px;
+                    color: #929aab;
+                  "
+                >
+                  This link expires in
+                  <strong style="color: #5e6573">{{expiresIn}}</strong>. If the
+                  button doesn't work, paste this into your browser:
+                </p>
+                <p
+                  style="
+                    margin: 8px 0 0;
+                    font-family: 'Hanken Grotesk', Arial, sans-serif;
+                    font-size: 12px;
+                    color: #929aab;
+                    word-break: break-all;
+                  "
+                >
+                  {{verifyUrl}}
+                </p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 32px 40px 36px">
+                <div style="height: 1px; background: #eeeeee; margin-bottom: 20px"></div>
+                <p
+                  style="
+                    margin: 0;
+                    font-family: 'Hanken Grotesk', Arial, sans-serif;
+                    font-size: 12px;
+                    color: #929aab;
+                  "
+                >
+                  Didn't create a PolyGrid account? You can safely ignore this
+                  email.<br /><br />
+                  © {{year}} PolyGrid
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

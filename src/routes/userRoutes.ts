@@ -14,6 +14,8 @@ import {
   logoutAll,
   requestReset,
   resetPassword,
+  resendVerification,
+  verifyEmail,
   registerAdmin,
   getUsers,
   changeUserRole,
@@ -36,6 +38,8 @@ import {
   toggleTwoFactorSchema,
   requestResetSchema,
   resetPasswordSchema,
+  resendVerificationSchema,
+  verifyEmailSchema,
   registerAdminSchema,
   changeUserRoleSchema,
   setAccountStatusSchema,
@@ -49,6 +53,8 @@ router.post("/social/google", validateBody(googleLoginSchema), googleLogin);
 router.post("/social/apple", validateBody(appleLoginSchema), appleLogin);
 router.post("/request-reset", validateBody(requestResetSchema), requestReset);
 router.post("/reset-password", validateBody(resetPasswordSchema), resetPassword);
+router.post("/resend-verification", validateBody(resendVerificationSchema), resendVerification);
+router.post("/verify-email", validateBody(verifyEmailSchema), verifyEmail);
 
 router.get("/me", protect, getMe);
 router.put("/profile", protect, validateBody(updateUserProfileSchema), updateUserProfile);

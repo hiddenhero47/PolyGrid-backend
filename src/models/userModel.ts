@@ -47,6 +47,7 @@ export type AccountStatus = (typeof ACCOUNT_STATUS)[keyof typeof ACCOUNT_STATUS]
 
 export const TOKENS = {
   RESET: "resetPassword",
+  VERIFY_EMAIL: "verifyEmail",
 } as const;
 
 export const AUTH_PROVIDER = {

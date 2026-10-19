@@ -47,6 +47,27 @@ describe("POST /api/users (register)", () => {
 
     expect(me.status).toBe(200);
     expect(me.body.email).toBe("jane@example.com");
+    expect(me.body.verified).toBe(false);
+  });
+
+  it("sends a verification email on register, without it overwriting the auth token", async () => {
+    const res = await request(app)
+      .post("/api/users")
+      .send({ fullName: "Jane Doe", email: "verify-me@example.com", password: "password123" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.token).toEqual(expect.any(String));
+    expect(res.body.verifyEmailToken).toEqual(expect.any(String));
+    expect(res.body.token).not.toBe(res.body.verifyEmailToken);
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "verify-me@example.com", template: "verifyEmail" }),
+    );
+
+    // The auth token from registration still logs them in.
+    const me = await request(app)
+      .get("/api/users/me")
+      .set("Authorization", `Bearer ${res.body.token}`);
+    expect(me.status).toBe(200);
   });
 
   it("rejects a duplicate email", async () => {
@@ -536,6 +557,79 @@ describe("password reset flow", () => {
       .send({ token: "not-a-real-token", password: "whatever123" });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("email verification flow", () => {
+  it("verifies the email from the token registration already sent", async () => {
+    const registerRes = await request(app)
+      .post("/api/users")
+      .send({ fullName: "Jane Doe", email: "jane-verify@example.com", password: "password123" });
+
+    const verifyRes = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: registerRes.body.verifyEmailToken });
+
+    expect(verifyRes.status).toBe(200);
+
+    const me = await request(app)
+      .get("/api/users/me")
+      .set("Authorization", `Bearer ${registerRes.body.token}`);
+    expect(me.body.verified).toBe(true);
+  });
+
+  it("resends a verification email, and does not reveal account existence or verified status", async () => {
+    const unverified = await createUser();
+
+    const resendRes = await request(app)
+      .post("/api/users/resend-verification")
+      .send({ email: unverified.email });
+    expect(resendRes.status).toBe(200);
+    expect(resendRes.body.verifyEmailToken).toEqual(expect.any(String));
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: unverified.email, template: "verifyEmail" }),
+    );
+
+    (sendTemplatedEmail as jest.Mock).mockClear();
+
+    const nobodyRes = await request(app)
+      .post("/api/users/resend-verification")
+      .send({ email: "nobody@example.com" });
+    expect(nobodyRes.status).toBe(200);
+    expect(nobodyRes.body.verifyEmailToken).toBeUndefined();
+    expect(nobodyRes.body.message).toBe(resendRes.body.message);
+    expect(sendTemplatedEmail).not.toHaveBeenCalled();
+
+    const verified = await createUser({ verified: true });
+    const alreadyVerifiedRes = await request(app)
+      .post("/api/users/resend-verification")
+      .send({ email: verified.email });
+    expect(alreadyVerifiedRes.body.message).toBe(resendRes.body.message);
+    expect(sendTemplatedEmail).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid or already-used verification token", async () => {
+    const invalid = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: "not-a-real-token" });
+    expect(invalid.status).toBe(400);
+
+    const registerRes = await request(app)
+      .post("/api/users")
+      .send({ fullName: "Reuse Test", email: "reuse-verify@example.com", password: "password123" });
+
+    const first = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: registerRes.body.verifyEmailToken });
+    expect(first.status).toBe(200);
+
+    // Already verified — a second use of the same token is a no-op, not
+    // an error, since the account is already in the state it asked for.
+    const second = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: registerRes.body.verifyEmailToken });
+    expect(second.status).toBe(200);
+    expect(second.body.message).toBe("Email already verified");
   });
 });
 
