@@ -1,6 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { MATERIAL_CATEGORY, MaterialCategory } from "./storeProfileModel";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
 import { IMediaFile, mediaFileSchema } from "./mediaFile";
 
@@ -148,17 +148,7 @@ const productSchema = new Schema<IProduct>(
       },
     },
     price: { type: Number, required: true, min: 0 },
-    currency: {
-      type: String,
-      required: true,
-      default: "USD",
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, required: true, default: PLATFORM_CURRENCY },
     unit: { type: String, required: [true, "Please add a unit (e.g. bag, ton, piece)"], trim: true },
     stockStatus: {
       type: String,

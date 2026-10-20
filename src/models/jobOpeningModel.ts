@@ -1,6 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 import { IMediaFile, mediaFileSchema } from "./mediaFile";
 import { LABOR_SKILL, LaborSkill } from "./laborProfileModel";
 
@@ -137,16 +137,7 @@ const jobOpeningSchema = new Schema<IJobOpening>(
     filledCount: { type: Number, default: 0, min: 0 },
     payRate: { type: Number, required: true, min: 0 },
     payType: { type: String, enum: Object.values(PAY_TYPE), required: true },
-    currency: {
-      type: String,
-      default: "USD",
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, default: PLATFORM_CURRENCY },
     employmentType: { type: String, enum: Object.values(EMPLOYMENT_TYPE), required: true },
     generalArea: { type: generalAreaSchema, required: true },
     coordinates: { type: coordinatesSchema },

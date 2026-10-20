@@ -249,6 +249,10 @@ describe("GET /api/contractor-profiles (search)", () => {
     );
     expect(match.body.data).toHaveLength(1);
     expect(match.body.data[0].slug).toBe("visible-contractor");
+    // Search results come from an aggregate() pipeline, whose plain
+    // objects have no `.id` virtual — a frontend needs this to link into
+    // the profile, so it must be patched back in explicitly.
+    expect(match.body.data[0].id).toEqual(expect.any(String));
 
     const noMatch = await request(app).get(
       `/api/contractor-profiles?specialty=${CONTRACTOR_SPECIALTY.PLUMBING}`,

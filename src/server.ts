@@ -10,6 +10,7 @@ import http from "http";
 import dotenv from "dotenv";
 dotenv.config();
 
+import mongoose from "mongoose";
 import connectDB from "./config/db";
 import createApp from "./app";
 import { initSocket } from "./socket";
@@ -21,6 +22,16 @@ const port = process.env.PORT || 4000;
 const startServer = async (): Promise<void> => {
   try {
     await connectDB();
+
+    // Mongoose builds every model's indexes in the background after
+    // connect() resolves, not before — a query/insert racing ahead of
+    // that can silently succeed past a unique constraint that isn't
+    // built yet (found via Payment's providerPaymentId uniqueness), or
+    // outright error on a hard requirement like $geoNear's 2dsphere
+    // index. Every model in the app is already registered by this point
+    // (imported transitively via createApp below), so this is one
+    // complete wait at boot, not a per-call-site workaround.
+    await Promise.all(mongoose.modelNames().map((name) => mongoose.model(name).init()));
 
     // Deployment setup (first Super Admin, placeholder verification
     // templates — see helpers/deploymentSetup.ts) is deliberately NOT run

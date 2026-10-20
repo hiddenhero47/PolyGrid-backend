@@ -7,9 +7,11 @@ import {
   createCustomerCare,
   createUserWithActiveSubscription,
   createConsultancyProfile,
+  createActiveJob,
   generateToken,
 } from "../setup/fixtures";
 import { PROFILE_TYPE } from "../../src/constants/profileTypes";
+import { JOB_STATUS } from "../../src/models/jobModel";
 
 const app = createApp();
 
@@ -96,5 +98,35 @@ describe("GET /api/stats/overview", () => {
       expect(res.body.suspendedUsers).toBeGreaterThanOrEqual(1);
       expect(res.body.profileCounts).toHaveLength(Object.values(PROFILE_TYPE).length);
     }
+  });
+
+  it("returns completedJobsGrossAmount grouped by currency (array shape, not a single cross-currency sum)", async () => {
+    // Job.currency is hard-locked to PLATFORM_CURRENCY (USD) — see
+    // currencyReference.ts — so only one group is actually reachable in
+    // practice today. The grouping logic itself stays (a $group by
+    // currency, not one blind $sum) so this is still correct if that
+    // lock is ever deliberately lifted for a second currency later.
+    const client = await createUser();
+    const provider = await createUser();
+    await createActiveJob({
+      client,
+      provider,
+      status: JOB_STATUS.COMPLETED,
+      totalAmount: 1000,
+    });
+    await createActiveJob({
+      client,
+      provider,
+      status: JOB_STATUS.COMPLETED,
+      totalAmount: 500,
+    });
+
+    const admin = await createAdmin();
+    const res = await request(app)
+      .get("/api/stats/overview")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.completedJobsGrossAmount).toEqual([{ currency: "USD", total: 1500 }]);
   });
 });

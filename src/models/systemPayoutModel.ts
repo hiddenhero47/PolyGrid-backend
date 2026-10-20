@@ -1,7 +1,7 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { PAYMENT_TARGET_TYPE, PaymentTargetType } from "./paymentModel";
 import { IPayoutAccount } from "./userModel";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField } from "../helpers/currencyReference";
 
 // The ledger of money PolyGrid actually owes someone (a provider's
 // approved payout, or a client's approved refund) once an admin has
@@ -90,16 +90,7 @@ const systemPayoutSchema = new Schema<ISystemPayout>(
     requestId: { type: Schema.Types.ObjectId, required: true },
     user: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     amount: { type: Number, required: true, min: 0 },
-    currency: {
-      type: String,
-      required: true,
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, required: true },
     status: {
       type: String,
       enum: Object.values(SYSTEM_PAYOUT_STATUS),

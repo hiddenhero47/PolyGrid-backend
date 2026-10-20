@@ -1,7 +1,7 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { PROFILE_STATUS, ProfileStatus } from "../constants/profileStatus";
 import { isValidCountryCode } from "../helpers/countryReference";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 import { IMediaFile, mediaFileSchema } from "./mediaFile";
 import { IProfileLink, profileLinkSchema, validateLinkCount, MAX_PROFILE_LINKS } from "./profileLink";
 import {
@@ -116,16 +116,7 @@ const serviceListingSchema = new Schema<IServiceListing>({
     required: true,
   },
   price: { type: Number, required: true, min: 0 },
-  currency: {
-    type: String,
-    default: "USD",
-    uppercase: true,
-    trim: true,
-    validate: {
-      validator: isValidCurrencyCode,
-      message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-    },
-  },
+  currency: { ...currencyField, default: PLATFORM_CURRENCY },
   durationMinutes: { type: Number, min: 1 },
 });
 

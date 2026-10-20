@@ -674,6 +674,45 @@ describe("admin-only user management", () => {
     expect(res.body.pagination.total).toBeGreaterThanOrEqual(3);
   });
 
+  it("lets a plain admin list users too (read-only — admin-create/role/account-status stay super_admin-only)", async () => {
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+    await createUser();
+
+    const res = await request(app).get("/api/users").set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(200);
+
+    const blocked = await request(app)
+      .post("/api/users/admin-create")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ fullName: "New Admin", email: "nope@example.com", password: "password123" });
+    expect(blocked.status).toBe(401);
+  });
+
+  it("finds a user by a case-insensitive match on email or fullName via ?q=", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+    await createUser({ fullName: "Charles Okonkwo", email: "charles.okonkwo@example.com" });
+    await createUser({ fullName: "Someone Else", email: "someone@example.com" });
+
+    const byName = await request(app)
+      .get("/api/users?q=charles")
+      .set("Authorization", `Bearer ${token}`);
+    expect(byName.body.data).toHaveLength(1);
+    expect(byName.body.data[0].email).toBe("charles.okonkwo@example.com");
+
+    const byEmail = await request(app)
+      .get("/api/users?q=OKONKWO@EXAMPLE")
+      .set("Authorization", `Bearer ${token}`);
+    expect(byEmail.body.data).toHaveLength(1);
+
+    // A regex metacharacter in the query must never throw a 500.
+    const weird = await request(app)
+      .get("/api/users?q=" + encodeURIComponent("a.b*c("))
+      .set("Authorization", `Bearer ${token}`);
+    expect(weird.status).toBe(200);
+  });
+
   it("changes a user's role", async () => {
     const superAdmin = await createSuperAdmin();
     const token = generateToken(superAdmin);

@@ -1,5 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 
 export const JOB_TYPE = {
   ENGINEERING: "engineering",
@@ -297,16 +297,7 @@ const jobSchema = new Schema<IJob>(
     oldStages: { type: [[jobStageSnapshotSchema]], default: [] },
     totalAmount: { type: Number, required: true, min: 0 },
     amountHistory: { type: [amountChangeSchema], default: [] },
-    currency: {
-      type: String,
-      default: "USD",
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, default: PLATFORM_CURRENCY },
     amountPaid: { type: Number, default: 0, min: 0 },
     amountDisbursed: { type: Number, default: 0, min: 0 },
     platformFeeCollected: { type: Number, default: 0, min: 0 },

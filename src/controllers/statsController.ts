@@ -105,9 +105,12 @@ export const getPlatformOverview = asyncHandler(async (_req: Request, res: Respo
     User.countDocuments({ accountStatus: ACCOUNT_STATUS.SUSPENDED }),
     Subscription.countDocuments({ status: SUBSCRIPTION_STATUS.ACTIVE, expiresAt: { $gt: new Date() } }),
     Job.countDocuments({ status: JOB_STATUS.COMPLETED }),
+    // Grouped by currency — a single summed total across jobs in NGN, USD,
+    // etc. would be a meaningless number, not just an imprecise one.
     Job.aggregate([
       { $match: { status: JOB_STATUS.COMPLETED } },
-      { $group: { _id: null, sum: { $sum: "$totalAmount" } } },
+      { $group: { _id: "$currency", sum: { $sum: "$totalAmount" } } },
+      { $sort: { _id: 1 as const } },
     ]),
     DigitalPurchase.countDocuments({ status: DIGITAL_PURCHASE_STATUS.SUCCESS }),
     StoreOrder.countDocuments(),
@@ -118,7 +121,10 @@ export const getPlatformOverview = asyncHandler(async (_req: Request, res: Respo
     suspendedUsers,
     activeSubscriptions,
     completedJobs,
-    completedJobsGrossAmount: completedJobsTotal[0]?.sum ?? 0,
+    completedJobsGrossAmount: completedJobsTotal.map((row) => ({
+      currency: row._id,
+      total: row.sum,
+    })),
     successfulDigitalPurchases,
     storeOrders,
     profileCounts: await Promise.all(

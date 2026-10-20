@@ -259,7 +259,17 @@ export const getMyVerifications = asyncHandler(async (req: Request, res: Respons
   }
 
   const [data, total] = await Promise.all([
-    Verification.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Verification.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      // `form`/`documents` are keyed by `key`/`type` only (e.g.
+      // "business_certificate") — the human-readable label lives on the
+      // template this submission was validated against, not on the
+      // submission itself. Populating it here means this page never
+      // needs a second round-trip to GET /api/verification-templates
+      // just to render what it's already showing.
+      .populate("templateId", "name version fields documents"),
     Verification.countDocuments(filter),
   ]);
 
@@ -292,7 +302,10 @@ export const getVerifications = asyncHandler(async (req: Request, res: Response)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("user", "fullName email"),
+      .populate("user", "fullName email")
+      // See getMyVerifications' identical populate for why — same gap,
+      // same fix, for the admin queue.
+      .populate("templateId", "name version fields documents"),
     Verification.countDocuments(filter),
   ]);
 

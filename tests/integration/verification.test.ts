@@ -354,6 +354,10 @@ describe("GET /api/verifications/me", () => {
       .set("Authorization", `Bearer ${generateToken(me)}`);
 
     expect(res.body.data).toHaveLength(1);
+    // form/documents are keyed by `key`/`type` only — the human-readable
+    // label lives on the template this submission was validated against,
+    // which this list needs populated to actually render anything.
+    expect(res.body.data[0].templateId.documents[0].label).toBe("Business certificate");
   });
 });
 
@@ -389,6 +393,7 @@ describe("admin review", () => {
       .set("Authorization", `Bearer ${generateToken(customerCare)}`);
     expect(list.status).toBe(200);
     expect(list.body.data).toHaveLength(1);
+    expect(list.body.data[0].templateId.documents[0].label).toBe("Business certificate");
 
     const approve = await request(app)
       .patch(`/api/verifications/${submitted.body._id}/approve`)

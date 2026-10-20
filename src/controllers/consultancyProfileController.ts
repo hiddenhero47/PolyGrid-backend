@@ -349,7 +349,10 @@ export const searchConsultants = asyncHandler(async (req: Request, res: Response
   const total = totalResult[0]?.total ?? 0;
 
   res.status(200).json({
-    data: data.map((doc) => toPublicProfile(doc as IConsultancyProfile)),
+    // Aggregate results are plain objects, not Mongoose documents — no
+    // `.id` virtual — so toPublicProfile's `profile.id` reads as
+    // undefined here unless patched back in from `_id` explicitly.
+    data: data.map((doc) => ({ ...toPublicProfile(doc as IConsultancyProfile), id: doc._id })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });

@@ -488,6 +488,10 @@ describe("GET /api/consultancy-profiles (search)", () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].slug).toBe("visible-one");
+    // Search results come from an aggregate() pipeline, whose plain
+    // objects have no `.id` virtual — a frontend needs this to link into
+    // the profile, so it must be patched back in explicitly.
+    expect(res.body.data[0].id).toEqual(expect.any(String));
   });
 
   it("filters by specialization", async () => {

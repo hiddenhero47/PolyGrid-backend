@@ -906,17 +906,21 @@ export const registerAdmin = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json(toPublicUser(admin));
 });
 
-// @desc    List users (filterable, paginated)
-// @route   GET /api/users
-// @access  Private (Super Admin only)
+// @desc    List users (filterable, paginated) — the read side is
+//          Admin/Super Admin (any mutation on a user, role/account-status
+//          changes, stays Super-Admin-only, same as before); an admin
+//          needs this to find a userId before e.g. POST /api/subscriptions.
+// @route   GET /api/users?systemRole=&userId=&q=
+// @access  Private (Admin / Super Admin)
 export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const skip = (page - 1) * limit;
 
-  const { systemRole, userId } = req.query as {
+  const { systemRole, userId, q } = req.query as {
     systemRole?: string;
     userId?: string;
+    q?: string;
   };
 
   const filter: mongoose.FilterQuery<IUser> = {};
@@ -928,6 +932,16 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   if (userId && mongoose.Types.ObjectId.isValid(userId)) {
     filter._id = userId;
+  }
+
+  if (q && q.trim()) {
+    // Regex, not text search — this product has no $text index on User,
+    // and a prefix/substring match on a handful of hundred admin-facing
+    // rows doesn't need one. Escaped so a stray regex metacharacter in
+    // someone's search box (or email) can't throw or behave unexpectedly.
+    const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "i");
+    filter.$or = [{ email: pattern }, { fullName: pattern }];
   }
 
   const [users, total] = await Promise.all([

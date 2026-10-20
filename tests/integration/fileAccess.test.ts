@@ -1,14 +1,18 @@
 import request from "supertest";
+import mongoose from "mongoose";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
   createAdmin,
+  createCustomerCare,
+  createVerificationTemplate,
   generateToken,
   createPrivateFile,
   TEST_PNG_BUFFER,
 } from "../setup/fixtures";
 import { FileGrant } from "../../src/models/fileGrantModel";
+import { Verification } from "../../src/models/verificationModel";
 import { signFileUrl, FILE_URL_MODE } from "../../src/helpers/fileSigning";
 import { unlockUrl } from "../../src/helpers/fileLinkLock";
 
@@ -138,6 +142,45 @@ describe("GET /api/files/private/:ownerId/:fileName/link", () => {
       .set("Authorization", `Bearer ${generateToken(stranger)}`);
 
     expect(res.status).toBe(403);
+  });
+
+  it("lets customer_care view a file that's a document on the owner's verification submission, but nothing else of theirs", async () => {
+    const owner = await createUser();
+    const customerCare = await createCustomerCare();
+    const template = await createVerificationTemplate();
+
+    const verificationDoc = await createPrivateFile({ uploader: owner });
+    await Verification.create({
+      profileType: template.profileType,
+      profileId: new mongoose.Types.ObjectId(),
+      user: owner._id,
+      location: { country: "NG" },
+      templateId: template._id,
+      documents: [
+        {
+          type: "business_certificate",
+          fileName: verificationDoc.fileName,
+          mime: verificationDoc.mime,
+          size: verificationDoc.size,
+          uploadedAt: new Date(),
+        },
+      ],
+    });
+
+    const allowed = await request(app)
+      .get(`/api/files/private/${owner.id}/${verificationDoc.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+    expect(allowed.status).toBe(200);
+
+    // An unrelated private file of the same owner's — never part of any
+    // verification — stays out of reach. customer_care's grant is scoped
+    // to exactly the documents it already sees metadata for in the
+    // verification queue, not a blanket read on everything this owner has.
+    const unrelatedFile = await createPrivateFile({ uploader: owner });
+    const blocked = await request(app)
+      .get(`/api/files/private/${owner.id}/${unrelatedFile.fileName}/link`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+    expect(blocked.status).toBe(403);
   });
 });
 

@@ -1,6 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 import { IMediaFile, mediaFileSchema } from "./mediaFile";
 
 // PolyGrid Tenders' Project Bidding Board — see docs/tenders-plan.md.
@@ -109,16 +109,7 @@ const tenderProjectSchema = new Schema<ITenderProject>(
     category: { type: String, enum: Object.values(TENDER_CATEGORY), required: true },
     budgetMin: { type: Number, min: 0 },
     budgetMax: { type: Number, min: 0 },
-    currency: {
-      type: String,
-      default: "USD",
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, default: PLATFORM_CURRENCY },
     location: { type: projectLocationSchema, required: true },
     files: {
       type: [mediaFileSchema],

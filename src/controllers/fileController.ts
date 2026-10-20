@@ -7,6 +7,7 @@ import { signFileUrl, verifyFileUrlToken, FILE_URL_MODE, FileUrlMode } from "../
 import { lockUrl } from "../helpers/fileLinkLock";
 import { FileGrant } from "../models/fileGrantModel";
 import { User, IUser, SYSTEM_ROLE } from "../models/userModel";
+import { Verification } from "../models/verificationModel";
 
 // The lock key is read from a header on the *mint* request only, never a
 // query param — the whole point is that it doesn't travel inside a URL,
@@ -108,7 +109,18 @@ export const getPrivateFileLink = asyncHandler(async (req: Request, res: Respons
     requester.systemRole === SYSTEM_ROLE.ADMIN || requester.systemRole === SYSTEM_ROLE.SUPER_ADMIN;
 
   if (!isOwner && !isAdmin) {
-    const granted = await FileGrant.exists({ ownerId, fileName, allowedUsers: requester._id });
+    let granted = await FileGrant.exists({ ownerId, fileName, allowedUsers: requester._id });
+
+    // customer_care is read-only everywhere (see SYSTEM_ROLE's own
+    // comment) — this is the read side of that for private files: it can
+    // see a file that's attached as a document on some user's
+    // verification submission, the exact same files it already sees
+    // metadata for in the GET /api/verifications queue, and nothing
+    // beyond that. Never a blanket private-file grant — a job contract
+    // or tender attachment between two other parties stays out of reach.
+    if (!granted && requester.systemRole === SYSTEM_ROLE.CUSTOMER_CARE) {
+      granted = await Verification.exists({ user: ownerId, "documents.fileName": fileName });
+    }
 
     if (!granted) {
       res.status(403);

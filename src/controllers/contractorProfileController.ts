@@ -306,7 +306,13 @@ export const searchContractors = asyncHandler(async (req: Request, res: Response
   const total = totalResult[0]?.total ?? 0;
 
   res.status(200).json({
-    data: data.map((doc) => toPublicContractorProfile(doc as IContractorProfile)),
+    // Aggregate results are plain objects, not Mongoose documents — no
+    // `.id` virtual — so toPublicContractorProfile's `profile.id` reads
+    // as undefined here unless patched back in from `_id` explicitly.
+    data: data.map((doc) => ({
+      ...toPublicContractorProfile(doc as IContractorProfile),
+      id: doc._id,
+    })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });

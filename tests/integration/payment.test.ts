@@ -457,14 +457,17 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     expect(updatedJob?.amountPaid).toBe(250);
   });
 
-  maybeIt("purchases a subscription end-to-end", async () => {
-    const user = await createUser();
-    const plan = await createPlan({ planTier: PLAN_TIER.PRO, price: 20 });
+  maybeIt("purchases a subscription end-to-end, superseding any previous active one", async () => {
+    // createUserWithActiveSubscription already creates (and reuses) the
+    // default PRO plan via createSubscription — Plan.planTier is unique,
+    // so a second createPlan({ planTier: PRO }) here would collide with it.
+    const user = await createUserWithActiveSubscription();
+    const previousSubscriptionId = user.currentSubscription?.toString();
 
     const intentRes = await request(app)
       .post("/api/payments/intent")
       .set("Authorization", `Bearer ${generateToken(user)}`)
-      .send({ targetType: "Subscription", planTier: plan.planTier });
+      .send({ targetType: "Subscription", planTier: PLAN_TIER.PRO });
 
     expect(intentRes.status).toBe(201);
     const subscriptionId = intentRes.body.subscriptionId;
@@ -486,19 +489,26 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     });
     expect(webhookRes.status).toBe(200);
 
-    // Wait for the *last* thing the background work does (repointing
-    // currentSubscription), not just the Subscription's own status flip —
-    // that happens first in the same chain, so polling only on it would
-    // still race against the User update that follows it.
-    await waitFor(
-      async () => (await User.findById(user.id))?.currentSubscription?.toString() === subscriptionId,
-    );
+    // Wait for supersedeActiveSubscriptions, not just the User update that
+    // precedes it in the same background chain (currentSubscription is
+    // repointed first, the old subscription is only canceled after) —
+    // polling on currentSubscription alone would still race this check.
+    await waitFor(async () => {
+      const previous = await Subscription.findById(previousSubscriptionId);
+      return previous?.status === "canceled";
+    });
 
     subscription = await Subscription.findById(subscriptionId);
     expect(subscription?.status).toBe("active");
 
     const updatedUser = await User.findById(user.id);
     expect(updatedUser?.currentSubscription?.toString()).toBe(subscriptionId);
+
+    // The subscription this user already had active before buying this
+    // one must be superseded, not left dangling as a second 'active'
+    // record for the same user.
+    const previousSubscription = await Subscription.findById(previousSubscriptionId);
+    expect(previousSubscription?.status).toBe("canceled");
   });
 
   maybeIt("buys a digital product end-to-end", async () => {

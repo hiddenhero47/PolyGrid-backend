@@ -99,6 +99,28 @@ describe("POST /api/plans", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a real ISO 4217 code that isn't the platform's locked currency (USD)", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+
+    const res = await request(app)
+      .post("/api/plans")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        planTier: PLAN_TIER.PRO,
+        name: "Pro",
+        duration: 30,
+        price: 20,
+        currency: "NGN",
+      });
+
+    // NGN is a genuinely valid ISO 4217 code — unlike "NOT_REAL" above,
+    // this only fails because PolyGrid is hard-locked to one currency
+    // (currencyReference.ts's PLATFORM_CURRENCY), proving the lock
+    // itself works, not just that garbage input gets rejected.
+    expect(res.status).toBe(400);
+  });
+
   it("blocks a non-super-admin", async () => {
     const user = await createUser();
     const token = generateToken(user);

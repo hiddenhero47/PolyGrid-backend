@@ -91,7 +91,7 @@ router.post(
   validateBody(registerAdminSchema),
   registerAdmin,
 );
-router.get("/", secureRole(SYSTEM_ROLE.SUPER_ADMIN), getUsers);
+router.get("/", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), getUsers);
 router.patch(
   "/:id/role",
   secureRole(SYSTEM_ROLE.SUPER_ADMIN),
