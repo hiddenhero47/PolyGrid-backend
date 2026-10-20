@@ -11,6 +11,7 @@ import {
 import { PLAN_TIER } from "../../src/models/planModel";
 import { Payment } from "../../src/models/paymentModel";
 import { User } from "../../src/models/userModel";
+import { Subscription } from "../../src/models/subscriptionModel";
 
 const app = createApp();
 
@@ -107,6 +108,16 @@ describe("POST /api/subscriptions", () => {
       .get("/api/subscriptions/me")
       .set("Authorization", `Bearer ${generateToken(user)}`);
     expect(history.body.pagination.total).toBe(2);
+
+    // The superseded record stays in history (never deleted) but must no
+    // longer read as active — two simultaneously 'active' subscriptions
+    // for the same user would double-count in statsController's
+    // activeSubscriptions and let isActive() succeed against a plan that
+    // was meant to be replaced.
+    const firstSubscription = await Subscription.findById(first.body._id);
+    expect(firstSubscription?.status).toBe("canceled");
+    const secondSubscription = await Subscription.findById(second.body._id);
+    expect(secondSubscription?.status).toBe("active");
   });
 });
 

@@ -1,7 +1,8 @@
 import request from "supertest";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createClientProfile, generateToken } from "../setup/fixtures";
+import { createUser, createClientProfile, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
+import { User } from "../../src/models/userModel";
 
 const app = createApp();
 
@@ -104,6 +105,39 @@ describe("GET /api/client-profiles/me and PATCH", () => {
       .set("Authorization", `Bearer ${generateToken(bannedUser)}`)
       .send({ bio: "Trying to sneak an edit in" });
     expect(bannedUpdate.status).toBe(403);
+  });
+});
+
+// Full avatar-upload + account-avatar-fallback behavior is covered in
+// depth once in consultancyProfile.test.ts (identical shared logic);
+// this just confirms the same wiring exists here too.
+describe("POST /api/client-profiles/me/avatar", () => {
+  it("uploads an avatar, and falls back to the account avatar on /me until one is set", async () => {
+    const user = await createUser();
+    await createClientProfile({ user });
+    const token = generateToken(user);
+
+    await User.updateOne(
+      { _id: user._id },
+      { avatar: { fileName: "acct.png", storagePath: "/tmp/acct.png", mime: "image/png", size: 10, url: "/public/acct.png" } },
+    );
+
+    const beforeUpload = await request(app)
+      .get("/api/client-profiles/me")
+      .set("Authorization", `Bearer ${token}`);
+    expect(beforeUpload.body.avatar.url).toBe("/public/acct.png");
+
+    const uploaded = await request(app)
+      .post("/api/client-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar.png");
+    expect(uploaded.status).toBe(200);
+    expect(uploaded.body.avatar.mime).toBe("image/png");
+
+    const afterUpload = await request(app)
+      .get("/api/client-profiles/me")
+      .set("Authorization", `Bearer ${token}`);
+    expect(afterUpload.body.avatar.url).not.toBe("/public/acct.png");
   });
 });
 

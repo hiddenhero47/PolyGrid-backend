@@ -21,3 +21,7 @@ export const createReviewSchema = yup
     comment: yup.string().trim().notRequired(),
   })
   .noUnknown(true);
+
+export const hideReviewSchema = yup
+  .object({ reason: yup.string().trim().notRequired() })
+  .noUnknown(true);

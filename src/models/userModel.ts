@@ -32,8 +32,22 @@ export const ACCOUNT_TYPE = {
 } as const;
 export type AccountType = (typeof ACCOUNT_TYPE)[keyof typeof ACCOUNT_TYPE];
 
+// A platform-wide kill switch, independent of any one business profile's
+// own `status` (constants/profileStatus.ts, which only ever hides that
+// one profile's page/search visibility). Suspending a user locks them
+// out of the whole app — enforced in authMiddleware.getAuthenticatedUser,
+// which every HTTP request and the Socket.IO handshake both already run
+// on every single call, so this takes effect immediately on the suspended
+// user's very next request, no session rotation needed.
+export const ACCOUNT_STATUS = {
+  ACTIVE: "active",
+  SUSPENDED: "suspended",
+} as const;
+export type AccountStatus = (typeof ACCOUNT_STATUS)[keyof typeof ACCOUNT_STATUS];
+
 export const TOKENS = {
   RESET: "resetPassword",
+  VERIFY_EMAIL: "verifyEmail",
 } as const;
 
 export const AUTH_PROVIDER = {
@@ -116,6 +130,7 @@ export interface IUser extends Document {
   payoutAccount?: IPayoutAccount;
   systemRole: SystemRole;
   activeAccountType: AccountType;
+  accountStatus: AccountStatus;
   // Points at this user's most recent Subscription record — null until they
   // ever subscribe. Full history lives in the Subscription collection (see
   // subscriptionModel.ts); this is just a fast pointer to "the current one".
@@ -228,6 +243,11 @@ const userSchema = new Schema<IUser>(
       type: String,
       default: ACCOUNT_TYPE.NORMAL,
       enum: Object.values(ACCOUNT_TYPE),
+    },
+    accountStatus: {
+      type: String,
+      default: ACCOUNT_STATUS.ACTIVE,
+      enum: Object.values(ACCOUNT_STATUS),
     },
     currentSubscription: {
       type: Schema.Types.ObjectId,

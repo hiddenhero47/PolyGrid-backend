@@ -14,9 +14,12 @@ import {
   logoutAll,
   requestReset,
   resetPassword,
+  resendVerification,
+  verifyEmail,
   registerAdmin,
   getUsers,
   changeUserRole,
+  setAccountStatus,
 } from "../controllers/userController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { verifyIdentity } from "../middleware/verifyIdentityMiddleware";
@@ -35,8 +38,11 @@ import {
   toggleTwoFactorSchema,
   requestResetSchema,
   resetPasswordSchema,
+  resendVerificationSchema,
+  verifyEmailSchema,
   registerAdminSchema,
   changeUserRoleSchema,
+  setAccountStatusSchema,
 } from "../validators/user/userValidator";
 
 const router = express.Router();
@@ -47,6 +53,8 @@ router.post("/social/google", validateBody(googleLoginSchema), googleLogin);
 router.post("/social/apple", validateBody(appleLoginSchema), appleLogin);
 router.post("/request-reset", validateBody(requestResetSchema), requestReset);
 router.post("/reset-password", validateBody(resetPasswordSchema), resetPassword);
+router.post("/resend-verification", validateBody(resendVerificationSchema), resendVerification);
+router.post("/verify-email", validateBody(verifyEmailSchema), verifyEmail);
 
 router.get("/me", protect, getMe);
 router.put("/profile", protect, validateBody(updateUserProfileSchema), updateUserProfile);
@@ -83,12 +91,18 @@ router.post(
   validateBody(registerAdminSchema),
   registerAdmin,
 );
-router.get("/", secureRole(SYSTEM_ROLE.SUPER_ADMIN), getUsers);
+router.get("/", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), getUsers);
 router.patch(
   "/:id/role",
   secureRole(SYSTEM_ROLE.SUPER_ADMIN),
   validateBody(changeUserRoleSchema),
   changeUserRole,
+);
+router.patch(
+  "/:id/account-status",
+  secureRole(SYSTEM_ROLE.SUPER_ADMIN),
+  validateBody(setAccountStatusSchema),
+  setAccountStatus,
 );
 
 export default router;

@@ -19,5 +19,13 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist"],
+  "ts-node": {
+    // ts-node otherwise only compiles files reachable by `import` from the
+    // entry point, lazily — it never picks up src/types/express.d.ts, since
+    // nothing imports a pure ambient-augmentation file. `files: true` makes
+    // it build its program from this file's own `include` instead, exactly
+    // like `tsc` already does for the build/typecheck scripts.
+    "files": true
+  }
 }

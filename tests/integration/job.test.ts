@@ -456,6 +456,12 @@ describe("stage done/verify and payment math", () => {
 
     await request(app).patch(`/api/jobs/${job._id}/stages/${stageA}/done`).set("Authorization", `Bearer ${providerToken}`);
 
+    const clientNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${clientToken}`);
+    expect(clientNotifications.body.data).toHaveLength(1);
+    expect(clientNotifications.body.data[0].type).toBe("job_stage_done");
+
     const verifyA = await request(app)
       .patch(`/api/jobs/${job._id}/stages/${stageA}/verify`)
       .set("Authorization", `Bearer ${clientToken}`);
@@ -595,6 +601,16 @@ describe("dispute flow", () => {
     expect(resolved.body.disputeHistory[0].note).toBe(
       "Refunded stage 2 per agreement over email",
     );
+
+    const clientNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+    expect(clientNotifications.body.data[0].type).toBe("job_dispute_resolved");
+
+    const providerNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    expect(providerNotifications.body.data[0].type).toBe("job_dispute_resolved");
   });
 
   it("requires a resolution note", async () => {
@@ -1019,6 +1035,11 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
         variables: expect.objectContaining({ requestType: "refund", approved: true, amount: 500 }),
       }),
     );
+
+    const clientNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+    expect(clientNotifications.body.data[0].type).toBe("payment_request_decided");
 
     const systemPayout = await SystemPayout.findOne({ requestId: refundId });
     expect(systemPayout?.requestType).toBe(SYSTEM_PAYOUT_REQUEST_TYPE.REFUND);

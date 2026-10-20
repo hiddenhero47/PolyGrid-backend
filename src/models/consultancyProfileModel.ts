@@ -1,7 +1,8 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 import { PROFILE_STATUS, ProfileStatus } from "../constants/profileStatus";
 import { isValidCountryCode } from "../helpers/countryReference";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
+import { IMediaFile, mediaFileSchema } from "./mediaFile";
 import { IProfileLink, profileLinkSchema, validateLinkCount, MAX_PROFILE_LINKS } from "./profileLink";
 import {
   IPortfolioItem,
@@ -81,6 +82,11 @@ export interface IConsultancyProfile extends Document {
   // self-service, banned is admin-only.
   status: ProfileStatus;
   slug: string;
+  // Optional — unset by default. getProfile/getMyProfile fall back to
+  // the account-level User.avatar when this isn't set (see
+  // helpers/profileAvatarFallback.ts); set this only to show a
+  // different photo here than the account's own.
+  avatar?: IMediaFile;
   headline: string;
   bio?: string;
   specializations: Specialization[];
@@ -110,16 +116,7 @@ const serviceListingSchema = new Schema<IServiceListing>({
     required: true,
   },
   price: { type: Number, required: true, min: 0 },
-  currency: {
-    type: String,
-    default: "USD",
-    uppercase: true,
-    trim: true,
-    validate: {
-      validator: isValidCurrencyCode,
-      message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-    },
-  },
+  currency: { ...currencyField, default: PLATFORM_CURRENCY },
   durationMinutes: { type: Number, min: 1 },
 });
 
@@ -145,6 +142,7 @@ const consultancyProfileSchema = new Schema<IConsultancyProfile>(
     verification: { type: Schema.Types.ObjectId, ref: "Verification", default: null },
     status: { type: String, enum: Object.values(PROFILE_STATUS), default: PROFILE_STATUS.ACTIVE },
     slug: { type: String, required: true, unique: true },
+    avatar: { type: mediaFileSchema },
     headline: { type: String, required: [true, "Please add a headline"], trim: true },
     bio: { type: String },
     specializations: {

@@ -3,6 +3,8 @@ import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
+  createAdmin,
+  createCustomerCare,
   createActiveJob,
   createContractorProfile,
   createDigitalCreatorProfile,
@@ -314,5 +316,168 @@ describe("GET /api/reviews", () => {
   it("requires a valid profileType and profileId", async () => {
     const res = await request(app).get("/api/reviews?profileType=NotReal&profileId=507f1f77bcf86cd799439011");
     expect(res.status).toBe(400);
+  });
+});
+
+describe("Review moderation — hide, unhide, delete", () => {
+  const leaveReview = async (clientUser: Awaited<ReturnType<typeof createUser>>, providerUser: Awaited<ReturnType<typeof createUser>>, rating: number) => {
+    const job = await createActiveJob({ client: clientUser, provider: providerUser, status: JOB_STATUS.COMPLETED });
+    const res = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating });
+    return res.body;
+  };
+
+  it("hides a review, backing its rating out of the profile and out of the public listing", async () => {
+    const providerUser = await createUser();
+    const contractorProfile = await createContractorProfile({ user: providerUser });
+    const clientA = await createUser();
+    const reviewA = await leaveReview(clientA, providerUser, 5);
+    const clientB = await createUser();
+    await leaveReview(clientB, providerUser, 3);
+
+    const admin = await createAdmin();
+    const hidden = await request(app)
+      .patch(`/api/reviews/${reviewA.id}/hide`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ reason: "Suspected fake review" });
+
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.isHidden).toBe(true);
+    expect(hidden.body.hiddenReason).toBe("Suspected fake review");
+
+    const updatedProfile = await ContractorProfile.findById(contractorProfile.id);
+    expect(updatedProfile?.ratingAverage).toBe(3);
+    expect(updatedProfile?.ratingCount).toBe(1);
+
+    const publicList = await request(app).get(
+      `/api/reviews?profileType=ContractorProfile&profileId=${contractorProfile.id}`,
+    );
+    expect(publicList.body.data).toHaveLength(1);
+    expect(publicList.body.data[0].rating).toBe(3);
+  });
+
+  it("unhides a review, reapplying its rating", async () => {
+    const providerUser = await createUser();
+    const contractorProfile = await createContractorProfile({ user: providerUser });
+    const clientA = await createUser();
+    const review = await leaveReview(clientA, providerUser, 5);
+
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+
+    await request(app).patch(`/api/reviews/${review.id}/hide`).set("Authorization", `Bearer ${token}`);
+
+    const unhidden = await request(app)
+      .patch(`/api/reviews/${review.id}/unhide`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(unhidden.status).toBe(200);
+    expect(unhidden.body.isHidden).toBe(false);
+
+    const updatedProfile = await ContractorProfile.findById(contractorProfile.id);
+    expect(updatedProfile?.ratingAverage).toBe(5);
+    expect(updatedProfile?.ratingCount).toBe(1);
+
+    const publicList = await request(app).get(
+      `/api/reviews?profileType=ContractorProfile&profileId=${contractorProfile.id}`,
+    );
+    expect(publicList.body.data).toHaveLength(1);
+  });
+
+  it("rejects hiding an already-hidden review and unhiding one that isn't hidden", async () => {
+    const providerUser = await createUser();
+    await createContractorProfile({ user: providerUser });
+    const clientA = await createUser();
+    const review = await leaveReview(clientA, providerUser, 5);
+
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+
+    const alreadyUnhidden = await request(app)
+      .patch(`/api/reviews/${review.id}/unhide`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(alreadyUnhidden.status).toBe(400);
+
+    await request(app).patch(`/api/reviews/${review.id}/hide`).set("Authorization", `Bearer ${token}`);
+
+    const alreadyHidden = await request(app)
+      .patch(`/api/reviews/${review.id}/hide`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(alreadyHidden.status).toBe(400);
+  });
+
+  it("permanently deletes a review, backing its rating out exactly once", async () => {
+    const providerUser = await createUser();
+    const contractorProfile = await createContractorProfile({ user: providerUser });
+    const clientA = await createUser();
+    const review = await leaveReview(clientA, providerUser, 4);
+
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+
+    const deleted = await request(app)
+      .delete(`/api/reviews/${review.id}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(deleted.status).toBe(200);
+
+    const updatedProfile = await ContractorProfile.findById(contractorProfile.id);
+    expect(updatedProfile?.ratingAverage).toBe(0);
+    expect(updatedProfile?.ratingCount).toBe(0);
+
+    const publicList = await request(app).get(
+      `/api/reviews?profileType=ContractorProfile&profileId=${contractorProfile.id}`,
+    );
+    expect(publicList.body.data).toHaveLength(0);
+  });
+
+  it("deleting an already-hidden review doesn't double-reverse its rating", async () => {
+    const providerUser = await createUser();
+    const contractorProfile = await createContractorProfile({ user: providerUser });
+    const clientA = await createUser();
+    const reviewA = await leaveReview(clientA, providerUser, 5);
+    const clientB = await createUser();
+    await leaveReview(clientB, providerUser, 1);
+
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+
+    await request(app).patch(`/api/reviews/${reviewA.id}/hide`).set("Authorization", `Bearer ${token}`);
+    // Rating is now just clientB's 1, count 1.
+
+    await request(app).delete(`/api/reviews/${reviewA.id}`).set("Authorization", `Bearer ${token}`);
+
+    const updatedProfile = await ContractorProfile.findById(contractorProfile.id);
+    expect(updatedProfile?.ratingAverage).toBe(1);
+    expect(updatedProfile?.ratingCount).toBe(1);
+  });
+
+  it("GET /api/reviews/moderation includes hidden reviews with their moderation detail; blocks customer_care from mutating", async () => {
+    const providerUser = await createUser();
+    const contractorProfile = await createContractorProfile({ user: providerUser });
+    const clientA = await createUser();
+    const review = await leaveReview(clientA, providerUser, 5);
+
+    const admin = await createAdmin();
+    await request(app)
+      .patch(`/api/reviews/${review.id}/hide`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ reason: "Testing moderation queue" });
+
+    const customerCare = await createCustomerCare();
+    const queue = await request(app)
+      .get(`/api/reviews/moderation?profileType=ContractorProfile&profileId=${contractorProfile.id}`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+
+    expect(queue.status).toBe(200);
+    expect(queue.body.data).toHaveLength(1);
+    expect(queue.body.data[0].isHidden).toBe(true);
+    expect(queue.body.data[0].hiddenReason).toBe("Testing moderation queue");
+
+    const blocked = await request(app)
+      .patch(`/api/reviews/${review.id}/unhide`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+    expect(blocked.status).toBe(401);
   });
 });

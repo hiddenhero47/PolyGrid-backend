@@ -15,6 +15,7 @@ import {
   getOpeningApplications,
   acceptApplication,
   rejectApplication,
+  getPublicJobOpeningSummary,
 } from "../controllers/jobOpeningController";
 import { protect } from "../middleware/authMiddleware";
 import { validateBody } from "../validators/validate";
@@ -31,6 +32,9 @@ router.post("/", protect, validateBody(createJobOpeningSchema), createJobOpening
 router.get("/", protect, listJobOpenings);
 router.get("/me", protect, getMyJobOpenings);
 router.get("/applications/mine", protect, getMyApplications);
+// Public, unauthenticated — must stay registered before the "/:id"
+// wildcard below, or that catch-all would swallow this literal path.
+router.get("/public-summary", getPublicJobOpeningSummary);
 
 router.get("/:id", protect, getJobOpening);
 router.patch("/:id", protect, validateBody(updateJobOpeningSchema), updateMyJobOpening);

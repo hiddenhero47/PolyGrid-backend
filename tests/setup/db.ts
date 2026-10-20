@@ -17,6 +17,14 @@ export const connectTestDB = async (): Promise<void> => {
 
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(uri);
+
+    // Same reasoning as server.ts's own post-connect wait: indexes build
+    // in the background after connect() resolves, not before. A test
+    // that exercises a unique constraint (or $geoNear) early in a fresh
+    // run can otherwise race ahead of its own index — every model is
+    // already registered by now (imported transitively via createApp,
+    // which every test file imports before calling this).
+    await Promise.all(mongoose.modelNames().map((name) => mongoose.model(name).init()));
   }
 };
 

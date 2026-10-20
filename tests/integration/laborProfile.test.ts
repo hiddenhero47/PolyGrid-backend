@@ -10,6 +10,7 @@ import {
 } from "../setup/fixtures";
 import { LABOR_SKILL, MAX_PROFILE_LINKS } from "../../src/models/laborProfileModel";
 import { Subscription } from "../../src/models/subscriptionModel";
+import { User } from "../../src/models/userModel";
 import fs from "fs";
 import path from "path";
 
@@ -115,6 +116,39 @@ describe("PATCH /api/labor-profiles/me", () => {
   });
 });
 
+// Full avatar-upload + account-avatar-fallback behavior is covered in
+// depth once in consultancyProfile.test.ts (identical shared logic);
+// this just confirms the same wiring exists here too.
+describe("POST /api/labor-profiles/me/avatar", () => {
+  it("uploads an avatar, and falls back to the account avatar on /me until one is set", async () => {
+    const user = await createUser();
+    await createLaborProfile({ user });
+    const token = generateToken(user);
+
+    await User.updateOne(
+      { _id: user._id },
+      { avatar: { fileName: "acct.png", storagePath: "/tmp/acct.png", mime: "image/png", size: 10, url: "/public/acct.png" } },
+    );
+
+    const beforeUpload = await request(app)
+      .get("/api/labor-profiles/me")
+      .set("Authorization", `Bearer ${token}`);
+    expect(beforeUpload.body.avatar.url).toBe("/public/acct.png");
+
+    const uploaded = await request(app)
+      .post("/api/labor-profiles/me/avatar")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", TEST_PNG_BUFFER, "avatar.png");
+    expect(uploaded.status).toBe(200);
+    expect(uploaded.body.avatar.mime).toBe("image/png");
+
+    const afterUpload = await request(app)
+      .get("/api/labor-profiles/me")
+      .set("Authorization", `Bearer ${token}`);
+    expect(afterUpload.body.avatar.url).not.toBe("/public/acct.png");
+  });
+});
+
 describe("GET /api/labor-profiles/:idOrSlug", () => {
   it("resolves the URL but withholds content when not currently subscribed", async () => {
     const user = await createUser();
@@ -175,6 +209,10 @@ describe("GET /api/labor-profiles (search)", () => {
     const match = await request(app).get(`/api/labor-profiles?skill=${LABOR_SKILL.ELECTRICAL}`);
     expect(match.body.data).toHaveLength(1);
     expect(match.body.data[0].slug).toBe("visible-worker");
+    // Search results come from an aggregate() pipeline, whose plain
+    // objects have no `.id` virtual — a frontend needs this to link into
+    // the profile, so it must be patched back in explicitly.
+    expect(match.body.data[0].id).toEqual(expect.any(String));
 
     const noMatch = await request(app).get(`/api/labor-profiles?skill=${LABOR_SKILL.PLUMBING}`);
     expect(noMatch.body.data).toHaveLength(0);

@@ -16,11 +16,15 @@ import {
 import { IUser } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
 import { PROFILE_STATUS } from "../constants/profileStatus";
+import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
+import { getAccountAvatar } from "../helpers/profileAvatarFallback";
 import {
   uploadHandler,
   deleteStoredFile,
   FILE_VISIBILITY,
   PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES,
+  IMAGE_ONLY_MIME_TYPES,
+  countUploadCandidates,
 } from "../helpers/fileStorage";
 
 const slugify = (value: string): string =>
@@ -63,12 +67,17 @@ const toPublicPortfolioItem = (item: IPortfolioItem) => ({
   completedAt: item.completedAt,
 });
 
-const toPublicProfile = (profile: IConsultancyProfile) => ({
+// `fallbackAvatar` — only ever passed by getMyProfile/getProfile (single-
+// profile views), resolved there via helpers/profileAvatarFallback.ts
+// when this profile has no avatar of its own. Search/list results never
+// pass one, by design — see that helper's own comment.
+const toPublicProfile = (profile: IConsultancyProfile, fallbackAvatar?: IMediaFile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
   status: profile.status,
   slug: profile.slug,
+  avatar: profile.avatar ? toPublicMediaFile(profile.avatar) : fallbackAvatar ? toPublicMediaFile(fallbackAvatar) : undefined,
   headline: profile.headline,
   bio: profile.bio,
   specializations: profile.specializations,
@@ -159,6 +168,54 @@ export const getMyProfile = asyncHandler(async (req: Request, res: Response) => 
   if (!profile) {
     res.status(404);
     throw new Error("You don't have a consultancy profile yet");
+  }
+
+  const fallbackAvatar = profile.avatar ? undefined : await getAccountAvatar(profile.userId);
+  res.status(200).json(toPublicProfile(profile, fallbackAvatar));
+});
+
+// @desc    Replace my profile's own avatar — optional; the profile page
+//          falls back to the account avatar until one is set here.
+// @route   POST /api/consultancy-profiles/me/avatar
+// @access  Private
+export const uploadAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a consultancy profile yet");
+  }
+
+  if (countUploadCandidates(req) !== 1) {
+    res.status(400);
+    throw new Error("Attach exactly one avatar image");
+  }
+
+  const { results, errorLogs } = await uploadHandler({
+    req,
+    visibility: FILE_VISIBILITY.PUBLIC,
+    allowedMimeTypes: IMAGE_ONLY_MIME_TYPES,
+  });
+  const saved = results[0];
+
+  if (!saved) {
+    res.status(400);
+    throw new Error(errorLogs[0] || "No valid image provided");
+  }
+
+  const oldAvatar = profile.avatar;
+
+  profile.avatar = {
+    fileName: saved.fileName,
+    storagePath: saved.storagePath,
+    mime: saved.mime,
+    size: saved.size,
+    url: saved.url,
+  };
+  await profile.save();
+
+  if (oldAvatar) {
+    await deleteStoredFile(oldAvatar.storagePath);
   }
 
   res.status(200).json(toPublicProfile(profile));
@@ -292,7 +349,10 @@ export const searchConsultants = asyncHandler(async (req: Request, res: Response
   const total = totalResult[0]?.total ?? 0;
 
   res.status(200).json({
-    data: data.map((doc) => toPublicProfile(doc as IConsultancyProfile)),
+    // Aggregate results are plain objects, not Mongoose documents — no
+    // `.id` virtual — so toPublicProfile's `profile.id` reads as
+    // undefined here unless patched back in from `_id` explicitly.
+    data: data.map((doc) => ({ ...toPublicProfile(doc as IConsultancyProfile), id: doc._id })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
@@ -342,7 +402,8 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  res.status(200).json(toPublicProfile(profile));
+  const fallbackAvatar = profile.avatar ? undefined : await getAccountAvatar(profile.userId);
+  res.status(200).json(toPublicProfile(profile, fallbackAvatar));
 });
 
 // Portfolio images are public — the whole point is a shareable mini-site —

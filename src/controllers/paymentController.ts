@@ -11,7 +11,7 @@ import { DigitalProduct } from "../models/digitalProductModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
-import { syncProfilesSubscription } from "../helpers/profileSubscriptionSync";
+import { syncProfilesSubscription, supersedeActiveSubscriptions } from "../helpers/profileSubscriptionSync";
 import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -350,6 +350,7 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
       { _id: subscription.user },
       { currentSubscription: subscription._id },
     );
+    await supersedeActiveSubscriptions(subscription.user, subscription._id as mongoose.Types.ObjectId);
     await syncProfilesSubscription(subscription.user, subscription._id as mongoose.Types.ObjectId);
   }
 });

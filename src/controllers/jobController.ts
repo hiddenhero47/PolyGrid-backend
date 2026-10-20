@@ -28,6 +28,8 @@ import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { connectUsers } from "./contactController";
+import { NOTIFICATION_TYPE } from "../models/notificationModel";
+import { notify } from "../helpers/notify";
 
 const CONTRACT_ALLOWED_MIME_TYPES = ["application/pdf", DOCX_MIME];
 
@@ -102,6 +104,13 @@ const notifyPaymentRequestDecision = async (
       declineReason,
     },
   });
+
+  await notify(
+    requestedBy,
+    NOTIFICATION_TYPE.PAYMENT_REQUEST_DECIDED,
+    `Your ${requestType} request on "${job.jobTitle}" was ${approved ? "approved" : "declined"}`,
+    { jobId: job.id, requestType, approved, amount, currency },
+  );
 };
 
 // Exported for storeOrderController.ts — a store checkout creates a Job
@@ -543,6 +552,13 @@ export const markStageDone = asyncHandler(async (req: Request, res: Response) =>
 
   await job.save();
 
+  await notify(
+    job.client.userId,
+    NOTIFICATION_TYPE.JOB_STAGE_DONE,
+    `A stage on "${job.jobTitle}" was marked done and is ready for your verification`,
+    { jobId: job.id, stageId: stage.id },
+  );
+
   res.status(200).json(job);
 });
 
@@ -766,6 +782,17 @@ export const resolveDispute = asyncHandler(async (req: Request, res: Response) =
   job.status = JOB_STATUS.ACTIVE;
 
   await job.save();
+
+  await Promise.all(
+    [job.client.userId, job.provider.userId].map((userId) =>
+      notify(
+        userId,
+        NOTIFICATION_TYPE.JOB_DISPUTE_RESOLVED,
+        `The dispute on "${job.jobTitle}" has been resolved`,
+        { jobId: job.id },
+      ),
+    ),
+  );
 
   res.status(200).json(job);
 });

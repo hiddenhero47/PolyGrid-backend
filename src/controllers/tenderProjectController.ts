@@ -18,6 +18,8 @@ import { getPlatformFeePercent } from "./jobController";
 import { loadEligibleClientProfile } from "./clientProfileController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
 import { IMediaFile } from "../models/mediaFile";
+import { NOTIFICATION_TYPE } from "../models/notificationModel";
+import { notify } from "../helpers/notify";
 import {
   uploadHandler,
   deleteStoredFile,
@@ -383,6 +385,42 @@ export const listTenderProjects = asyncHandler(async (req: Request, res: Respons
   });
 });
 
+// @desc    Public teaser for the Tenders board — counts only, never any
+//          project's own detail (title, poster, budget, files, …). The
+//          board itself stays gated behind a verified, subscribed
+//          ContractorProfile (listTenderProjects above); this just gives
+//          an anonymous visitor enough ("42 open projects, mostly
+//          electrical") to see there's real activity worth subscribing
+//          for — the "make the board public" ask, without actually
+//          exposing a single project to someone who hasn't subscribed.
+// @route   GET /api/tender-projects/public-summary?country=
+// @access  Public
+export const getPublicTenderSummary = asyncHandler(async (req: Request, res: Response) => {
+  const { country } = req.query as { country?: string };
+
+  const match: Record<string, unknown> = {
+    status: TENDER_PROJECT_STATUS.OPEN,
+    bidDeadline: { $gt: new Date() },
+  };
+  if (country) {
+    match["location.country"] = String(country).toUpperCase();
+  }
+
+  const [totalOpen, byCategory] = await Promise.all([
+    TenderProject.countDocuments(match),
+    TenderProject.aggregate([
+      { $match: match },
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]),
+  ]);
+
+  res.status(200).json({
+    totalOpen,
+    byCategory: byCategory.map((c) => ({ category: c._id, count: c.count })),
+  });
+});
+
 // @desc    View a single project's full detail, including signed links for
 //          its attached files — gated to the poster, an eligible
 //          contractor, or an admin. Everyone else gets the same
@@ -673,6 +711,13 @@ export const awardBid = asyncHandler(async (req: Request, res: Response) => {
   project.awardedBid = bid._id as mongoose.Types.ObjectId;
   project.job = job._id as mongoose.Types.ObjectId;
   await project.save();
+
+  await notify(
+    bid.bidder as mongoose.Types.ObjectId,
+    NOTIFICATION_TYPE.TENDER_BID_AWARDED,
+    `Your bid on "${project.title}" was awarded`,
+    { projectId: project.id, jobId: job.id },
+  );
 
   res.status(200).json({ ...toPublicTenderProject(project), job });
 });

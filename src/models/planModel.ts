@@ -1,5 +1,5 @@
 import mongoose, { Document, Model, Schema } from "mongoose";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 
 export const PLAN_TIER = {
   FREE: "free",
@@ -58,16 +58,7 @@ const planSchema = new Schema<IPlan>(
       required: true,
       min: 0,
     },
-    currency: {
-      type: String,
-      default: "USD",
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, default: PLATFORM_CURRENCY },
     isActive: {
       type: Boolean,
       default: true,

@@ -3,7 +3,7 @@ import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { Conversation, IConversation, sortParticipants } from "../models/conversationModel";
 import { Message, IMessage } from "../models/messageModel";
-import { MessageReport } from "../models/messageReportModel";
+import { MessageReport, MESSAGE_REPORT_STATUS } from "../models/messageReportModel";
 import { Contact } from "../models/contactModel";
 import { User, IUser } from "../models/userModel";
 import { emitToUser } from "../socket";
@@ -275,4 +275,42 @@ export const getMessageReports = asyncHandler(async (req: Request, res: Response
     data,
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
+});
+
+// @desc    Resolve a reported message — the one action this queue
+//          previously had none of. Always marks the report reviewed;
+//          optionally also redacts the underlying message's content
+//          (replaces its body, doesn't delete the record — same "never
+//          truly destroy, flip a flag" instinct the rest of this
+//          codebase uses) when the admin decides the message itself
+//          needs to go, not just the report acknowledged.
+// @route   PATCH /api/messages/reports/:id/resolve
+// @access  Private (Admin / Super Admin only)
+const REDACTED_MESSAGE_BODY = "[message removed by moderator]";
+
+export const resolveMessageReport = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const { redactMessage } = req.body;
+
+  const report = await MessageReport.findById(req.params.id);
+  if (!report) {
+    res.status(404);
+    throw new Error("Report not found");
+  }
+
+  if (report.status === MESSAGE_REPORT_STATUS.RESOLVED) {
+    res.status(400);
+    throw new Error("This report has already been resolved");
+  }
+
+  if (redactMessage) {
+    await Message.updateOne({ _id: report.messageId }, { body: REDACTED_MESSAGE_BODY });
+  }
+
+  report.status = MESSAGE_REPORT_STATUS.RESOLVED;
+  report.resolvedBy = requester._id as mongoose.Types.ObjectId;
+  report.resolvedAt = new Date();
+  await report.save();
+
+  res.status(200).json(report);
 });

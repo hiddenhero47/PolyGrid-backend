@@ -596,6 +596,12 @@ describe("PATCH /api/tender-projects/:id/award", () => {
 
     const job = await Job.findById(res.body.job._id);
     expect(job).toBeTruthy();
+
+    const winnerNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(winnerUser)}`);
+    expect(winnerNotifications.body.data).toHaveLength(1);
+    expect(winnerNotifications.body.data[0].type).toBe("tender_bid_awarded");
   });
 
   it("blocks awarding on a non-open project", async () => {
@@ -672,5 +678,42 @@ describe("GET /api/tender-projects/me and /bids/mine", () => {
       .set("Authorization", `Bearer ${generateToken(contractorUser)}`);
 
     expect(res.body.data).toHaveLength(2);
+  });
+});
+
+describe("GET /api/tender-projects/public-summary", () => {
+  it("is public and returns only counts, never a project's own detail", async () => {
+    const poster = await createUserWithActiveSubscription();
+    await createTenderProject({ postedBy: poster, category: TENDER_CATEGORY.ELECTRICAL });
+    await createTenderProject({ postedBy: poster, category: TENDER_CATEGORY.ELECTRICAL });
+    await createTenderProject({ postedBy: poster, category: TENDER_CATEGORY.PLUMBING });
+    // Expired bid deadline — shouldn't count as "open".
+    await createTenderProject({
+      postedBy: poster,
+      category: TENDER_CATEGORY.PLUMBING,
+      bidDeadline: new Date(Date.now() - 1000),
+    });
+
+    const res = await request(app).get("/api/tender-projects/public-summary");
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalOpen).toBe(3);
+    expect(res.body.byCategory).toEqual(
+      expect.arrayContaining([
+        { category: TENDER_CATEGORY.ELECTRICAL, count: 2 },
+        { category: TENDER_CATEGORY.PLUMBING, count: 1 },
+      ]),
+    );
+    expect(res.body.data).toBeUndefined();
+  });
+
+  it("filters by country", async () => {
+    const poster = await createUserWithActiveSubscription();
+    await createTenderProject({ postedBy: poster, location: { country: "NG" } });
+    await createTenderProject({ postedBy: poster, location: { country: "GH" } });
+
+    const res = await request(app).get("/api/tender-projects/public-summary?country=gh");
+
+    expect(res.body.totalOpen).toBe(1);
   });
 });

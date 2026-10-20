@@ -354,6 +354,10 @@ describe("GET /api/verifications/me", () => {
       .set("Authorization", `Bearer ${generateToken(me)}`);
 
     expect(res.body.data).toHaveLength(1);
+    // form/documents are keyed by `key`/`type` only — the human-readable
+    // label lives on the template this submission was validated against,
+    // which this list needs populated to actually render anything.
+    expect(res.body.data[0].templateId.documents[0].label).toBe("Business certificate");
   });
 });
 
@@ -389,6 +393,7 @@ describe("admin review", () => {
       .set("Authorization", `Bearer ${generateToken(customerCare)}`);
     expect(list.status).toBe(200);
     expect(list.body.data).toHaveLength(1);
+    expect(list.body.data[0].templateId.documents[0].label).toBe("Business certificate");
 
     const approve = await request(app)
       .patch(`/api/verifications/${submitted.body._id}/approve`)
@@ -396,8 +401,8 @@ describe("admin review", () => {
     expect(approve.status).toBe(401);
   });
 
-  it("approving flips the profile's isVerified and points it at that record", async () => {
-    const { profile, submitted } = await setupSubmission();
+  it("approving flips the profile's isVerified, points it at that record, and notifies the owner", async () => {
+    const { user, profile, submitted } = await setupSubmission();
     const admin = await createAdmin();
 
     const queue = await request(app)
@@ -415,6 +420,12 @@ describe("admin review", () => {
     const updatedProfile = await ConsultancyProfile.findById(profile.id);
     expect(updatedProfile?.isVerified).toBe(true);
     expect(updatedProfile?.verification?.toString()).toBe(submitted.body._id);
+
+    const notifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+    expect(notifications.body.data).toHaveLength(1);
+    expect(notifications.body.data[0].type).toBe("verification_approved");
   });
 
   it("rejecting requires a reason and does not verify the profile", async () => {

@@ -1,5 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField } from "../helpers/currencyReference";
 import { isValidCountryCode, isValidStateCode } from "../helpers/countryReference";
 
 // "Checkout" for physical goods — see docs/store-plan.md. Deliberately NOT
@@ -110,16 +110,7 @@ const storeOrderSchema = new Schema<IStoreOrder>(
     itemsTotalSnapshot: { type: Number, required: true, min: 0 },
     shippingTotalSnapshot: { type: Number, required: true, min: 0 },
     totalSnapshot: { type: Number, required: true, min: 0 },
-    currency: {
-      type: String,
-      required: true,
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, required: true },
     note: { type: String, trim: true, maxlength: 2000 },
   },
   { timestamps: { createdAt: true, updatedAt: false } },

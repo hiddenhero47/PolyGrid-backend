@@ -1,5 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
-import { isValidCurrencyCode } from "../helpers/currencyReference";
+import { currencyField, PLATFORM_CURRENCY } from "../helpers/currencyReference";
 
 // A contractor's bid on a TenderProject — sealed from every other
 // contractor (see tenderProjectModel.ts); only the project's own poster
@@ -41,16 +41,7 @@ const bidSchema = new Schema<IBid>(
     contractorId: { type: Schema.Types.ObjectId, ref: "ContractorProfile", required: true },
     bidder: { type: Schema.Types.ObjectId, ref: "User", required: true },
     amount: { type: Number, required: true, min: 0 },
-    currency: {
-      type: String,
-      default: "USD",
-      uppercase: true,
-      trim: true,
-      validate: {
-        validator: isValidCurrencyCode,
-        message: (props: { value: string }) => `${props.value} is not a recognized ISO 4217 currency code`,
-      },
-    },
+    currency: { ...currencyField, default: PLATFORM_CURRENCY },
     proposal: { type: String, required: [true, "Please add a proposal"] },
     estimatedDurationDays: { type: Number, min: 1 },
     status: {

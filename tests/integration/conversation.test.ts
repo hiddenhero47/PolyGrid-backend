@@ -304,3 +304,80 @@ describe("POST /api/messages/:id/report and GET /api/messages/reports", () => {
     expect(res.body.data).toHaveLength(1);
   });
 });
+
+describe("PATCH /api/messages/reports/:id/resolve", () => {
+  const reportSomething = async () => {
+    const me = await createUser();
+    const contact = await createUser();
+    await createContactConnection(me, contact);
+    const token = generateToken(me);
+
+    const started = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ userId: contact.id });
+    const sent = await request(app)
+      .post(`/api/conversations/${started.body.id}/messages`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ body: "something reportable" });
+    const reported = await request(app)
+      .post(`/api/messages/${sent.body._id}/report`)
+      .set("Authorization", `Bearer ${generateToken(contact)}`)
+      .send({ reason: "This felt harassing" });
+
+    return { messageId: sent.body._id as string, reportId: reported.body._id as string };
+  };
+
+  it("marks a report resolved without touching the message by default", async () => {
+    const { messageId, reportId } = await reportSomething();
+    const admin = await createAdmin();
+
+    const res = await request(app)
+      .patch(`/api/messages/reports/${reportId}/resolve`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("resolved");
+    expect((await Message.findById(messageId))?.body).toBe("something reportable");
+  });
+
+  it("also redacts the underlying message when redactMessage is true", async () => {
+    const { messageId, reportId } = await reportSomething();
+    const admin = await createAdmin();
+
+    const res = await request(app)
+      .patch(`/api/messages/reports/${reportId}/resolve`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ redactMessage: true });
+
+    expect(res.status).toBe(200);
+    expect((await Message.findById(messageId))?.body).toBe("[message removed by moderator]");
+  });
+
+  it("rejects resolving an already-resolved report", async () => {
+    const { reportId } = await reportSomething();
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+
+    await request(app).patch(`/api/messages/reports/${reportId}/resolve`).set("Authorization", `Bearer ${token}`).send({});
+    const second = await request(app)
+      .patch(`/api/messages/reports/${reportId}/resolve`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+
+    expect(second.status).toBe(400);
+  });
+
+  it("blocks customer_care from resolving — view only", async () => {
+    const { reportId } = await reportSomething();
+    const customerCare = await createCustomerCare();
+
+    const res = await request(app)
+      .patch(`/api/messages/reports/${reportId}/resolve`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`)
+      .send({});
+
+    expect(res.status).toBe(401);
+  });
+});

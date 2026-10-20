@@ -341,8 +341,12 @@ export const searchStores = asyncHandler(async (req: Request, res: Response) => 
   const total = totalResult[0]?.total ?? 0;
 
   res.status(200).json({
+    // Aggregate results are plain objects, not Mongoose documents — no
+    // `.id` virtual — so toPublicStoreProfile's `profile.id` reads as
+    // undefined here unless patched back in from `_id` explicitly.
     data: stores.map((store) => ({
       ...toPublicStoreProfile(store as IStoreProfile),
+      id: store._id,
       previewProducts: (store.previewProducts as IProduct[]).map(toPublicProduct),
     })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },

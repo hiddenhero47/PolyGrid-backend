@@ -17,6 +17,8 @@ import { buildFormSchema } from "../validators/verification/templateFormSchema";
 import { uploadHandler, deleteStoredFile, FILE_VISIBILITY } from "../helpers/fileStorage";
 import { pickDefinedFields } from "../helpers/sanitize";
 import { parseMultipartData } from "../helpers/parseMultipartData";
+import { NOTIFICATION_TYPE } from "../models/notificationModel";
+import { notify } from "../helpers/notify";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -257,7 +259,17 @@ export const getMyVerifications = asyncHandler(async (req: Request, res: Respons
   }
 
   const [data, total] = await Promise.all([
-    Verification.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Verification.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      // `form`/`documents` are keyed by `key`/`type` only (e.g.
+      // "business_certificate") — the human-readable label lives on the
+      // template this submission was validated against, not on the
+      // submission itself. Populating it here means this page never
+      // needs a second round-trip to GET /api/verification-templates
+      // just to render what it's already showing.
+      .populate("templateId", "name version fields documents"),
     Verification.countDocuments(filter),
   ]);
 
@@ -290,7 +302,10 @@ export const getVerifications = asyncHandler(async (req: Request, res: Response)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("user", "fullName email"),
+      .populate("user", "fullName email")
+      // See getMyVerifications' identical populate for why — same gap,
+      // same fix, for the admin queue.
+      .populate("templateId", "name version fields documents"),
     Verification.countDocuments(filter),
   ]);
 
@@ -329,6 +344,16 @@ export const approveVerification = asyncHandler(async (req: Request, res: Respon
     { isVerified: true, verification: verification._id },
   );
 
+  const profile = await ProfileModel.findById(verification.profileId).select("userId");
+  if (profile) {
+    await notify(
+      profile.userId as mongoose.Types.ObjectId,
+      NOTIFICATION_TYPE.VERIFICATION_APPROVED,
+      "Your verification was approved",
+      { verificationId: verification.id },
+    );
+  }
+
   res.status(200).json(verification);
 });
 
@@ -356,6 +381,17 @@ export const rejectVerification = asyncHandler(async (req: Request, res: Respons
   verification.reviewedBy = admin._id as mongoose.Types.ObjectId;
   verification.reviewedAt = new Date();
   await verification.save();
+
+  const ProfileModel = PROFILE_MODEL_REGISTRY[verification.profileType as ProfileType];
+  const profile = await ProfileModel.findById(verification.profileId).select("userId");
+  if (profile) {
+    await notify(
+      profile.userId as mongoose.Types.ObjectId,
+      NOTIFICATION_TYPE.VERIFICATION_REJECTED,
+      "Your verification was rejected",
+      { verificationId: verification.id, reason },
+    );
+  }
 
   res.status(200).json(verification);
 });

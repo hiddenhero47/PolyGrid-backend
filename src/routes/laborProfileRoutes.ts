@@ -9,6 +9,7 @@ import {
   addPortfolioMedia,
   removePortfolioMedia,
   removePortfolioItem,
+  uploadAvatar,
 } from "../controllers/laborProfileController";
 import { protect } from "../middleware/authMiddleware";
 import { validateBody } from "../validators/validate";
@@ -24,6 +25,7 @@ router.post("/", protect, validateBody(createLaborProfileSchema), createLaborPro
 router.get("/", searchWorkers);
 router.get("/me", protect, getMyLaborProfile);
 router.patch("/me", protect, validateBody(updateLaborProfileSchema), updateMyLaborProfile);
+router.post("/me/avatar", protect, uploadAvatar);
 
 router.post("/me/portfolio", protect, validateBody(addPortfolioItemSchema), addPortfolioItem);
 router.post("/me/portfolio/:itemId/media", protect, addPortfolioMedia);

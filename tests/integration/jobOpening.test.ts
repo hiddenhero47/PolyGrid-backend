@@ -279,6 +279,55 @@ describe("GET /api/job-openings (the job board)", () => {
       .set("Authorization", `Bearer ${generateToken(workerUser)}`);
     expect(filtered.body.data).toHaveLength(1);
   });
+
+  it("supports a lat/lng/radiusKm geo search, returning distanceKm but never the real coordinates", async () => {
+    const poster = await createEligiblePoster();
+    // Lagos, matching the fixture default (6.5244, 3.3792).
+    const nearby = await createJobOpening({ postedBy: poster, title: "Nearby job" });
+    // Ibadan — roughly 113km from Lagos: outside a 100km radius, but well
+    // inside the endpoint's 500km MAX_RADIUS_KM cap.
+    await createJobOpening({
+      postedBy: poster,
+      title: "Far job",
+      coordinates: { lat: 7.3775, lng: 3.947 },
+    });
+
+    const { user: workerUser } = await createEligibleWorker();
+
+    const res = await request(app)
+      .get("/api/job-openings?lat=6.5244&lng=3.3792&radiusKm=100")
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].title).toBe("Nearby job");
+    expect(res.body.data[0].id).toBe(nearby.id);
+    expect(typeof res.body.data[0].distanceKm).toBe("number");
+    expect(res.body.data[0].distanceKm).toBeLessThan(5);
+    expect(res.body.data[0].coordinates).toBeUndefined();
+    expect(res.body.data[0].location).toBeUndefined();
+
+    const wide = await request(app)
+      .get("/api/job-openings?lat=6.5244&lng=3.3792&radiusKm=1000")
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`);
+    expect(wide.body.data.map((d: { title: string }) => d.title).sort()).toEqual(
+      ["Far job", "Nearby job"].sort(),
+    );
+  });
+
+  it("falls back to the ordinary (non-geo) listing when lat/lng are missing or invalid", async () => {
+    const poster = await createEligiblePoster();
+    await createJobOpening({ postedBy: poster });
+    const { user: workerUser } = await createEligibleWorker();
+
+    const res = await request(app)
+      .get("/api/job-openings?lat=not-a-number&lng=3.3792")
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].distanceKm).toBeUndefined();
+  });
 });
 
 describe("GET /api/job-openings/:id — the location-reveal safety gate", () => {
@@ -528,6 +577,12 @@ describe("PATCH .../applications/:applicationId/accept and /reject", () => {
 
     const job = await Job.findById(res.body.job._id);
     expect(job).toBeTruthy();
+
+    const workerNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`);
+    expect(workerNotifications.body.data).toHaveLength(1);
+    expect(workerNotifications.body.data[0].type).toBe("job_application_accepted");
   });
 
   it("rejects the remaining pending applications once the opening fills", async () => {
@@ -568,6 +623,12 @@ describe("PATCH .../applications/:applicationId/accept and /reject", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("rejected");
+
+    const workerNotifications = await request(app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`);
+    expect(workerNotifications.body.data).toHaveLength(1);
+    expect(workerNotifications.body.data[0].type).toBe("job_application_rejected");
   });
 });
 
@@ -614,5 +675,37 @@ describe("GET /api/job-openings/me and /applications/mine", () => {
       .get("/api/job-openings/applications/mine")
       .set("Authorization", `Bearer ${generateToken(workerUser)}`);
     expect(myApplications.body.data).toHaveLength(1);
+  });
+});
+
+describe("GET /api/job-openings/public-summary", () => {
+  it("is public and returns only counts, never a listing's own detail", async () => {
+    const poster = await createEligiblePoster();
+    await createJobOpening({ postedBy: poster, category: LABOR_SKILL.ELECTRICAL });
+    await createJobOpening({ postedBy: poster, category: LABOR_SKILL.ELECTRICAL });
+    await createJobOpening({ postedBy: poster, category: LABOR_SKILL.GENERAL_LABOR });
+    await createJobOpening({ postedBy: poster, category: LABOR_SKILL.GENERAL_LABOR, status: "filled" });
+
+    const res = await request(app).get("/api/job-openings/public-summary");
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalOpen).toBe(3);
+    expect(res.body.byCategory).toEqual(
+      expect.arrayContaining([
+        { category: LABOR_SKILL.ELECTRICAL, count: 2 },
+        { category: LABOR_SKILL.GENERAL_LABOR, count: 1 },
+      ]),
+    );
+    expect(res.body.data).toBeUndefined();
+  });
+
+  it("filters by country", async () => {
+    const poster = await createEligiblePoster();
+    await createJobOpening({ postedBy: poster, generalArea: { country: "NG" } });
+    await createJobOpening({ postedBy: poster, generalArea: { country: "GH" } });
+
+    const res = await request(app).get("/api/job-openings/public-summary?country=gh");
+
+    expect(res.body.totalOpen).toBe(1);
   });
 });

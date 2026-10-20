@@ -245,6 +245,10 @@ describe("GET /api/store-profiles (search)", () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].slug).toBe("visible-store");
+    // Search results come from an aggregate() pipeline, whose plain
+    // objects have no `.id` virtual — a frontend needs this to link into
+    // the profile, so it must be patched back in explicitly.
+    expect(res.body.data[0].id).toEqual(expect.any(String));
   });
 
   it("includes a preview of products for each matching store", async () => {

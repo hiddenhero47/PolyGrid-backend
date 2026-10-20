@@ -10,7 +10,7 @@ import request from "supertest";
 import { authenticator } from "otplib";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
+import { createUser, createAdmin, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 import bcrypt from "bcryptjs";
@@ -47,6 +47,27 @@ describe("POST /api/users (register)", () => {
 
     expect(me.status).toBe(200);
     expect(me.body.email).toBe("jane@example.com");
+    expect(me.body.verified).toBe(false);
+  });
+
+  it("sends a verification email on register, without it overwriting the auth token", async () => {
+    const res = await request(app)
+      .post("/api/users")
+      .send({ fullName: "Jane Doe", email: "verify-me@example.com", password: "password123" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.token).toEqual(expect.any(String));
+    expect(res.body.verifyEmailToken).toEqual(expect.any(String));
+    expect(res.body.token).not.toBe(res.body.verifyEmailToken);
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "verify-me@example.com", template: "verifyEmail" }),
+    );
+
+    // The auth token from registration still logs them in.
+    const me = await request(app)
+      .get("/api/users/me")
+      .set("Authorization", `Bearer ${res.body.token}`);
+    expect(me.status).toBe(200);
   });
 
   it("rejects a duplicate email", async () => {
@@ -539,6 +560,79 @@ describe("password reset flow", () => {
   });
 });
 
+describe("email verification flow", () => {
+  it("verifies the email from the token registration already sent", async () => {
+    const registerRes = await request(app)
+      .post("/api/users")
+      .send({ fullName: "Jane Doe", email: "jane-verify@example.com", password: "password123" });
+
+    const verifyRes = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: registerRes.body.verifyEmailToken });
+
+    expect(verifyRes.status).toBe(200);
+
+    const me = await request(app)
+      .get("/api/users/me")
+      .set("Authorization", `Bearer ${registerRes.body.token}`);
+    expect(me.body.verified).toBe(true);
+  });
+
+  it("resends a verification email, and does not reveal account existence or verified status", async () => {
+    const unverified = await createUser();
+
+    const resendRes = await request(app)
+      .post("/api/users/resend-verification")
+      .send({ email: unverified.email });
+    expect(resendRes.status).toBe(200);
+    expect(resendRes.body.verifyEmailToken).toEqual(expect.any(String));
+    expect(sendTemplatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: unverified.email, template: "verifyEmail" }),
+    );
+
+    (sendTemplatedEmail as jest.Mock).mockClear();
+
+    const nobodyRes = await request(app)
+      .post("/api/users/resend-verification")
+      .send({ email: "nobody@example.com" });
+    expect(nobodyRes.status).toBe(200);
+    expect(nobodyRes.body.verifyEmailToken).toBeUndefined();
+    expect(nobodyRes.body.message).toBe(resendRes.body.message);
+    expect(sendTemplatedEmail).not.toHaveBeenCalled();
+
+    const verified = await createUser({ verified: true });
+    const alreadyVerifiedRes = await request(app)
+      .post("/api/users/resend-verification")
+      .send({ email: verified.email });
+    expect(alreadyVerifiedRes.body.message).toBe(resendRes.body.message);
+    expect(sendTemplatedEmail).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid or already-used verification token", async () => {
+    const invalid = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: "not-a-real-token" });
+    expect(invalid.status).toBe(400);
+
+    const registerRes = await request(app)
+      .post("/api/users")
+      .send({ fullName: "Reuse Test", email: "reuse-verify@example.com", password: "password123" });
+
+    const first = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: registerRes.body.verifyEmailToken });
+    expect(first.status).toBe(200);
+
+    // Already verified — a second use of the same token is a no-op, not
+    // an error, since the account is already in the state it asked for.
+    const second = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: registerRes.body.verifyEmailToken });
+    expect(second.status).toBe(200);
+    expect(second.body.message).toBe("Email already verified");
+  });
+});
+
 describe("admin-only user management", () => {
   it("blocks a basic user from creating an admin", async () => {
     const user = await createUser();
@@ -580,6 +674,45 @@ describe("admin-only user management", () => {
     expect(res.body.pagination.total).toBeGreaterThanOrEqual(3);
   });
 
+  it("lets a plain admin list users too (read-only — admin-create/role/account-status stay super_admin-only)", async () => {
+    const admin = await createAdmin();
+    const token = generateToken(admin);
+    await createUser();
+
+    const res = await request(app).get("/api/users").set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(200);
+
+    const blocked = await request(app)
+      .post("/api/users/admin-create")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ fullName: "New Admin", email: "nope@example.com", password: "password123" });
+    expect(blocked.status).toBe(401);
+  });
+
+  it("finds a user by a case-insensitive match on email or fullName via ?q=", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+    await createUser({ fullName: "Charles Okonkwo", email: "charles.okonkwo@example.com" });
+    await createUser({ fullName: "Someone Else", email: "someone@example.com" });
+
+    const byName = await request(app)
+      .get("/api/users?q=charles")
+      .set("Authorization", `Bearer ${token}`);
+    expect(byName.body.data).toHaveLength(1);
+    expect(byName.body.data[0].email).toBe("charles.okonkwo@example.com");
+
+    const byEmail = await request(app)
+      .get("/api/users?q=OKONKWO@EXAMPLE")
+      .set("Authorization", `Bearer ${token}`);
+    expect(byEmail.body.data).toHaveLength(1);
+
+    // A regex metacharacter in the query must never throw a 500.
+    const weird = await request(app)
+      .get("/api/users?q=" + encodeURIComponent("a.b*c("))
+      .set("Authorization", `Bearer ${token}`);
+    expect(weird.status).toBe(200);
+  });
+
   it("changes a user's role", async () => {
     const superAdmin = await createSuperAdmin();
     const token = generateToken(superAdmin);
@@ -618,5 +751,71 @@ describe("admin-only user management", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.user.systemRole).toBe(SYSTEM_ROLE.CUSTOMER_CARE);
+  });
+});
+
+describe("PATCH /api/users/:id/account-status", () => {
+  it("suspends a user, and their very next request gets rejected", async () => {
+    const superAdmin = await createSuperAdmin();
+    const adminToken = generateToken(superAdmin);
+    const user = await createUser();
+    const userToken = generateToken(user);
+
+    const before = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(before.status).toBe(200);
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/account-status`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ accountStatus: "suspended" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.accountStatus).toBe("suspended");
+
+    const after = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(after.status).toBe(403);
+  });
+
+  it("reinstates a suspended user", async () => {
+    const superAdmin = await createSuperAdmin();
+    const adminToken = generateToken(superAdmin);
+    const user = await createUser({ accountStatus: "suspended" });
+    const userToken = generateToken(user);
+
+    const blocked = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(blocked.status).toBe(403);
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/account-status`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ accountStatus: "active" });
+    expect(res.status).toBe(200);
+
+    const restored = await request(app).get("/api/users/me").set("Authorization", `Bearer ${userToken}`);
+    expect(restored.status).toBe(200);
+  });
+
+  it("prevents suspending your own account", async () => {
+    const superAdmin = await createSuperAdmin();
+    const token = generateToken(superAdmin);
+
+    const res = await request(app)
+      .patch(`/api/users/${superAdmin.id}/account-status`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ accountStatus: "suspended" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a non-super-admin from suspending anyone", async () => {
+    const admin = await createAdmin();
+    const user = await createUser();
+
+    const res = await request(app)
+      .patch(`/api/users/${user.id}/account-status`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ accountStatus: "suspended" });
+
+    expect(res.status).toBe(401);
   });
 });

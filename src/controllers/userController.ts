@@ -91,6 +91,50 @@ const enforceTwoFactor = (user: IUser, token: string | undefined, res: Response)
   }
 };
 
+// Shared by registerUser/resendVerification. Same idempotent-reuse
+// pattern as requestReset's token: a still-valid existing token is
+// reused rather than silently invalidating one a user already has open
+// in another tab. 24h, not requestReset's 10m — there's no stale-
+// credential risk here the way there is with a password reset link, and
+// someone verifying from a different device than they registered on
+// shouldn't have to race a short window.
+const sendVerificationEmail = async (
+  user: IUser,
+): Promise<{ verifyEmailToken: string; verifyUrl: string }> => {
+  const existingToken = user.tokenCache?.get(TOKENS.VERIFY_EMAIL);
+
+  let code: string;
+  let expiresAt: Date;
+
+  if (existingToken && existingToken.expiresAt > new Date()) {
+    code = existingToken.code;
+    expiresAt = existingToken.expiresAt;
+  } else {
+    code = crypto.randomUUID();
+    expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    user.tokenCache.set(TOKENS.VERIFY_EMAIL, { code, expiresAt });
+    await user.save();
+  }
+
+  const verifyEmailToken = jwt.sign(
+    { email: user.email, code },
+    process.env.JWT_EMAIL_SECRET as string,
+    { expiresIn: "24h" },
+  );
+
+  const verifyUrl = `${process.env.FRONTEND_URL}/verify-email/${verifyEmailToken}`;
+
+  await sendTemplatedEmail({
+    to: user.email,
+    subject: "Verify Your Email",
+    template: "verifyEmail",
+    variables: { name: user.fullName, verifyUrl, expiresIn: "24 hours" },
+  });
+
+  return { verifyEmailToken, verifyUrl };
+};
+
 // @desc    Register a new user
 // @route   POST /api/users
 // @access  Public
@@ -114,10 +158,106 @@ export const registerUser = asyncHandler(async (req: Request, res: Response) => 
     systemRole: SYSTEM_ROLE.USER,
   });
 
+  // Never lets a Mailgun hiccup fail the registration itself — the account
+  // is already created and usable (verified or not, nothing gates on it
+  // today); resendVerification below is the recovery path if this fails
+  // or the email never arrives.
+  let verification: { verifyEmailToken: string; verifyUrl: string } | undefined;
+  try {
+    verification = await sendVerificationEmail(user);
+  } catch (err) {
+    console.error("Failed to send verification email", err);
+  }
+
   res.status(201).json({
     ...toPublicUser(user),
     token: generateToken(user),
+    // Outside production only — same reasoning as requestReset's dev-mode
+    // resetUrl/token: lets the verify flow be exercised end-to-end without
+    // real Mailgun credentials configured locally. Named distinctly from
+    // the auth `token` above so spreading this never overwrites it.
+    ...(process.env.NODE_ENV !== "production" && verification ? verification : {}),
   });
+});
+
+// @desc    Resend the account verification email
+// @route   POST /api/users/resend-verification
+// @access  Public
+export const resendVerification = asyncHandler(async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+
+  // Same no-enumeration instinct as requestReset: identical response
+  // whether the account doesn't exist, is already verified, or the email
+  // actually goes out — none of that is anyone else's business to probe.
+  const genericResponse = {
+    message: "If an account exists with that email and isn't verified yet, a verification link has been sent.",
+  };
+
+  if (!user || user.verified) {
+    res.status(200).json(genericResponse);
+    return;
+  }
+
+  const verification = await sendVerificationEmail(user);
+
+  res.status(200).json({
+    ...genericResponse,
+    ...(process.env.NODE_ENV !== "production" ? verification : {}),
+  });
+});
+
+// @desc    Verify an account's email using a verification token
+// @route   POST /api/users/verify-email
+// @access  Public
+export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
+  const { token } = req.body;
+
+  let decoded: { email: string; code: string };
+
+  try {
+    decoded = jwt.verify(token, process.env.JWT_EMAIL_SECRET as string) as {
+      email: string;
+      code: string;
+    };
+  } catch {
+    res.status(400);
+    throw new Error("Invalid or expired verification token");
+  }
+
+  const user = await User.findOne({ email: decoded.email });
+
+  if (!user) {
+    res.status(400);
+    throw new Error("Invalid or expired verification token");
+  }
+
+  if (user.verified) {
+    res.status(200).json({ message: "Email already verified" });
+    return;
+  }
+
+  const verifyToken = user.tokenCache?.get(TOKENS.VERIFY_EMAIL);
+
+  if (!verifyToken || verifyToken.code !== decoded.code) {
+    res.status(400);
+    throw new Error("Invalid or expired verification token");
+  }
+
+  if (verifyToken.expiresAt < new Date()) {
+    user.tokenCache.delete(TOKENS.VERIFY_EMAIL);
+    await user.save();
+
+    res.status(400);
+    throw new Error("Verification token has expired");
+  }
+
+  user.verified = true;
+  user.tokenCache.delete(TOKENS.VERIFY_EMAIL);
+  await user.save();
+
+  res.status(200).json({ message: "Email verified successfully" });
 });
 
 // @desc    Authenticate a user
@@ -766,17 +906,21 @@ export const registerAdmin = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json(toPublicUser(admin));
 });
 
-// @desc    List users (filterable, paginated)
-// @route   GET /api/users
-// @access  Private (Super Admin only)
+// @desc    List users (filterable, paginated) — the read side is
+//          Admin/Super Admin (any mutation on a user, role/account-status
+//          changes, stays Super-Admin-only, same as before); an admin
+//          needs this to find a userId before e.g. POST /api/subscriptions.
+// @route   GET /api/users?systemRole=&userId=&q=
+// @access  Private (Admin / Super Admin)
 export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const skip = (page - 1) * limit;
 
-  const { systemRole, userId } = req.query as {
+  const { systemRole, userId, q } = req.query as {
     systemRole?: string;
     userId?: string;
+    q?: string;
   };
 
   const filter: mongoose.FilterQuery<IUser> = {};
@@ -788,6 +932,16 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   if (userId && mongoose.Types.ObjectId.isValid(userId)) {
     filter._id = userId;
+  }
+
+  if (q && q.trim()) {
+    // Regex, not text search — this product has no $text index on User,
+    // and a prefix/substring match on a handful of hundred admin-facing
+    // rows doesn't need one. Escaped so a stray regex metacharacter in
+    // someone's search box (or email) can't throw or behave unexpectedly.
+    const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "i");
+    filter.$or = [{ email: pattern }, { fullName: pattern }];
   }
 
   const [users, total] = await Promise.all([
@@ -853,5 +1007,49 @@ export const changeUserRole = asyncHandler(async (req: Request, res: Response) =
   res.status(200).json({
     message: "User role updated successfully",
     user: { id: user._id, email: user.email, systemRole: user.systemRole },
+  });
+});
+
+// @desc    Suspend or reinstate a user's account — a platform-wide kill
+//          switch, independent of any one business profile's own status
+//          (constants/profileStatus.ts, which only hides that profile).
+//          Enforced in authMiddleware.getAuthenticatedUser, so it takes
+//          effect on the very next request. Same self/Super-Admin guards
+//          as changeUserRole above.
+// @route   PATCH /api/users/:id/account-status
+// @access  Private (Super Admin only)
+export const setAccountStatus = asyncHandler(async (req: Request, res: Response) => {
+  const id = req.params.id as string;
+  const { accountStatus } = req.body;
+  const requester = req.user as IUser;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid user id");
+  }
+
+  const user = await User.findById(id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  if (user._id.toString() === requester._id.toString()) {
+    res.status(400);
+    throw new Error("You cannot suspend your own account");
+  }
+
+  if (user.systemRole === SYSTEM_ROLE.SUPER_ADMIN) {
+    res.status(400);
+    throw new Error("Cannot suspend the Super Admin");
+  }
+
+  user.accountStatus = accountStatus;
+  await user.save();
+
+  res.status(200).json({
+    message: "Account status updated successfully",
+    user: { id: user._id, email: user.email, accountStatus: user.accountStatus },
   });
 });
