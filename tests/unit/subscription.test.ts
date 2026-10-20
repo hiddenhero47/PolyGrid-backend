@@ -10,6 +10,7 @@ import {
   requireActiveSubscription,
 } from "../../src/middleware/authMiddleware";
 import { SUBSCRIPTION_STATUS } from "../../src/models/subscriptionModel";
+import { getCarryoverDays, DAY_MS } from "../../src/helpers/profileSubscriptionSync";
 
 beforeAll(async () => {
   await connectTestDB();
@@ -50,6 +51,42 @@ describe("Subscription.isActive", () => {
     });
 
     expect(subscription.isActive()).toBe(false);
+  });
+});
+
+describe("getCarryoverDays", () => {
+  it("returns 0 for a user who has never subscribed", async () => {
+    const user = await createUser();
+    expect(await getCarryoverDays(user.id)).toBe(0);
+  });
+
+  it("returns 0 once the subscription has already expired", async () => {
+    const user = await createUser();
+    await createSubscription({ user, expiresAt: new Date(Date.now() - 1000) });
+    expect(await getCarryoverDays(user.id)).toBe(0);
+  });
+
+  it("returns 0 for a canceled subscription, even with time left on its clock", async () => {
+    const user = await createUser();
+    await createSubscription({
+      user,
+      status: SUBSCRIPTION_STATUS.CANCELED,
+      expiresAt: new Date(Date.now() + 5 * DAY_MS),
+    });
+    expect(await getCarryoverDays(user.id)).toBe(0);
+  });
+
+  it("floors to whole days — never rounds a partial day up", async () => {
+    const user = await createUser();
+    // 5 days + 20 hours left: floor must read as 5, not 6.
+    await createSubscription({ user, expiresAt: new Date(Date.now() + 5 * DAY_MS + 20 * 60 * 60 * 1000) });
+    expect(await getCarryoverDays(user.id)).toBe(5);
+  });
+
+  it("returns 0 for well under a day left, not a free day from rounding", async () => {
+    const user = await createUser();
+    await createSubscription({ user, expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000) }); // 2 hours
+    expect(await getCarryoverDays(user.id)).toBe(0);
   });
 });
 

@@ -119,6 +119,28 @@ describe("POST /api/subscriptions", () => {
     const secondSubscription = await Subscription.findById(second.body._id);
     expect(secondSubscription?.status).toBe("active");
   });
+
+  it("carries unused days from a still-active subscription forward onto the new one", async () => {
+    const admin = await createAdmin();
+    const user = await createUser();
+    // 5 days + 20 hours left — floors to exactly 5 carryover days.
+    await createSubscription({
+      user,
+      expiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000 + 20 * 60 * 60 * 1000),
+    });
+    const plan = await createPlan({ planTier: PLAN_TIER.ENTERPRISE, duration: 30 });
+
+    const res = await request(app)
+      .post("/api/subscriptions")
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ userId: user.id, planTier: plan.planTier });
+
+    expect(res.status).toBe(201);
+    const expiresAt = new Date(res.body.expiresAt).getTime();
+    const expected = Date.now() + (30 + 5) * 24 * 60 * 60 * 1000;
+    // A few seconds' tolerance for the time the request itself took.
+    expect(Math.abs(expiresAt - expected)).toBeLessThan(5000);
+  });
 });
 
 describe("GET /api/subscriptions/me", () => {

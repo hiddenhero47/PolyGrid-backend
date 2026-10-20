@@ -24,6 +24,7 @@ import {
   createAdmin,
   createActiveJob,
   createPlan,
+  createSubscription,
   createUserWithActiveSubscription,
   createDigitalCreatorProfile,
   createDigitalProduct,
@@ -276,6 +277,54 @@ describe("POST /api/payments/intent — validation (no Stripe network calls)", (
         .send({ targetType: "Subscription", planTier: PLAN_TIER.PRO });
 
       expect(res.status).toBe(400);
+    });
+
+    // No Stripe call involved — a free plan is activated directly, never
+    // routed through a real PaymentIntent (Stripe rejects a $0 amount
+    // outright), so this runs unconditionally rather than behind maybeIt.
+    it("activates a free plan directly, with no Stripe round trip needed", async () => {
+      const user = await createUser();
+      const plan = await createPlan({ planTier: PLAN_TIER.PRO, price: 0 });
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .send({ targetType: "Subscription", planTier: plan.planTier });
+
+      expect(res.status).toBe(201);
+      expect(res.body.requiresPayment).toBe(false);
+      expect(res.body.status).toBe("active");
+      expect(res.body.clientSecret).toBeUndefined();
+
+      const subscription = await Subscription.findById(res.body.subscriptionId);
+      expect(subscription?.status).toBe("active");
+
+      const updatedUser = await User.findById(user.id);
+      expect(updatedUser?.currentSubscription?.toString()).toBe(res.body.subscriptionId);
+
+      const payment = await Payment.findById(res.body.paymentId);
+      expect(payment?.amount).toBe(0);
+      expect(payment?.status).toBe("success");
+      expect(payment?.provider).toBe("manual");
+    });
+
+    it("carries unused days from a still-active subscription onto a newly-activated free plan", async () => {
+      const user = await createUser();
+      await createSubscription({
+        user,
+        expiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000 + 20 * 60 * 60 * 1000), // ~5.8 days
+      });
+      const freePlan = await createPlan({ planTier: PLAN_TIER.ENTERPRISE, price: 0, duration: 30 });
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .send({ targetType: "Subscription", planTier: freePlan.planTier });
+
+      expect(res.status).toBe(201);
+      const subscription = await Subscription.findById(res.body.subscriptionId);
+      const expected = Date.now() + (30 + 5) * 24 * 60 * 60 * 1000;
+      expect(Math.abs((subscription?.expiresAt.getTime() ?? 0) - expected)).toBeLessThan(5000);
     });
   });
 

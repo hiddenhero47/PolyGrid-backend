@@ -5,16 +5,19 @@ import { Payment, IPayment, PAYMENT_STATUS, PAYMENT_TARGET_TYPE, PaymentStatus, 
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
 import { IUser, User } from "../models/userModel";
 import { Job, JOB_STATUS } from "../models/jobModel";
-import { Plan } from "../models/planModel";
+import { Plan, IPlan } from "../models/planModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../models/subscriptionModel";
 import { DigitalProduct } from "../models/digitalProductModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
-import { syncProfilesSubscription, supersedeActiveSubscriptions } from "../helpers/profileSubscriptionSync";
+import {
+  syncProfilesSubscription,
+  supersedeActiveSubscriptions,
+  getCarryoverDays,
+  DAY_MS,
+} from "../helpers/profileSubscriptionSync";
 import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -91,6 +94,53 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
   res.status(201).json({ clientSecret, paymentId: payment.id });
 };
 
+// A free plan (price 0) has no real charge to make — Stripe's own
+// PaymentIntents reject a zero amount outright (there's a platform
+// minimum), so routing a free plan through the same checkout call below
+// would just error. Activates it directly instead: same
+// create-subscription/supersede/sync sequence the webhook runs after a
+// real payment succeeds, just with nothing to wait on. Still writes a
+// Payment record (provider: 'manual', same as grantSubscription's
+// admin-granted path) so a user's history shows how every subscription
+// they've ever had was actually acquired, free ones included.
+const activateFreeSubscription = async (
+  requester: IUser,
+  plan: IPlan,
+  autoRenew: boolean,
+): Promise<{ subscriptionId: string; paymentId: string }> => {
+  const periodStarted = new Date();
+  const carryoverDays = await getCarryoverDays(requester._id as mongoose.Types.ObjectId);
+  const expiresAt = new Date(periodStarted.getTime() + (plan.duration + carryoverDays) * DAY_MS);
+
+  const subscription = await Subscription.create({
+    user: requester._id,
+    plan: plan._id,
+    planTier: plan.planTier,
+    privileges: plan.privileges,
+    autoRenew: Boolean(autoRenew),
+    status: SUBSCRIPTION_STATUS.ACTIVE,
+    periodStarted,
+    expiresAt,
+  });
+
+  await User.updateOne({ _id: requester._id }, { currentSubscription: subscription._id });
+  await supersedeActiveSubscriptions(requester._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
+  await syncProfilesSubscription(requester._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
+
+  const payment = await Payment.create({
+    targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
+    targetId: subscription._id,
+    user: requester._id,
+    userEmail: requester.email,
+    amount: 0,
+    currency: plan.currency,
+    provider: PAYMENT_PROVIDER_NAME.MANUAL,
+    status: PAYMENT_STATUS.SUCCESS,
+  });
+
+  return { subscriptionId: subscription.id, paymentId: payment.id };
+};
+
 const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
   const { planTier, autoRenew } = req.body;
@@ -100,6 +150,12 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   if (!plan) {
     res.status(400);
     throw new Error("No active plan found for that tier");
+  }
+
+  if (plan.price <= 0) {
+    const { subscriptionId, paymentId } = await activateFreeSubscription(requester, plan, Boolean(autoRenew));
+    res.status(201).json({ requiresPayment: false, status: "active", subscriptionId, paymentId });
+    return;
   }
 
   // Tentative — the clock actually starts once the webhook confirms
@@ -143,7 +199,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
 
   res
     .status(201)
-    .json({ clientSecret, paymentId: payment.id, subscriptionId: subscription.id });
+    .json({ requiresPayment: true, clientSecret, paymentId: payment.id, subscriptionId: subscription.id });
 };
 
 // A digital product is bought directly, no Job/escrow involved at all —
@@ -340,10 +396,16 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
   if (subscription && subscription.status === SUBSCRIPTION_STATUS.PENDING) {
     const plan = await Plan.findById(subscription.plan);
     const periodStarted = new Date();
+    // Read before supersedeActiveSubscriptions below cancels it — see
+    // getCarryoverDays' own comment for why this is 1-for-1, not
+    // value-adjusted, today.
+    const carryoverDays = await getCarryoverDays(subscription.user);
 
     subscription.status = SUBSCRIPTION_STATUS.ACTIVE;
     subscription.periodStarted = periodStarted;
-    subscription.expiresAt = new Date(periodStarted.getTime() + (plan?.duration ?? 30) * DAY_MS);
+    subscription.expiresAt = new Date(
+      periodStarted.getTime() + ((plan?.duration ?? 30) + carryoverDays) * DAY_MS,
+    );
     await subscription.save();
 
     await User.updateOne(
