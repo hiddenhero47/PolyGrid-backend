@@ -71,7 +71,7 @@ const toPublicPortfolioItem = (item: IPortfolioItem) => ({
 // profile views), resolved there via helpers/profileAvatarFallback.ts
 // when this profile has no avatar of its own. Search/list results never
 // pass one, by design — see that helper's own comment.
-const toPublicProfile = (profile: IConsultancyProfile, fallbackAvatar?: IMediaFile) => ({
+export const toPublicProfile = (profile: IConsultancyProfile, fallbackAvatar?: IMediaFile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
