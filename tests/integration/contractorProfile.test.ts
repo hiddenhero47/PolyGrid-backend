@@ -298,4 +298,22 @@ describe("Portfolio (shared schema with ConsultancyProfile)", () => {
     const res = await addItem(generateToken(user), {});
     expect(res.status).toBe(400);
   });
+
+  it("PATCHes an existing item's title without touching its media", async () => {
+    const user = await createUser();
+    await createContractorProfile({ user });
+    const token = generateToken(user);
+
+    const added = await addItem(token).attach("file", TEST_PNG_BUFFER, "project.png");
+    const itemId = added.body.portfolio[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/contractor-profiles/me/portfolio/${itemId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ title: "Duplex renovation (complete)" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.portfolio[0].title).toBe("Duplex renovation (complete)");
+    expect(res.body.portfolio[0].media).toHaveLength(1);
+  });
 });

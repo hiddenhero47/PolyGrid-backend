@@ -9,6 +9,7 @@ import {
 } from "../controllers/storeProfileController";
 import {
   createProduct,
+  getMyProducts,
   updateProduct,
   deleteProduct,
   addProductImages,
@@ -30,6 +31,7 @@ router.get("/me", protect, getMyStoreProfile);
 router.patch("/me", protect, validateBody(updateStoreProfileSchema), updateMyStoreProfile);
 router.post("/me/logo", protect, uploadStoreLogo);
 
+router.get("/me/products", protect, getMyProducts);
 router.post("/me/products", protect, validateBody(createProductSchema), createProduct);
 router.patch("/me/products/:id", protect, validateBody(updateProductSchema), updateProduct);
 router.delete("/me/products/:id", protect, deleteProduct);

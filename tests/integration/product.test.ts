@@ -272,6 +272,64 @@ describe("PATCH/DELETE /api/store-profiles/me/products/:id", () => {
   });
 });
 
+describe("GET /api/store-profiles/me/products", () => {
+  it("requires authentication", async () => {
+    const res = await request(app).get("/api/store-profiles/me/products");
+    expect(res.status).toBe(401);
+  });
+
+  it("404s when I have no store profile", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .get("/api/store-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it("lists only my own products, newest first, regardless of store subscription/verification", async () => {
+    const owner = await createUser();
+    // No subscription, not verified — would be invisible on the public
+    // catalog (getStore/searchStores), but this is the owner's own
+    // management list, so none of that gating applies here.
+    const ownerStore = await createStoreProfile({ user: owner, isVerified: false });
+    const older = await createProduct({ store: ownerStore, title: "Older" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = await createProduct({ store: ownerStore, title: "Newer" });
+
+    const stranger = await createUser();
+    const strangerStore = await createStoreProfile({ user: stranger });
+    await createProduct({ store: strangerStore, title: "Not mine" });
+
+    const res = await request(app)
+      .get("/api/store-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(owner)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0].id).toBe(newer.id);
+    expect(res.body.data[1].id).toBe(older.id);
+    expect(res.body.pagination).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+  });
+
+  it("paginates", async () => {
+    const user = await createUser();
+    const store = await createStoreProfile({ user });
+    for (let i = 0; i < 3; i++) {
+      await createProduct({ store, title: `Product ${i}` });
+    }
+
+    const res = await request(app)
+      .get("/api/store-profiles/me/products?page=1&limit=2")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.pagination).toEqual({ total: 3, page: 1, limit: 2, totalPages: 2 });
+  });
+});
+
 describe("images sub-resource", () => {
   it("adds and removes a single image without touching the rest", async () => {
     const user = await createUser();

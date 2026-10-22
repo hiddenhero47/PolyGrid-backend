@@ -51,6 +51,50 @@ const loadMyProduct = async (requesterId: string, productId: string) => {
   return { profile, product };
 };
 
+// Owner-only — includes `files`, which toPublicDigitalProduct deliberately
+// never does (the real deliverables are private). Names/mime/size only,
+// never `key` (the actual storage-provider object key) — enough for the
+// creator to see what's attached and manage it, not enough to reconstruct
+// a download link outside getDigitalProductDownloadLink's own access check.
+const toOwnerDigitalProduct = (product: IDigitalProduct) => ({
+  ...toPublicDigitalProduct(product),
+  files: product.files.map((file) => ({ fileName: file.fileName, mime: file.mime, size: file.size })),
+});
+
+// @desc    List my own products, any state — same gap/reasoning as
+//          productController.getMyProducts: createDigitalProduct and its
+//          sibling update/preview-image/file routes have no corresponding
+//          read, so a creator otherwise has no way to see a product again
+//          once they've added it. Every product they have, regardless of
+//          isActive/isVerified — not the admin-verified-only public feed.
+// @route   GET /api/digital-creator-profiles/me/products?page=&limit=
+// @access  Private
+export const getMyDigitalProducts = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const profile = await loadMyCreatorProfile(requester.id);
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a digital creator profile yet");
+  }
+
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const skip = (page - 1) * limit;
+
+  const filter = { creatorId: profile._id };
+
+  const [products, total] = await Promise.all([
+    DigitalProduct.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    DigitalProduct.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    data: products.map(toOwnerDigitalProduct),
+    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+  });
+});
+
 // forms.any() (mounted globally in app.ts) puts every attached file into
 // one flat req.files array regardless of field name, each tagged with its
 // own `.fieldname` — this is what actually distinguishes the public

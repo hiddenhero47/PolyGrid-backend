@@ -427,6 +427,41 @@ export const addPortfolioItem = asyncHandler(async (req: Request, res: Response)
   });
 });
 
+// @desc    Update an existing portfolio item's title/description/tags/
+//          startedAt/completedAt — addPortfolioItem/removePortfolioItem
+//          and the media add/remove routes have no way to just fix a typo
+//          or add a tag without removing and re-adding the whole item
+//          (losing its media order in the process).
+// @route   PATCH /api/contractor-profiles/me/portfolio/:itemId
+// @access  Private
+export const updatePortfolioItem = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await ContractorProfile.findOne({ userId: (req.user as IUser)._id });
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a contractor profile yet");
+  }
+
+  const item = profile.portfolio.id(req.params.itemId as string);
+
+  if (!item) {
+    res.status(404);
+    throw new Error("Portfolio item not found");
+  }
+
+  const { title, description, tags, startedAt, completedAt } = req.body;
+
+  if (title !== undefined) item.title = title;
+  if (description !== undefined) item.description = description;
+  if (tags !== undefined) item.tags = tags;
+  if (startedAt !== undefined) item.startedAt = startedAt;
+  if (completedAt !== undefined) item.completedAt = completedAt;
+
+  await profile.save();
+
+  res.status(200).json(toPublicContractorProfile(profile));
+});
+
 // @desc    Add more media to an existing portfolio item
 // @route   POST /api/contractor-profiles/me/portfolio/:itemId/media
 // @access  Private

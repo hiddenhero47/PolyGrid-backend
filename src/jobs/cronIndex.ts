@@ -1,5 +1,6 @@
 import { digitalPurchaseRetention } from "./tasks/digitalPurchaseRetentionTask";
 import { profileProductCleanup } from "./tasks/profileProductCleanupTask";
+import { pendingPaymentSweep } from "./tasks/pendingPaymentSweepTask";
 
 // Mirrors house-maduekwe-backend's jobs/cronIndex.js — one entry point
 // server.ts calls once at boot, which registers every scheduled task.
@@ -14,6 +15,7 @@ export const startCronJobs = (): void => {
 
   digitalPurchaseRetention();
   profileProductCleanup();
+  pendingPaymentSweep();
 
   console.log("All cron jobs started");
 };

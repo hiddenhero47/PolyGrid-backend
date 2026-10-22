@@ -169,6 +169,43 @@ const loadMyProduct = async (requesterId: string, productId: string) => {
   return { store, product };
 };
 
+// @desc    List my own products, any state — createProduct/updateProduct/
+//          deleteProduct/addProductImages/removeProductImage have no
+//          corresponding read, so a seller otherwise has no way to see a
+//          product again once they've added it. Deliberately not the same
+//          as searchStores/getStore's catalog views (verified + subscribed
+//          + category filters): this is the owner's own management list,
+//          so none of that gating applies — every product they have,
+//          regardless of the store's current subscription/verification
+//          status.
+// @route   GET /api/store-profiles/me/products?page=&limit=
+// @access  Private
+export const getMyProducts = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const store = await loadMyStore(requester.id);
+
+  if (!store) {
+    res.status(404);
+    throw new Error("You don't have a store profile yet");
+  }
+
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const skip = (page - 1) * limit;
+
+  const filter = { storeId: store._id };
+
+  const [products, total] = await Promise.all([
+    Product.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Product.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    data: products.map(toPublicProduct),
+    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+  });
+});
+
 // @desc    Update one of my products
 // @route   PATCH /api/store-profiles/me/products/:id
 // @access  Private

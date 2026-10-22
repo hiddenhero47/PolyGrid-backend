@@ -3,7 +3,7 @@ import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { Payment, IPayment, PAYMENT_STATUS, PAYMENT_TARGET_TYPE, PaymentStatus, PaymentTargetType } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
-import { IUser, User } from "../models/userModel";
+import { IUser, User, SYSTEM_ROLE } from "../models/userModel";
 import { Job, JOB_STATUS } from "../models/jobModel";
 import { Plan, IPlan } from "../models/planModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../models/subscriptionModel";
@@ -17,7 +17,7 @@ import {
   getCarryoverDays,
   DAY_MS,
 } from "../helpers/profileSubscriptionSync";
-import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
+import { reconcilePaymentIntent } from "../helpers/paymentReconciliation";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -351,70 +351,58 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
   // Never trust the webhook payload's own claims — always re-fetch.
   const intent = await provider.retrieveIntent(intentObject.id);
 
-  const isSuccess = intent.status === "succeeded";
-  const isAmount = Math.round(intent.amount * 100) === Math.round(payment.amount * 100);
-  const isCurrency = intent.currency.toUpperCase() === payment.currency.toUpperCase();
+  await reconcilePaymentIntent(payment, intentObject.id, intent);
+});
 
-  if (!isSuccess || !isAmount || !isCurrency) return;
+// @desc    Re-check a still-pending payment directly against the provider —
+//          recovery path for when the webhook never arrives (misconfigured
+//          webhook URL, an outage, a dev tunnel restarting mid-session):
+//          the charge may have genuinely succeeded at Stripe while this
+//          payment is stuck 'pending' here. Runs the exact same
+//          reconciliation the webhook would have, so it's always safe to
+//          call — on an already-'success' payment it's a pure no-op.
+// @route   POST /api/payments/:id/refresh
+// @access  Private (payment owner or admin)
+export const refreshPayment = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const id = req.params.id as string;
 
-  // Idempotency: Stripe redelivering the same event for an already-recorded
-  // payment is a no-op, not a double-credit.
-  if (payment.status === PAYMENT_STATUS.SUCCESS && payment.providerPaymentId === intentObject.id) {
-    return;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(404);
+    throw new Error("Payment not found");
   }
 
-  payment.status = PAYMENT_STATUS.SUCCESS;
-  payment.providerPaymentId = intentObject.id;
-  payment.providerFeeAmount = intent.feeAmount;
-  payment.rawProviderPayload = intent.raw as Record<string, unknown>;
-  await payment.save();
-
-  if (payment.targetType === PAYMENT_TARGET_TYPE.JOB) {
-    await Job.updateOne({ _id: payment.targetId }, { $inc: { amountPaid: payment.amount } });
-    return;
+  const payment = await Payment.findById(id);
+  if (!payment) {
+    res.status(404);
+    throw new Error("Payment not found");
   }
 
-  if (payment.targetType === PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE) {
-    const result = await DigitalPurchase.updateOne(
-      { _id: payment.targetId, status: DIGITAL_PURCHASE_STATUS.PENDING },
-      { status: DIGITAL_PURCHASE_STATUS.SUCCESS },
-    );
+  const isOwner = payment.user.toString() === requester.id;
+  const isAdmin =
+    requester.systemRole === SYSTEM_ROLE.ADMIN || requester.systemRole === SYSTEM_ROLE.SUPER_ADMIN;
 
-    // Only the delivery that actually performed the PENDING->SUCCESS
-    // transition should copy files — a Stripe redelivery of an
-    // already-processed event must stay a pure no-op (matches the
-    // payment.status idempotency guard above), otherwise a retry would
-    // re-copy (harmless but wasteful) every time Stripe redelivers.
-    if (result.modifiedCount === 1) {
-      await copyPurchaseFiles(payment.targetId as mongoose.Types.ObjectId);
-    }
-    return;
+  if (!isOwner && !isAdmin) {
+    res.status(403);
+    throw new Error("You can't refresh someone else's payment");
   }
 
-  const subscription = await Subscription.findById(payment.targetId);
-
-  if (subscription && subscription.status === SUBSCRIPTION_STATUS.PENDING) {
-    const plan = await Plan.findById(subscription.plan);
-    const periodStarted = new Date();
-    // Read before supersedeActiveSubscriptions below cancels it — see
-    // getCarryoverDays' own comment for why this is 1-for-1, not
-    // value-adjusted, today.
-    const carryoverDays = await getCarryoverDays(subscription.user);
-
-    subscription.status = SUBSCRIPTION_STATUS.ACTIVE;
-    subscription.periodStarted = periodStarted;
-    subscription.expiresAt = new Date(
-      periodStarted.getTime() + ((plan?.duration ?? 30) + carryoverDays) * DAY_MS,
-    );
-    await subscription.save();
-
-    await User.updateOne(
-      { _id: subscription.user },
-      { currentSubscription: subscription._id },
-    );
-    await supersedeActiveSubscriptions(subscription.user, subscription._id as mongoose.Types.ObjectId);
-    await syncProfilesSubscription(subscription.user, subscription._id as mongoose.Types.ObjectId);
+  if (payment.provider !== PAYMENT_PROVIDER_NAME.STRIPE) {
+    res.status(400);
+    throw new Error("Only Stripe payments can be refreshed this way");
   }
+
+  if (!payment.providerPaymentId) {
+    res.status(400);
+    throw new Error("This payment was never started with the provider");
+  }
+
+  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+  const intent = await provider.retrieveIntent(payment.providerPaymentId);
+
+  const result = await reconcilePaymentIntent(payment, payment.providerPaymentId, intent);
+
+  res.status(200).json(result);
 });
 // @route   GET /api/payments
 // @access  Private (Admin / Super Admin only)

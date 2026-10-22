@@ -246,4 +246,26 @@ describe("Portfolio (shared schema)", () => {
     expect(removed.body.portfolio).toHaveLength(0);
     expect(fs.readdirSync(publicDir)).not.toContain(fileName);
   });
+
+  it("PATCHes an existing item's title without touching its media", async () => {
+    const user = await createUser();
+    await createLaborProfile({ user });
+    const token = generateToken(user);
+
+    const added = await request(app)
+      .post("/api/labor-profiles/me/portfolio")
+      .set("Authorization", `Bearer ${token}`)
+      .field("data", JSON.stringify({ title: "Block wall, 2-bedroom bungalow" }))
+      .attach("file", TEST_PNG_BUFFER, "wall.png");
+    const itemId = added.body.portfolio[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/labor-profiles/me/portfolio/${itemId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ title: "Block wall, 2-bedroom bungalow (complete)" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.portfolio[0].title).toBe("Block wall, 2-bedroom bungalow (complete)");
+    expect(res.body.portfolio[0].media).toHaveLength(1);
+  });
 });

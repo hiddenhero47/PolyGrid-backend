@@ -26,6 +26,7 @@ import {
 } from "../helpers/fileStorage";
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
+import { PROFILE_MODEL_REGISTRY, ProfileType } from "../constants/profileTypes";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -497,6 +498,39 @@ export const appleLogin = asyncHandler(async (req: Request, res: Response) => {
 // @access  Private
 export const getMe = asyncHandler(async (req: Request, res: Response) => {
   res.status(200).json(toPublicUser(req.user as IUser));
+});
+
+// @desc    Which pillar profiles (if any) I have, in one call — a lighter
+//          replacement for a client polling every /<pillar>/me route in
+//          parallel and treating a 404 as "not created": this checks every
+//          PROFILE_MODEL_REGISTRY entry at once and reports null for the
+//          ones that don't exist.
+// @route   GET /api/users/me/profiles
+// @access  Private
+export const getMyProfiles = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+
+  const entries = await Promise.all(
+    (Object.entries(PROFILE_MODEL_REGISTRY) as [ProfileType, (typeof PROFILE_MODEL_REGISTRY)[ProfileType]][]).map(
+      async ([profileType, Model]) => {
+        const profile = await Model.findOne({ userId: requester._id }).select("isVerified status slug");
+
+        if (!profile) return [profileType, null] as const;
+
+        return [
+          profileType,
+          {
+            id: profile.id,
+            isVerified: profile.isVerified,
+            status: profile.status,
+            slug: profile.slug,
+          },
+        ] as const;
+      },
+    ),
+  );
+
+  res.status(200).json(Object.fromEntries(entries));
 });
 
 // @desc    Update the logged-in user's profile
