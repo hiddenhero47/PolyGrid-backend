@@ -81,5 +81,59 @@ export const detectFileSignature = (buffer: Buffer): DetectedFileType | null => 
     };
   }
 
+  // .xlsx is the same OOXML/zip trick as .docx above, just checking for
+  // the part-name unique to an Excel workbook ("xl/workbook.xml") instead
+  // of a Word document. Must stay ahead of the generic zip check below,
+  // or that would shadow it and report every .xlsx as a plain zip.
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x50 &&
+    buffer[1] === 0x4b &&
+    buffer[2] === 0x03 &&
+    buffer[3] === 0x04 &&
+    buffer.toString("latin1").includes("xl/workbook.xml")
+  ) {
+    return {
+      mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ext: "xlsx",
+    };
+  }
+
+  // AutoCAD DWG — every version's header starts with the ASCII bytes
+  // "AC" followed by a 4-digit version code (e.g. "AC1032" for 2018+,
+  // "AC1015" for 2000). Checking "AC" plus a digit distinguishes it from
+  // arbitrary binary without hardcoding every version string AutoCAD has
+  // ever used.
+  if (
+    buffer.length >= 6 &&
+    buffer[0] === 0x41 &&
+    buffer[1] === 0x43 &&
+    buffer[2] >= 0x30 &&
+    buffer[2] <= 0x39
+  ) {
+    return { mime: "image/vnd.dwg", ext: "dwg" };
+  }
+
+  // Binary DXF has a fixed literal header. ASCII DXF (the far more common
+  // case) has no real magic bytes at all — it's a line-based format that
+  // just starts with the group-code line "0" and a "SECTION" line a
+  // little further down. Checking for that shape within the first few
+  // lines is a weaker signal than every other check in this file, but
+  // DXF genuinely has nothing stronger to check in its text form.
+  if (buffer.toString("ascii", 0, 20).includes("AutoCAD Binary DXF")) {
+    return { mime: "image/vnd.dxf", ext: "dxf" };
+  }
+  if (/^\s*0\s*[\r\n]+\s*SECTION\b/i.test(buffer.toString("ascii", 0, 64))) {
+    return { mime: "image/vnd.dxf", ext: "dxf" };
+  }
+
+  // Generic zip, checked last among the zip-based formats — .docx/.xlsx
+  // (also zips, just with a specific internal part name) must already
+  // have been matched above, or this would shadow them and report every
+  // Office file as a plain zip.
+  if (buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04) {
+    return { mime: "application/zip", ext: "zip" };
+  }
+
   return null;
 };

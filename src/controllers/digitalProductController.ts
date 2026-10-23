@@ -10,11 +10,16 @@ import {
   MAX_DELIVERABLE_FILES,
 } from "../models/digitalProductModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
-import { IUser } from "../models/userModel";
+import { IUser, REVIEW_ROLES } from "../models/userModel";
 import { Subscription } from "../models/subscriptionModel";
 import { PROFILE_STATUS } from "../constants/profileStatus";
 import { IMediaFile, toPublicMediaFile } from "../models/mediaFile";
-import { uploadHandler, deleteStoredFile, FILE_VISIBILITY, DEFAULT_ALLOWED_MIME_TYPES } from "../helpers/fileStorage";
+import {
+  uploadHandler,
+  deleteStoredFile,
+  FILE_VISIBILITY,
+  DIGITAL_PRODUCT_DELIVERABLE_MIME_TYPES,
+} from "../helpers/fileStorage";
 import { getDigitalStorageProvider } from "../providers/digitalStorageProviders";
 import { BIN_GRACE_MS, clearProductBin } from "../helpers/digitalProductBin";
 import { toDownloadLinks } from "../helpers/digitalFileLinks";
@@ -128,6 +133,25 @@ const saveFilesForField = async (
   };
 };
 
+// Deliverables are identified (and removed — see removeDigitalProductFile)
+// by fileName alone, which is just the attacher's own originalname. Two
+// files sharing a name would be indistinguishable once attached, so this
+// is checked before any upload happens — a bad batch never costs a
+// wasted storage-provider PutObject.
+const findDuplicateFileName = (
+  existing: { fileName: string }[],
+  incoming: Express.Multer.File[],
+): string | null => {
+  const names = new Set(existing.map((f) => f.fileName));
+
+  for (const file of incoming) {
+    if (names.has(file.originalname)) return file.originalname;
+    names.add(file.originalname);
+  }
+
+  return null;
+};
+
 // @desc    Create a digital product listing under my creator profile
 // @route   POST /api/digital-creator-profiles/me/products
 // @access  Private
@@ -162,13 +186,19 @@ export const createDigitalProduct = asyncHandler(async (req: Request, res: Respo
     throw new Error(`You can attach at most ${MAX_DELIVERABLE_FILES} deliverable files`);
   }
 
+  const duplicateFileName = findDuplicateFileName([], filesForField(req, "files"));
+  if (duplicateFileName) {
+    res.status(400);
+    throw new Error(`Two attached files are both named "${duplicateFileName}" — rename one of them`);
+  }
+
   const [{ files: previewImages, warnings: previewWarnings }, { results: files, errorLogs: fileWarnings }] =
     await Promise.all([
       saveFilesForField(req, "previewImages", FILE_VISIBILITY.PUBLIC),
       getDigitalStorageProvider().uploadDigitalFiles(
         filesForField(req, "files"),
         `digital-products/${profile._id}`,
-        DEFAULT_ALLOWED_MIME_TYPES,
+        DIGITAL_PRODUCT_DELIVERABLE_MIME_TYPES,
       ),
     ]);
 
@@ -337,10 +367,18 @@ export const addDigitalProductFiles = asyncHandler(async (req: Request, res: Res
     );
   }
 
+  const duplicateFileName = findDuplicateFileName(product.files, filesForField(req, "files"));
+  if (duplicateFileName) {
+    res.status(400);
+    throw new Error(
+      `This product already has a file named "${duplicateFileName}" — rename it or remove the existing one first`,
+    );
+  }
+
   const { results: files, errorLogs: warnings } = await getDigitalStorageProvider().uploadDigitalFiles(
     filesForField(req, "files"),
     `digital-products/${profile._id}`,
-    DEFAULT_ALLOWED_MIME_TYPES,
+    DIGITAL_PRODUCT_DELIVERABLE_MIME_TYPES,
   );
   product.files.push(...files);
   await product.save();
@@ -478,6 +516,67 @@ export const listDigitalProductFeed = asyncHandler(async (req: Request, res: Res
   });
 });
 
+// @desc    The digital-product review queue — admin/customer_care's way to
+//          actually find what needs setDigitalProductVerification called
+//          on it. listDigitalProductFeed only ever surfaces
+//          isVerified:true (plus active/verified-creator/subscribed)
+//          products, and getMyDigitalProducts is creator-scoped, so
+//          nothing previously listed products awaiting review across
+//          every creator. Deliberately ungated by isActive (a reviewer
+//          needs to see a product even if its creator has since
+//          deactivated it) or the creator's own verification/subscription
+//          status — those gate *buyer* visibility, not reviewer
+//          visibility. `status` maps directly onto the product's own
+//          isVerified flag; invalid/missing defaults to 'pending', the
+//          queue's primary use case.
+// @route   GET /api/digital-products/review?status=pending|approved&page=&limit=
+// @access  Private (Admin / Super Admin / Customer Care)
+export const listDigitalProductsForReview = asyncHandler(async (req: Request, res: Response) => {
+  const { page, limit, skip } = paginationParams(req);
+  const status = req.query.status === "approved" ? "approved" : "pending";
+
+  const pipeline = [
+    { $match: { isVerified: status === "approved" } },
+    {
+      $lookup: {
+        from: "digitalcreatorprofiles",
+        localField: "creatorId",
+        foreignField: "_id",
+        as: "creator",
+      },
+    },
+    { $unwind: "$creator" },
+    { $sort: { createdAt: -1 as const } },
+  ];
+
+  const [products, totalResult] = await Promise.all([
+    DigitalProduct.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
+    DigitalProduct.aggregate([...pipeline, { $count: "total" }]),
+  ]);
+
+  const total = totalResult[0]?.total ?? 0;
+
+  res.status(200).json({
+    data: products.map((product) => ({
+      // Same aggregate()-has-no-.id-virtual fix listDigitalProductFeed
+      // already applies, plus toOwnerDigitalProduct's redacted `files`
+      // (fileName/mime/size, never the storage key) — a reviewer needs to
+      // see what's attached, same as the product's own creator does.
+      ...toOwnerDigitalProduct(product as IDigitalProduct),
+      id: (product._id as mongoose.Types.ObjectId).toString(),
+      creator: {
+        id: product.creator._id,
+        displayName: product.creator.displayName,
+        slug: product.creator.slug,
+        isVerified: product.creator.isVerified,
+        status: product.creator.status,
+        country: product.creator.country,
+      },
+    })),
+    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+  });
+});
+
 // @desc    View a single digital product directly — the URL always
 //          resolves, but (matching getProduct/getStore) it's withheld
 //          unless the owning creator is currently verified AND subscribed,
@@ -560,12 +659,15 @@ export const setDigitalProductVerification = asyncHandler(async (req: Request, r
 });
 
 // @desc    Mint short-lived download links for one of MY OWN digital
-//          product's live deliverable files. Creator-only — keyed by the
-//          product, which is exactly right here since it's the creator's
-//          own current files being requested. A buyer never uses this
-//          route: they download their own purchased copy via
-//          GET /api/digital-purchases/:id/download instead (see
-//          digitalPurchaseController.getDigitalPurchaseDownloadLink),
+//          product's live deliverable files, OR — for a REVIEW_ROLES
+//          member working the review queue (listDigitalProductsForReview)
+//          — any product's, so a reviewer can actually open the
+//          deliverables to check they match what the listing claims.
+//          Keyed by the product, which is exactly right here since it's
+//          the creator's/reviewer's own current files being requested. A
+//          buyer never uses this route: they download their own
+//          purchased copy via GET /api/digital-purchases/:id/download
+//          instead (see digitalPurchaseController.getDigitalPurchaseDownloadLink),
 //          which is keyed by the purchase itself and never needs this
 //          product to still exist at all — see docs/digital-storefront-
 //          plan.md for why that separation matters (this route used to
@@ -574,7 +676,7 @@ export const setDigitalProductVerification = asyncHandler(async (req: Request, r
 //          first, even though the actual bytes they'd get were already
 //          fully independent of it).
 // @route   GET /api/digital-products/:id/download
-// @access  Private (the product's own creator only)
+// @access  Private (the product's own creator, or Admin/Super Admin/Customer Care)
 export const getDigitalProductDownloadLink = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
   const id = req.params.id as string;
@@ -593,7 +695,10 @@ export const getDigitalProductDownloadLink = asyncHandler(async (req: Request, r
   await clearProductBin(product);
 
   const creator = await DigitalCreatorProfile.findById(product.creatorId);
-  if (creator?.userId.toString() !== requester.id) {
+  const isOwner = creator?.userId.toString() === requester.id;
+  const isReviewer = REVIEW_ROLES.includes(requester.systemRole as (typeof REVIEW_ROLES)[number]);
+
+  if (!isOwner && !isReviewer) {
     res.status(403);
     throw new Error("You don't have access to this product's files");
   }

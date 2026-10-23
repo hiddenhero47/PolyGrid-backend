@@ -45,6 +45,16 @@ export const DEFAULT_ALLOWED_MIME_TYPES = [
 ];
 
 export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+export const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+export const DWG_MIME = "image/vnd.dwg";
+export const DXF_MIME = "image/vnd.dxf";
+export const ZIP_MIME = "application/zip";
+// No magic bytes exist for CSV — it's plain text — so unlike every other
+// type here it isn't recognized by detectFileSignature at all; see
+// detectAndValidateFile's own special case for how this one is actually
+// accepted (extension + a "looks like text" check, gated on the caller
+// having allowed this mime type in the first place).
+export const CSV_MIME = "text/csv";
 
 // Work-photo portfolio uploads (labor/contractor/consultancy profiles)
 // — real photos only, never a webp/pdf, which DEFAULT_ALLOWED_MIME_TYPES
@@ -55,6 +65,22 @@ export const PORTFOLIO_MEDIA_ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "i
 // user avatar) — an image in any format we recognize, but never a pdf,
 // which DEFAULT_ALLOWED_MIME_TYPES would otherwise allow through.
 export const IMAGE_ONLY_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif"];
+
+// Digital-product deliverables specifically — broader than
+// DEFAULT_ALLOWED_MIME_TYPES, which other upload paths (e.g.
+// tenderProjectController's project files) also fall back to and
+// shouldn't suddenly start accepting CAD/spreadsheet files too. The
+// "BOQ sheet" product category needs spreadsheets, and architectural/
+// engineering drawing categories need CAD files — nothing else in this
+// codebase has a use for either.
+export const DIGITAL_PRODUCT_DELIVERABLE_MIME_TYPES = [
+  ...DEFAULT_ALLOWED_MIME_TYPES,
+  XLSX_MIME,
+  CSV_MIME,
+  DWG_MIME,
+  DXF_MIME,
+  ZIP_MIME,
+];
 
 export interface SavedFileInfo {
   fileName: string;
@@ -69,6 +95,22 @@ export interface SavedFileInfo {
 const isValidFileName = (fileName: string): boolean => {
   const invalid = [".ds_store", "thumbs.db", "desktop.ini"];
   return !invalid.includes(fileName.toLowerCase());
+};
+
+// Used only by detectAndValidateFile's CSV special case (see its own
+// comment) — a lightweight "not binary" check, not a real text/encoding
+// validator. Rejects null bytes and other control characters a real CSV
+// wouldn't contain; bytes >= 0x80 (UTF-8 multi-byte continuation bytes,
+// for non-ASCII content) are deliberately allowed through untouched.
+const looksLikeText = (buffer: Buffer): boolean => {
+  const sample = buffer.subarray(0, 512);
+
+  for (const byte of sample) {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d) continue;
+    if (byte < 0x20 || byte === 0x7f) return false;
+  }
+
+  return true;
 };
 
 const saveBuffer = async (
@@ -129,7 +171,25 @@ export const detectAndValidateFile = (
 
   const detected = detectFileSignature(buffer);
 
-  if (!detected || !allowedMimeTypes.includes(detected.mime)) {
+  if (!detected) {
+    // CSV has no magic bytes at all — it's plain text — so it's the one
+    // format detectFileSignature can never recognize. Gated on three
+    // things so this can't become a generic "any text file" bypass: the
+    // caller must have explicitly allowed text/csv, the name must end in
+    // .csv, and the content must actually look like text (no null
+    // bytes/control characters a real CSV wouldn't contain).
+    if (
+      allowedMimeTypes.includes(CSV_MIME) &&
+      originalName.toLowerCase().endsWith(".csv") &&
+      looksLikeText(buffer)
+    ) {
+      return { ok: true, mime: CSV_MIME, ext: "csv" };
+    }
+
+    return { ok: false, error: `${originalName}: unsupported or unrecognized file type` };
+  }
+
+  if (!allowedMimeTypes.includes(detected.mime)) {
     return { ok: false, error: `${originalName}: unsupported or unrecognized file type` };
   }
 
