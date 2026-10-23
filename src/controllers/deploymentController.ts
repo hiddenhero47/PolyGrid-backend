@@ -1,6 +1,11 @@
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
-import { ensureSuperAdminExists, ensureVerificationTemplatesSeeded, SetupTaskResult } from "../helpers/deploymentSetup";
+import {
+  ensureSuperAdminExists,
+  ensureVerificationTemplatesSeeded,
+  ensureConversationIndexesFixed,
+  SetupTaskResult,
+} from "../helpers/deploymentSetup";
 
 // Runs every registered setup task and collects its result — the actual
 // tasks live in helpers/deploymentSetup.ts (pure, directly unit-testable,
@@ -11,6 +16,7 @@ import { ensureSuperAdminExists, ensureVerificationTemplatesSeeded, SetupTaskRes
 export const runDeploymentSetupTasks = async (): Promise<SetupTaskResult[]> => [
   await ensureSuperAdminExists(),
   await ensureVerificationTemplatesSeeded(),
+  await ensureConversationIndexesFixed(),
 ];
 
 // @desc    Run every deployment setup task (idempotent — safe to call

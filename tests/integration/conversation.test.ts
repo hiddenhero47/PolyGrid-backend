@@ -98,6 +98,55 @@ describe("POST /api/conversations", () => {
     expect(second.body.id).toBe(first.body.id);
     expect(await Conversation.countDocuments()).toBe(1);
   });
+
+  it("lets one person have separate conversations with two different contacts", async () => {
+    // Regression test for the bug a unique index directly on the
+    // `participants` array caused: Mongo indexes an array field as
+    // multikey, so "unique" meant "no user may appear in more than one
+    // conversation, ever" rather than "no duplicate pair" — the second
+    // call below used to 500 with an E11000 on `me`'s own id.
+    const me = await createUser();
+    const contactA = await createUser();
+    const contactB = await createUser();
+    await createContactConnection(me, contactA);
+    await createContactConnection(me, contactB);
+
+    const withA = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${generateToken(me)}`)
+      .send({ userId: contactA.id });
+    expect(withA.status).toBe(200);
+
+    const withB = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${generateToken(me)}`)
+      .send({ userId: contactB.id });
+    expect(withB.status).toBe(200);
+
+    expect(withA.body.id).not.toBe(withB.body.id);
+    expect(await Conversation.countDocuments()).toBe(2);
+  });
+
+  it("also works the other way around — a second, unrelated contact starting a conversation with someone who's already in one", async () => {
+    const charles = await createUser();
+    const ada = await createUser();
+    const superAdmin = await createAdmin();
+    await createContactConnection(charles, ada);
+    await createContactConnection(superAdmin, ada);
+
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${generateToken(charles)}`)
+      .send({ userId: ada.id });
+
+    const res = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${generateToken(superAdmin)}`)
+      .send({ userId: ada.id });
+
+    expect(res.status).toBe(200);
+    expect(await Conversation.countDocuments()).toBe(2);
+  });
 });
 
 describe("messaging within a conversation", () => {

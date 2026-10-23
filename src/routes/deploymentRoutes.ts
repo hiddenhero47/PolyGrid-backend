@@ -14,6 +14,6 @@ const router = express.Router();
 // privileged, unauthenticated route; widen it for a specific run if a
 // deploy is genuinely delayed, rather than defaulting to a long window
 // "just in case."
-router.post("/setup", timeWindowGuard("2026-10-19T00:00:00Z", 72), runDeploymentSetup);
+router.post("/setup", timeWindowGuard("2026-10-23T00:00:00Z", 72), runDeploymentSetup);
 
 export default router;

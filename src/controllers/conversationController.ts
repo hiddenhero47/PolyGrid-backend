@@ -107,15 +107,30 @@ export const startOrGetConversation = asyncHandler(async (req: Request, res: Res
   }
 
   const participants = sortParticipants(requester._id, otherUser._id);
+  const pairKey = `${participants[0]}:${participants[1]}`;
 
-  // Atomic find-or-create — two near-simultaneous "start a conversation"
-  // calls between the same pair can't race into two documents; the unique
-  // index on `participants` backs this up if they somehow still did.
-  const conversation = await Conversation.findOneAndUpdate(
-    { participants },
-    { $setOnInsert: { participants } },
-    { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
-  ).populate<{ participants: PopulatedParticipant[] }>("participants", "fullName avatar");
+  // findOneAndUpdate + upsert is atomic per-operation, but two genuinely
+  // concurrent first-message requests between the same pair can both read
+  // "no match" before either's insert lands — one of them then hits the
+  // unique index on `pairKey` as a real E11000, not a bug. Caught below
+  // and treated as "someone else just created it," re-reading that
+  // conversation instead of 500ing.
+  let conversation;
+  try {
+    conversation = await Conversation.findOneAndUpdate(
+      { pairKey },
+      { $setOnInsert: { participants, pairKey } },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
+    ).populate<{ participants: PopulatedParticipant[] }>("participants", "fullName avatar");
+  } catch (err) {
+    if ((err as { code?: number }).code !== 11000) throw err;
+
+    conversation = await Conversation.findOne({ pairKey }).populate<{
+      participants: PopulatedParticipant[];
+    }>("participants", "fullName avatar");
+
+    if (!conversation) throw err;
+  }
 
   res.status(200).json(await toConversationSummary(conversation, requester.id));
 });
