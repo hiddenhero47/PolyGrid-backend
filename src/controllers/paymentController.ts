@@ -9,7 +9,7 @@ import { Plan, IPlan } from "../models/planModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../models/subscriptionModel";
 import { DigitalProduct } from "../models/digitalProductModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
-import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
+import { DigitalPurchase, IDigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
 import {
   syncProfilesSubscription,
@@ -18,6 +18,7 @@ import {
   DAY_MS,
 } from "../helpers/profileSubscriptionSync";
 import { reconcilePaymentIntent } from "../helpers/paymentReconciliation";
+import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -202,11 +203,88 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     .json({ requiresPayment: true, clientSecret, paymentId: payment.id, subscriptionId: subscription.id });
 };
 
+// Called when the buyer already has a PENDING DigitalPurchase for this
+// product — their first attempt was abandoned (closed the card form) or
+// the card failed, not actually completed. Never creates a second
+// DigitalPurchase/competing PaymentIntent for the same buyer+product;
+// always resolves back to this exact purchase.
+const resumeDigitalPurchaseIntent = async (
+  req: Request,
+  res: Response,
+  purchase: IDigitalPurchase,
+): Promise<void> => {
+  const requester = req.user as IUser;
+  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+
+  // Most recent first — resumeDigitalPurchaseIntent's own fallback branch
+  // below can leave more than one Payment against the same purchase (an
+  // old, dead one plus a fresh one), so the latest is always the live one.
+  const payment = await Payment.findOne({
+    targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+    targetId: purchase._id,
+  }).sort({ createdAt: -1 });
+
+  if (payment?.providerPaymentId) {
+    const intent = await provider.retrieveIntent(payment.providerPaymentId);
+
+    // The charge actually went through at Stripe but our own webhook
+    // never caught up (the exact scenario POST /payments/:id/refresh
+    // exists for) — reconcile it now rather than ever creating a second
+    // intent for a purchase that's already paid for.
+    if (intent.status === "succeeded") {
+      await reconcilePaymentIntent(payment, payment.providerPaymentId, intent);
+      res.status(200).json({ status: "success", paymentId: payment.id, purchaseId: purchase.id });
+      return;
+    }
+
+    // Still live (requires_payment_method/confirmation/action,
+    // processing) — this is the common case (a declined card, or the
+    // buyer just closing the form). The clientSecret their card form
+    // already had still works; no new intent needed.
+    if (intent.status !== "canceled") {
+      const clientSecret = (intent.raw as { client_secret: string | null } | null)?.client_secret ?? null;
+      res.status(200).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id, resumed: true });
+      return;
+    }
+  }
+
+  // No provider intent at all (shouldn't happen in practice), or it's
+  // genuinely dead (canceled) — a brand new Payment record, never the
+  // old one. createIntent's idempotency key is derived from the Payment
+  // id (see stripeProvider.ts), so reusing the old Payment's id here
+  // would just hand back that same dead intent; a new Payment gives
+  // Stripe's idempotency layer a fresh identity to mint a real new one
+  // against.
+  const freshPayment = await Payment.create({
+    targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+    targetId: purchase._id,
+    user: requester._id,
+    userEmail: requester.email,
+    amount: purchase.priceSnapshot,
+    currency: purchase.currency,
+    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    status: PAYMENT_STATUS.PENDING,
+  });
+
+  const { providerPaymentId, clientSecret } = await provider.createIntent({
+    amount: purchase.priceSnapshot,
+    currency: purchase.currency,
+    receiptEmail: requester.email,
+    metadata: { paymentId: (freshPayment._id as mongoose.Types.ObjectId).toString() },
+  });
+
+  freshPayment.providerPaymentId = providerPaymentId;
+  await freshPayment.save();
+
+  res.status(201).json({ clientSecret, paymentId: freshPayment.id, purchaseId: purchase.id, resumed: true });
+};
+
 // A digital product is bought directly, no Job/escrow involved at all —
 // see docs/digital-storefront-plan.md. Blocks a duplicate purchase (one
 // pending or successful DigitalPurchase per buyer+product is enough; a
-// second attempt just points at the existing one rather than creating a
-// competing PaymentIntent for something already bought or in progress).
+// second attempt resumes the existing pending one — see
+// resumeDigitalPurchaseIntent — rather than creating a competing
+// PaymentIntent for something already bought or in progress).
 // Also blocks buying from a creator who isn't currently subscribed/
 // verified — same as that product being unreachable through the feed or
 // its creator's page in the first place.
@@ -237,12 +315,17 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
 
   const existing = await DigitalPurchase.findOne({ product: product._id, buyer: requester._id });
   if (existing) {
-    res.status(400);
-    throw new Error(
-      existing.status === DIGITAL_PURCHASE_STATUS.SUCCESS
-        ? "You already own this product"
-        : "You already have a pending purchase for this product",
-    );
+    if (existing.status === DIGITAL_PURCHASE_STATUS.SUCCESS) {
+      res.status(400);
+      throw new Error("You already own this product");
+    }
+
+    // Still pending — the earlier attempt may just have been abandoned
+    // (closed the card form, a declined card), not actually failed at
+    // Stripe. Resume it instead of permanently locking the buyer out of
+    // ever buying this product again, which is what unconditionally
+    // 400-ing here used to do.
+    return resumeDigitalPurchaseIntent(req, res, existing);
   }
 
   const purchase = await DigitalPurchase.create({
@@ -261,6 +344,31 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
       size: file.size,
     })),
   });
+
+  // A free product (price 0) has no real charge to make — Stripe's own
+  // PaymentIntents reject a zero amount outright, same reasoning as
+  // activateFreeSubscription above. Marks the purchase successful and
+  // copies its files directly, with nothing to wait on.
+  if (product.price <= 0) {
+    purchase.status = DIGITAL_PURCHASE_STATUS.SUCCESS;
+    await purchase.save();
+
+    const payment = await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+      targetId: purchase._id,
+      user: requester._id,
+      userEmail: requester.email,
+      amount: 0,
+      currency: product.currency,
+      provider: PAYMENT_PROVIDER_NAME.MANUAL,
+      status: PAYMENT_STATUS.SUCCESS,
+    });
+
+    await copyPurchaseFiles(purchase._id as mongoose.Types.ObjectId);
+
+    res.status(201).json({ requiresPayment: false, purchaseId: purchase.id, paymentId: payment.id });
+    return;
+  }
 
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,

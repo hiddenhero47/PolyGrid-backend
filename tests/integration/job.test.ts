@@ -358,10 +358,29 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
     expect(res.body.provider.contractFile).toBeUndefined();
   });
 
+  it("getJob includes each party's public user summary (name + avatar), never losing the raw userId", async () => {
+    const clientUser = await createUser({ fullName: "Chidi Okonkwo" });
+    const providerUser = await createUser({ fullName: "Ada Eze" });
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const res = await request(app)
+      .get(`/api/jobs/${job._id}`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.client.userId).toBe(clientUser.id);
+    expect(res.body.client.user).toEqual({ id: clientUser.id, fullName: "Chidi Okonkwo", avatar: undefined });
+    expect(res.body.provider.userId).toBe(providerUser.id);
+    expect(res.body.provider.user).toEqual({ id: providerUser.id, fullName: "Ada Eze", avatar: undefined });
+  });
+
   it("lists jobs for both the client and the provider, filterable by status — as a trimmed summary, not the full job", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
-    await createActiveJob(clientUser, providerUser);
+    const clientUser = await createUser({ fullName: "Chidi Okonkwo" });
+    const providerUser = await createUser({ fullName: "Ada Eze" });
+    const job = await createActiveJob(clientUser, providerUser, { totalAmount: 1200 });
+    // amountPaid is only ever set by the payment flow, not something a
+    // client can pass at creation — set directly for this assertion.
+    await Job.updateOne({ _id: job._id }, { amountPaid: 400 });
 
     const asClient = await request(app)
       .get("/api/jobs/mine?status=active")
@@ -377,8 +396,13 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
     expect(summary.jobTitle).toEqual(expect.any(String));
     expect(summary.status).toBe("active");
     expect(summary.client.userId).toBe(clientUser.id);
+    expect(summary.client.user).toEqual({ id: clientUser.id, fullName: "Chidi Okonkwo", avatar: undefined });
     expect(summary.provider.isConfirmed).toBe(true);
-    expect(summary.stages).toBeUndefined();
+    expect(summary.provider.user).toEqual({ id: providerUser.id, fullName: "Ada Eze", avatar: undefined });
+    // Cheap progress fields a job card needs without opening the job —
+    // the rest of the full detail stays left out of the summary.
+    expect(summary.amountPaid).toBe(400);
+    expect(summary.stages).toEqual({ total: 1, verified: 0 });
     expect(summary.amountHistory).toBeUndefined();
     expect(summary.disputeHistory).toBeUndefined();
   });
@@ -439,6 +463,10 @@ describe("stage done/verify and payment math", () => {
       totalAmount: 1000,
       stages: [{ details: ["a"], payment: 40 }, { details: ["b"], payment: 60 }],
     });
+    // Verifying releases a stage's share FROM escrow, so it needs to
+    // actually be there first — fund the job in full before any
+    // done/verify flow, same as a real Stripe payment would.
+    await Job.updateOne({ _id: job._id }, { amountPaid: 1000 });
     const stageA = job.stages[0]._id;
     const stageB = job.stages[1]._id;
     const clientToken = generateToken(clientUser);
@@ -480,6 +508,45 @@ describe("stage done/verify and payment math", () => {
     expect(verifyB.body.status).toBe("completed");
     expect(verifyB.body.amountDisbursed).toBeCloseTo(950); // 380 + (600 * 0.95)
     expect(verifyB.body.platformFeeCollected).toBeCloseTo(50);
+  });
+
+  it("refuses to verify a stage that isn't funded yet, rather than releasing money that was never paid in", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser, {
+      totalAmount: 1200,
+      stages: [{ details: ["a"], payment: 40 }],
+    });
+    const stage = job.stages[0]._id;
+    const clientToken = generateToken(clientUser);
+    const providerToken = generateToken(providerUser);
+
+    await request(app).patch(`/api/jobs/${job._id}/stages/${stage}/done`).set("Authorization", `Bearer ${providerToken}`);
+
+    // amountPaid is still 0 — nothing has actually been funded.
+    const unfunded = await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stage}/verify`)
+      .set("Authorization", `Bearer ${clientToken}`);
+    expect(unfunded.status).toBe(400);
+
+    const stillUnverified = await Job.findById(job._id);
+    expect(stillUnverified?.stages[0].isVerified).toBe(false);
+    expect(stillUnverified?.amountDisbursed).toBe(0);
+
+    // Funded partway — still not enough to cover this 40% ($480) stage.
+    await Job.updateOne({ _id: job._id }, { amountPaid: 300 });
+    const partiallyFunded = await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stage}/verify`)
+      .set("Authorization", `Bearer ${clientToken}`);
+    expect(partiallyFunded.status).toBe(400);
+
+    // Funded enough — now it goes through.
+    await Job.updateOne({ _id: job._id }, { amountPaid: 480 });
+    const funded = await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${stage}/verify`)
+      .set("Authorization", `Bearer ${clientToken}`);
+    expect(funded.status).toBe(200);
+    expect(funded.body.stages[0].isVerified).toBe(true);
   });
 });
 

@@ -440,7 +440,7 @@ describe("POST /api/payments/intent — validation (no Stripe network calls)", (
       expect(res.status).toBe(400);
     });
 
-    it("blocks a duplicate purchase, whether the first is pending or already successful", async () => {
+    it("blocks a duplicate purchase of a product I already own", async () => {
       const creatorUser = await createUserWithActiveSubscription();
       const profile = await createDigitalCreatorProfile({
         user: creatorUser,
@@ -457,6 +457,40 @@ describe("POST /api/payments/intent — validation (no Stripe network calls)", (
         .send({ targetType: "DigitalPurchase", targetId: product.id });
 
       expect(res.status).toBe(400);
+    });
+
+    // No real storage call needed — the top-of-file mock on
+    // digitalStorageProviders already covers copyPurchaseFiles, and
+    // there's no Stripe round trip at all for a free product (same
+    // reasoning as the free-subscription-plan test above), so this runs
+    // unconditionally rather than behind maybeIt.
+    it("activates a free digital product directly, with no Stripe round trip needed", async () => {
+      const creatorUser = await createUserWithActiveSubscription();
+      const profile = await createDigitalCreatorProfile({
+        user: creatorUser,
+        currentSubscription: creatorUser.currentSubscription,
+        isVerified: true,
+      });
+      const product = await createDigitalProduct({ creator: profile, price: 0 });
+      const buyer = await createUser();
+
+      const res = await request(app)
+        .post("/api/payments/intent")
+        .set("Authorization", `Bearer ${generateToken(buyer)}`)
+        .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+      expect(res.status).toBe(201);
+      expect(res.body.requiresPayment).toBe(false);
+      expect(res.body.clientSecret).toBeUndefined();
+
+      const purchase = await DigitalPurchase.findById(res.body.purchaseId);
+      expect(purchase?.status).toBe("success");
+      expect(purchase?.files).toHaveLength(1);
+
+      const payment = await Payment.findById(res.body.paymentId);
+      expect(payment?.amount).toBe(0);
+      expect(payment?.status).toBe("success");
+      expect(payment?.provider).toBe("manual");
     });
   });
 });
@@ -682,6 +716,116 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
       .set("Authorization", `Bearer ${generateToken(buyer)}`);
     expect(download.status).toBe(200);
     expect(download.body.files).toHaveLength(1);
+  });
+
+  maybeIt("resumes an abandoned-but-still-live digital checkout instead of locking the buyer out", async () => {
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    const firstIntent = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+    expect(firstIntent.status).toBe(201);
+
+    // Deliberately never confirmed — the buyer closed the card form, or
+    // the card was declined. Before this fix, a second attempt would
+    // just 400 forever ("You already have a pending purchase").
+    const secondAttempt = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(secondAttempt.status).toBe(200);
+    expect(secondAttempt.body.resumed).toBe(true);
+    expect(secondAttempt.body.purchaseId).toBe(firstIntent.body.purchaseId);
+    // The same still-live intent, not a new one — same payment, same
+    // clientSecret the buyer's card form already had.
+    expect(secondAttempt.body.paymentId).toBe(firstIntent.body.paymentId);
+    expect(secondAttempt.body.clientSecret).toBe(firstIntent.body.clientSecret);
+
+    expect(await Payment.countDocuments({ targetId: firstIntent.body.purchaseId })).toBe(1);
+  });
+
+  maybeIt("reconciles a resumed checkout that actually succeeded at Stripe but never got its webhook", async () => {
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    const firstIntent = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    const payment = await Payment.findById(firstIntent.body.paymentId);
+    const liveStripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+    await liveStripe.paymentIntents.confirm(payment!.providerPaymentId as string, {
+      payment_method: "pm_card_visa",
+    });
+
+    // Webhook never arrives — same scenario as the Job/refresh test
+    // above, just discovered via a retried checkout instead of a manual
+    // refresh.
+    const resumed = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.status).toBe("success");
+    expect(resumed.body.clientSecret).toBeUndefined();
+
+    await waitFor(async () => ((await DigitalPurchase.findById(firstIntent.body.purchaseId))?.files.length ?? 0) > 0);
+    const purchase = await DigitalPurchase.findById(firstIntent.body.purchaseId);
+    expect(purchase?.status).toBe("success");
+  });
+
+  maybeIt("starts a fresh intent when the original was canceled, without ever creating a second purchase", async () => {
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    const firstIntent = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    const payment = await Payment.findById(firstIntent.body.paymentId);
+    const liveStripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+    await liveStripe.paymentIntents.cancel(payment!.providerPaymentId as string);
+
+    const resumed = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(resumed.status).toBe(201);
+    expect(resumed.body.resumed).toBe(true);
+    expect(resumed.body.purchaseId).toBe(firstIntent.body.purchaseId);
+    // A genuinely new payment/intent — the old one is dead and can never
+    // be confirmed again.
+    expect(resumed.body.paymentId).not.toBe(firstIntent.body.paymentId);
+    expect(resumed.body.clientSecret).not.toBe(firstIntent.body.clientSecret);
+
+    // Still only one purchase for this buyer+product throughout.
+    expect(await DigitalPurchase.countDocuments({ product: product._id, buyer: buyer._id })).toBe(1);
+    expect(await Payment.countDocuments({ targetId: firstIntent.body.purchaseId })).toBe(2);
   });
 
   maybeIt("recovers a payment whose webhook never arrived, via POST /:id/refresh", async () => {

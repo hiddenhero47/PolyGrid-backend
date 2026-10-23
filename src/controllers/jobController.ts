@@ -25,6 +25,7 @@ import {
   countUploadCandidates,
 } from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
+import { toPublicMediaFile } from "../models/mediaFile";
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { connectUsers } from "./contactController";
@@ -51,20 +52,63 @@ const withContractLinks = (party: IJobParty) => {
   };
 };
 
+// A job only ever stores each party's userId — nothing on the job itself
+// resolves to a name/avatar, and GET /api/users is admin-only, so without
+// this a list/detail view has no way to show who you're actually working
+// with. Deliberately never populated onto the job document itself (see
+// loadPartyUsers below) — every existing read of job.client.userId /
+// job.provider.userId elsewhere in this file keeps seeing a plain
+// ObjectId, exactly as before.
+const toJobPartyUserSummary = (user: Pick<IUser, "id" | "fullName" | "avatar"> | undefined) =>
+  user
+    ? { id: user.id, fullName: user.fullName, avatar: user.avatar ? toPublicMediaFile(user.avatar) : undefined }
+    : null;
+
+// Fetched as a separate, batched lookup rather than job.populate() — a
+// populate on client.userId/provider.userId would replace that field's
+// value with the full User document, changing what every other call
+// site in this file (assertParty, roleOf, payout/refund handlers, ...)
+// gets back from the exact same job object.
+const loadPartyUsers = async (jobs: IJob[]): Promise<Map<string, IUser>> => {
+  const ids = new Set<string>();
+  for (const job of jobs) {
+    ids.add(job.client.userId.toString());
+    ids.add(job.provider.userId.toString());
+  }
+
+  const users = await User.find({ _id: { $in: [...ids] } }).select("fullName avatar");
+  return new Map(users.map((user) => [user.id, user]));
+};
+
 // The list view — deliberately light. A job's full detail (stages,
 // amountHistory, disputeHistory, refunds, payouts, contract links, …)
 // only matters once someone has actually opened one specific job via
 // getJob; a list of every job you're a party to doesn't need all of that
-// repeated per row.
-const toJobSummary = (job: IJob) => ({
+// repeated per row. amountPaid and a stages tally are the exception —
+// cheap to include and exactly what a job card needs to show progress
+// ("2 / 3 stages · $400 of $1,200 funded") without opening each job.
+const toJobSummary = (job: IJob, partyUsers: Map<string, IUser>) => ({
   id: job.id,
   jobTitle: job.jobTitle,
   jobType: job.jobType,
   status: job.status,
   totalAmount: job.totalAmount,
   currency: job.currency,
-  client: { userId: job.client.userId, isConfirmed: job.client.isConfirmed },
-  provider: { userId: job.provider.userId, isConfirmed: job.provider.isConfirmed },
+  amountPaid: job.amountPaid,
+  stages: {
+    total: job.stages.length,
+    verified: job.stages.filter((stage) => stage.isVerified).length,
+  },
+  client: {
+    userId: job.client.userId,
+    isConfirmed: job.client.isConfirmed,
+    user: toJobPartyUserSummary(partyUsers.get(job.client.userId.toString())),
+  },
+  provider: {
+    userId: job.provider.userId,
+    isConfirmed: job.provider.isConfirmed,
+    user: toJobPartyUserSummary(partyUsers.get(job.provider.userId.toString())),
+  },
   createdAt: job.createdAt,
 });
 
@@ -301,12 +345,21 @@ export const getJob = asyncHandler(async (req: Request, res: Response) => {
 
   assertParty(job, req.user as IUser);
 
+  const partyUsers = await loadPartyUsers([job]);
   const plain = job.toObject();
 
   res.status(200).json({
     ...plain,
-    client: { ...plain.client, contractFile: withContractLinks(job.client) },
-    provider: { ...plain.provider, contractFile: withContractLinks(job.provider) },
+    client: {
+      ...plain.client,
+      contractFile: withContractLinks(job.client),
+      user: toJobPartyUserSummary(partyUsers.get(job.client.userId.toString())),
+    },
+    provider: {
+      ...plain.provider,
+      contractFile: withContractLinks(job.provider),
+      user: toJobPartyUserSummary(partyUsers.get(job.provider.userId.toString())),
+    },
   });
 });
 
@@ -333,8 +386,10 @@ export const getMyJobs = asyncHandler(async (req: Request, res: Response) => {
     Job.countDocuments(filter),
   ]);
 
+  const partyUsers = await loadPartyUsers(jobs);
+
   res.status(200).json({
-    data: jobs.map(toJobSummary),
+    data: jobs.map((job) => toJobSummary(job, partyUsers)),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
@@ -601,9 +656,21 @@ export const verifyStage = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("This stage has already been verified");
   }
 
+  const stageAmount = (job.totalAmount * stage.payment) / 100;
+
+  // Verifying releases this stage's share FROM escrow — it can't release
+  // more than what's actually sitting there. Without this, a job with
+  // little or nothing funded could still verify every stage, inflating
+  // amountDisbursed/platformFeeCollected for money that was never paid in
+  // (payoutAvailableAmount's min() against amountPaid stops it from
+  // actually leaving, but the job's own numbers would already be wrong).
+  if (refundableAmount(job) < stageAmount) {
+    res.status(400);
+    throw new Error("This stage isn't fully funded yet — fund it before verifying");
+  }
+
   stage.isVerified = true;
 
-  const stageAmount = (job.totalAmount * stage.payment) / 100;
   const feeAmount = (stageAmount * job.platformFeePercent) / 100;
 
   job.amountDisbursed += stageAmount - feeAmount;

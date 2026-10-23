@@ -3,6 +3,7 @@ import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { Contact } from "../models/contactModel";
 import { User, IUser } from "../models/userModel";
+import { toPublicMediaFile } from "../models/mediaFile";
 
 const ensureConnection = async (
   ownerId: mongoose.Types.ObjectId,
@@ -69,7 +70,8 @@ export const addContact = asyncHandler(async (req: Request, res: Response) => {
   res.status(200).json({ message: "Contact added" });
 });
 
-// @desc    List my contacts, newest first
+// @desc    List my contacts, newest first, optionally filtered by name or
+//          email (?q=)
 // @route   GET /api/contacts
 // @access  Private
 export const getContacts = asyncHandler(async (req: Request, res: Response) => {
@@ -77,14 +79,41 @@ export const getContacts = asyncHandler(async (req: Request, res: Response) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const skip = (page - 1) * limit;
+  const q = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
 
   const contact = await Contact.findOne({ userId: requester._id }).lean();
-  const fullList = [...(contact?.list ?? [])].sort(
+  let fullList = [...(contact?.list ?? [])].sort(
     (a, b) => b.connectedAt.getTime() - a.connectedAt.getTime(),
   );
 
+  // Fetched for the whole list up front (bounded by however many contacts
+  // this person actually has, not a page size) — needed both to filter
+  // by name below and to attach fullName/avatar per row, same summary
+  // jobController.toJobPartyUserSummary gives, so a contact row can show
+  // a name instead of just an email.
+  const users = await User.find({ _id: { $in: fullList.map((entry) => entry.user) } }).select("fullName avatar");
+  const userById = new Map(users.map((user) => [user.id, user]));
+
+  if (q) {
+    fullList = fullList.filter((entry) => {
+      const fullName = userById.get(entry.user.toString())?.fullName ?? "";
+      return entry.email.toLowerCase().includes(q) || fullName.toLowerCase().includes(q);
+    });
+  }
+
+  const data = fullList.slice(skip, skip + limit).map((entry) => {
+    const user = userById.get(entry.user.toString());
+    return {
+      user: entry.user,
+      email: entry.email,
+      fullName: user?.fullName,
+      avatar: user?.avatar ? toPublicMediaFile(user.avatar) : undefined,
+      connectedAt: entry.connectedAt,
+    };
+  });
+
   res.status(200).json({
-    data: fullList.slice(skip, skip + limit),
+    data,
     pagination: {
       total: fullList.length,
       page,

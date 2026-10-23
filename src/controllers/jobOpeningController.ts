@@ -63,6 +63,20 @@ const toPublicJobOpening = (opening: IJobOpening) => ({
   createdAt: opening.createdAt,
 });
 
+// A small, read-only slice of a posting — attached per row in
+// getMyApplications so the "my applications" list can show what each
+// application is actually for without a separate GET per posting.
+const toJobOpeningSummary = (opening: IJobOpening) => ({
+  id: opening.id,
+  title: opening.title,
+  status: opening.status,
+  applicationDeadline: opening.applicationDeadline,
+  generalArea: opening.generalArea,
+  payRate: opening.payRate,
+  payType: opening.payType,
+  currency: opening.currency,
+});
+
 const toPublicApplication = (application: IJobApplication) => ({
   id: application.id,
   posting: application.posting,
@@ -70,6 +84,10 @@ const toPublicApplication = (application: IJobApplication) => ({
   applicant: application.applicant,
   message: application.message,
   status: application.status,
+  // Set once accepted — the Job this application turned into. Without
+  // this, an accepted worker has no way to get from the application to
+  // the job it created.
+  job: application.job,
   createdAt: application.createdAt,
 });
 
@@ -544,17 +562,31 @@ export const getJobOpening = asyncHandler(async (req: Request, res: Response) =>
       return;
     }
 
-    const accepted = await JobApplication.exists({
-      posting: opening._id,
-      workerId: eligible._id,
-      status: APPLICATION_STATUS.ACCEPTED,
-    });
+    // The caller's own application on this posting, any status — without
+    // this, a worker checking whether (and how) they've already applied
+    // has to separately page through GET /api/job-openings/applications/mine
+    // and search it for this posting.
+    const myApplication = await JobApplication.findOne({ posting: opening._id, workerId: eligible._id });
 
-    if (!accepted) {
+    if (myApplication?.status !== APPLICATION_STATUS.ACCEPTED) {
       // Eligible to browse, but not accepted — public tier only.
-      res.status(200).json(toPublicJobOpening(opening));
+      res.status(200).json({
+        ...toPublicJobOpening(opening),
+        myApplication: myApplication ? toPublicApplication(myApplication) : null,
+      });
       return;
     }
+
+    res.status(200).json({
+      ...toPublicJobOpening(opening),
+      coordinates: opening.coordinates,
+      address: opening.address,
+      googleMapsUrl: opening.googleMapsUrl,
+      contactInfo: opening.contactInfo,
+      files: toFilesWithLinks(opening),
+      myApplication: toPublicApplication(myApplication),
+    });
+    return;
   }
 
   res.status(200).json({
@@ -711,8 +743,19 @@ export const getMyApplications = asyncHandler(async (req: Request, res: Response
     JobApplication.countDocuments(filter),
   ]);
 
+  const postings = await JobOpening.find({ _id: { $in: applications.map((a) => a.posting) } }).select(
+    "title status applicationDeadline generalArea payRate payType currency",
+  );
+  const postingById = new Map(postings.map((posting) => [posting.id, posting]));
+
   res.status(200).json({
-    data: applications.map(toPublicApplication),
+    data: applications.map((application) => {
+      const posting = postingById.get(application.posting.toString());
+      return {
+        ...toPublicApplication(application),
+        posting: posting ? toJobOpeningSummary(posting) : application.posting,
+      };
+    }),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
