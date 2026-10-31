@@ -260,11 +260,14 @@ describe("GET /api/store-profiles (search)", () => {
       categories: [MATERIAL_CATEGORY.TIMBER_WOOD],
       slug: "preview-store",
     });
-    await createProduct({ store, category: MATERIAL_CATEGORY.TIMBER_WOOD });
+    const product = await createProduct({ store, category: MATERIAL_CATEGORY.TIMBER_WOOD });
 
     const res = await request(app).get(`/api/store-profiles?category=${MATERIAL_CATEGORY.TIMBER_WOOD}`);
 
     expect(res.body.data[0].previewProducts).toHaveLength(1);
+    // Same aggregate-has-no-.id-virtual issue as the store itself, one
+    // level deeper — a frontend needs this to link into /api/products/:id.
+    expect(res.body.data[0].previewProducts[0].id).toBe(product.id);
   });
 });
 

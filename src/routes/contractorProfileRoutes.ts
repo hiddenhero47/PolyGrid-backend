@@ -6,6 +6,7 @@ import {
   searchContractors,
   getContractor,
   addPortfolioItem,
+  updatePortfolioItem,
   addPortfolioMedia,
   removePortfolioMedia,
   removePortfolioItem,
@@ -17,6 +18,7 @@ import {
   createContractorProfileSchema,
   updateContractorProfileSchema,
   addPortfolioItemSchema,
+  updatePortfolioItemSchema,
 } from "../validators/contractorProfile/contractorProfileValidator";
 
 const router = express.Router();
@@ -28,6 +30,7 @@ router.patch("/me", protect, validateBody(updateContractorProfileSchema), update
 router.post("/me/avatar", protect, uploadAvatar);
 
 router.post("/me/portfolio", protect, validateBody(addPortfolioItemSchema), addPortfolioItem);
+router.patch("/me/portfolio/:itemId", protect, validateBody(updatePortfolioItemSchema), updatePortfolioItem);
 router.post("/me/portfolio/:itemId/media", protect, addPortfolioMedia);
 router.delete("/me/portfolio/:itemId/media/:fileName", protect, removePortfolioMedia);
 router.delete("/me/portfolio/:itemId", protect, removePortfolioItem);

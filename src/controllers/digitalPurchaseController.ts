@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
+import { Payment, PAYMENT_TARGET_TYPE } from "../models/paymentModel";
 import { IUser } from "../models/userModel";
 import { toDownloadLinks } from "../helpers/digitalFileLinks";
 
@@ -31,6 +32,21 @@ export const getMyDigitalPurchases = asyncHandler(async (req: Request, res: Resp
     DigitalPurchase.countDocuments(filter),
   ]);
 
+  // Most recent payment per purchase — resumeDigitalPurchaseIntent (see
+  // paymentController.ts) can leave more than one Payment against the
+  // same purchase (an old, dead one plus a fresh one), so the first one
+  // seen here (sorted newest first) is always the live one.
+  const payments = await Payment.find({
+    targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+    targetId: { $in: purchases.map((purchase) => purchase._id) },
+  }).sort({ createdAt: -1 });
+
+  const paymentIdByPurchase = new Map<string, string>();
+  for (const payment of payments) {
+    const key = payment.targetId.toString();
+    if (!paymentIdByPurchase.has(key)) paymentIdByPurchase.set(key, payment.id);
+  }
+
   res.status(200).json({
     data: purchases.map((purchase) => ({
       id: purchase.id,
@@ -38,6 +54,9 @@ export const getMyDigitalPurchases = asyncHandler(async (req: Request, res: Resp
       priceSnapshot: purchase.priceSnapshot,
       currency: purchase.currency,
       status: purchase.status,
+      // Lets the Purchases page offer "Check payment status" (POST
+      // /api/payments/:id/refresh) without first searching /payments/me.
+      paymentId: paymentIdByPurchase.get(purchase.id) ?? null,
       createdAt: purchase.createdAt,
     })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },

@@ -59,6 +59,19 @@ export interface ISystemPayout extends Document {
   // record to be created) — not necessarily the same person who'll
   // eventually lock/pay it.
   createdBy: Types.ObjectId;
+  // Set once systemPayoutController.markPaid/markFailed actually settles
+  // this record — same "who decided, and when" shape as
+  // IRefund/IPayout's own decidedBy/decidedAt, just for the transfer
+  // itself rather than the original approval.
+  settledBy?: Types.ObjectId;
+  settledAt?: Date;
+  // Whatever the admin making the transfer by hand wants to reference it
+  // by later (a bank reference number, a Stripe payout id, …) — optional,
+  // since no automated payout rail exists yet to always have one.
+  transferReference?: string;
+  // Required when marking this failed — same "never just a flipped flag,
+  // always say why" instinct declineReason already uses.
+  failureReason?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -101,6 +114,10 @@ const systemPayoutSchema = new Schema<ISystemPayout>(
     lockedAt: { type: Date },
     lockedBy: { type: Schema.Types.ObjectId, ref: "User" },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    settledBy: { type: Schema.Types.ObjectId, ref: "User" },
+    settledAt: { type: Date },
+    transferReference: { type: String },
+    failureReason: { type: String },
   },
   { timestamps: true },
 );

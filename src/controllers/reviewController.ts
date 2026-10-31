@@ -1,4 +1,4 @@
-import mongoose from "mongoose";
+import mongoose, { FilterQuery } from "mongoose";
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { Review, IReview, REVIEW_SOURCE_TYPE, ReviewSourceType } from "../models/reviewModel";
@@ -8,6 +8,7 @@ import { IUser } from "../models/userModel";
 import {
   PROFILE_MODEL_REGISTRY,
   PROFILE_TYPE,
+  PROFILE_NAME_FIELD,
   ProfileType,
   isKnownProfileType,
   findProfileByUserId,
@@ -215,38 +216,109 @@ export const getProfileReviews = asyncHandler(async (req: Request, res: Response
   });
 });
 
-// @desc    A profile's reviews for moderation — same listing as
-//          getProfileReviews above, except hidden reviews are included
-//          (with their moderation detail) so an admin can find something
-//          to unhide.
-// @route   GET /api/reviews/moderation?profileType=&profileId=
+interface PopulatedReviewerOrHider {
+  _id: mongoose.Types.ObjectId;
+  fullName: string;
+  email?: string;
+}
+
+// Only what this row actually reads off the dynamically-`refPath`'d
+// profile — every profile type's own document shape differs, but all of
+// them carry whichever field PROFILE_NAME_FIELD[profileType] names.
+type PopulatedModerationProfile = { _id: mongoose.Types.ObjectId } & Record<string, unknown>;
+
+type PopulatedModerationReview = Omit<IReview, "reviewer" | "hiddenBy" | "profileId"> & {
+  id: string;
+  reviewer: PopulatedReviewerOrHider;
+  hiddenBy?: PopulatedReviewerOrHider;
+  profileId: PopulatedModerationProfile;
+};
+
+const toModerationReview = (review: PopulatedModerationReview) => ({
+  id: review.id,
+  profileType: review.profileType,
+  // profileId can fail to populate if the profile itself was since
+  // deleted — falls back to the review's own stored (unpopulated) id
+  // rather than crashing the whole row.
+  profileId: review.profileId?._id ?? review.profileId,
+  profileName: review.profileId?.[PROFILE_NAME_FIELD[review.profileType as ProfileType]],
+  reviewer: review.reviewer,
+  rating: review.rating,
+  comment: review.comment,
+  isHidden: review.isHidden,
+  hiddenBy: review.hiddenBy,
+  hiddenReason: review.hiddenReason,
+  hiddenAt: review.hiddenAt,
+  createdAt: review.createdAt,
+});
+
+// @desc    Reviews for moderation — profileType/profileId narrow it to
+//          one profile's reviews (same as before); with neither, a
+//          platform-wide feed, newest first, so a moderator can actually
+//          browse for something to act on instead of only ever reaching
+//          this from a profile they already had in hand. ?isHidden=
+//          true|false and ?minRating=/maxRating= (low ratings are the
+//          usual moderation target) narrow it further. Hidden reviews
+//          are always included here (unlike getProfileReviews) so
+//          there's something to unhide.
+// @route   GET /api/reviews/moderation?profileType=&profileId=&isHidden=&minRating=&maxRating=&page=
 // @access  Private (Admin / Super Admin / Customer Care — read-only)
 export const getReviewsForModeration = asyncHandler(async (req: Request, res: Response) => {
-  const { profileType, profileId } = req.query as { profileType?: string; profileId?: string };
+  const { profileType, profileId, isHidden, minRating, maxRating } = req.query as {
+    profileType?: string;
+    profileId?: string;
+    isHidden?: string;
+    minRating?: string;
+    maxRating?: string;
+  };
 
-  if (!profileType || !isKnownProfileType(profileType)) {
-    res.status(400);
-    throw new Error("A valid profileType is required");
+  const filter: FilterQuery<IReview> = {};
+
+  if (profileType) {
+    if (!isKnownProfileType(profileType)) {
+      res.status(400);
+      throw new Error("Invalid profileType");
+    }
+    filter.profileType = profileType;
   }
 
-  if (!profileId || !mongoose.Types.ObjectId.isValid(profileId)) {
-    res.status(400);
-    throw new Error("A valid profileId is required");
+  if (profileId) {
+    if (!mongoose.Types.ObjectId.isValid(profileId)) {
+      res.status(400);
+      throw new Error("Invalid profileId");
+    }
+    filter.profileId = new mongoose.Types.ObjectId(profileId);
+  }
+
+  if (isHidden === "true") filter.isHidden = true;
+  else if (isHidden === "false") filter.isHidden = { $ne: true };
+
+  const min = minRating !== undefined ? Number(minRating) : undefined;
+  const max = maxRating !== undefined ? Number(maxRating) : undefined;
+  if (Number.isFinite(min) || Number.isFinite(max)) {
+    filter.rating = {
+      ...(Number.isFinite(min) ? { $gte: min } : {}),
+      ...(Number.isFinite(max) ? { $lte: max } : {}),
+    };
   }
 
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const skip = (page - 1) * limit;
 
-  const filter = { profileType, profileId };
-
   const [reviews, total] = await Promise.all([
-    Review.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("reviewer", "fullName"),
+    Review.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("reviewer", "fullName email")
+      .populate("hiddenBy", "fullName")
+      .populate("profileId"),
     Review.countDocuments(filter),
   ]);
 
   res.status(200).json({
-    data: reviews.map(toAdminReview),
+    data: (reviews as unknown as PopulatedModerationReview[]).map(toModerationReview),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });

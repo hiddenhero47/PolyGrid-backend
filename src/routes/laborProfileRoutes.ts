@@ -6,6 +6,7 @@ import {
   searchWorkers,
   getWorker,
   addPortfolioItem,
+  updatePortfolioItem,
   addPortfolioMedia,
   removePortfolioMedia,
   removePortfolioItem,
@@ -17,6 +18,7 @@ import {
   createLaborProfileSchema,
   updateLaborProfileSchema,
   addPortfolioItemSchema,
+  updatePortfolioItemSchema,
 } from "../validators/laborProfile/laborProfileValidator";
 
 const router = express.Router();
@@ -28,6 +30,7 @@ router.patch("/me", protect, validateBody(updateLaborProfileSchema), updateMyLab
 router.post("/me/avatar", protect, uploadAvatar);
 
 router.post("/me/portfolio", protect, validateBody(addPortfolioItemSchema), addPortfolioItem);
+router.patch("/me/portfolio/:itemId", protect, validateBody(updatePortfolioItemSchema), updatePortfolioItem);
 router.post("/me/portfolio/:itemId/media", protect, addPortfolioMedia);
 router.delete("/me/portfolio/:itemId/media/:fileName", protect, removePortfolioMedia);
 router.delete("/me/portfolio/:itemId", protect, removePortfolioItem);

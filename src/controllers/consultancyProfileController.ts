@@ -71,7 +71,7 @@ const toPublicPortfolioItem = (item: IPortfolioItem) => ({
 // profile views), resolved there via helpers/profileAvatarFallback.ts
 // when this profile has no avatar of its own. Search/list results never
 // pass one, by design — see that helper's own comment.
-const toPublicProfile = (profile: IConsultancyProfile, fallbackAvatar?: IMediaFile) => ({
+export const toPublicProfile = (profile: IConsultancyProfile, fallbackAvatar?: IMediaFile) => ({
   id: profile.id,
   userId: profile.userId,
   isVerified: profile.isVerified,
@@ -481,6 +481,41 @@ export const addPortfolioItem = asyncHandler(async (req: Request, res: Response)
     ...toPublicProfile(profile),
     ...(mediaWarnings.length > 0 ? { mediaWarnings } : {}),
   });
+});
+
+// @desc    Update an existing portfolio item's title/description/tags/
+//          startedAt/completedAt — addPortfolioItem/removePortfolioItem
+//          and the media add/remove routes have no way to just fix a typo
+//          or add a tag without removing and re-adding the whole item
+//          (losing its media order in the process).
+// @route   PATCH /api/consultancy-profiles/me/portfolio/:itemId
+// @access  Private
+export const updatePortfolioItem = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await ConsultancyProfile.findOne({ userId: (req.user as IUser)._id });
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a consultancy profile yet");
+  }
+
+  const item = profile.portfolio.id(req.params.itemId as string);
+
+  if (!item) {
+    res.status(404);
+    throw new Error("Portfolio item not found");
+  }
+
+  const { title, description, tags, startedAt, completedAt } = req.body;
+
+  if (title !== undefined) item.title = title;
+  if (description !== undefined) item.description = description;
+  if (tags !== undefined) item.tags = tags;
+  if (startedAt !== undefined) item.startedAt = startedAt;
+  if (completedAt !== undefined) item.completedAt = completedAt;
+
+  await profile.save();
+
+  res.status(200).json(toPublicProfile(profile));
 });
 
 // @desc    Add more media to an existing portfolio item

@@ -6,9 +6,12 @@ import { Plan } from "../models/planModel";
 import { Subscription } from "../models/subscriptionModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
-import { syncProfilesSubscription, supersedeActiveSubscriptions } from "../helpers/profileSubscriptionSync";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+import {
+  syncProfilesSubscription,
+  supersedeActiveSubscriptions,
+  getCarryoverDays,
+  DAY_MS,
+} from "../helpers/profileSubscriptionSync";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -41,7 +44,11 @@ export const grantSubscription = asyncHandler(async (req: Request, res: Response
   }
 
   const periodStarted = new Date();
-  const expiresAt = new Date(periodStarted.getTime() + plan.duration * DAY_MS);
+  // See getCarryoverDays' own comment — whatever time was left on a
+  // currently-active subscription this user already had gets added on top,
+  // never just lost by granting a new one.
+  const carryoverDays = await getCarryoverDays(user._id as mongoose.Types.ObjectId);
+  const expiresAt = new Date(periodStarted.getTime() + (plan.duration + carryoverDays) * DAY_MS);
 
   const subscription = await Subscription.create({
     user: user._id,

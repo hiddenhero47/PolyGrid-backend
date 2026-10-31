@@ -10,7 +10,15 @@ import request from "supertest";
 import { authenticator } from "otplib";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createAdmin, createSuperAdmin, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
+import {
+  createUser,
+  createAdmin,
+  createSuperAdmin,
+  generateToken,
+  TEST_PNG_BUFFER,
+  createConsultancyProfile,
+  createStoreProfile,
+} from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 import bcrypt from "bcryptjs";
@@ -83,6 +91,63 @@ describe("POST /api/users (register)", () => {
   it("rejects missing fields", async () => {
     const res = await request(app).post("/api/users").send({ email: "x@example.com" });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /api/users/me/profiles", () => {
+  it("requires authentication", async () => {
+    const res = await request(app).get("/api/users/me/profiles");
+    expect(res.status).toBe(401);
+  });
+
+  it("reports null for every pillar when I have no profiles", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .get("/api/users/me/profiles")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      ConsultancyProfile: null,
+      StoreProfile: null,
+      DigitalCreatorProfile: null,
+      ContractorProfile: null,
+      ClientProfile: null,
+      LaborProfile: null,
+    });
+  });
+
+  it("summarizes the profiles I actually have, and leaves the rest null", async () => {
+    const user = await createUser();
+    const store = await createStoreProfile({ user, isVerified: true });
+
+    const res = await request(app)
+      .get("/api/users/me/profiles")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.StoreProfile).toEqual({
+      id: store.id,
+      isVerified: true,
+      status: store.status,
+      slug: store.slug,
+    });
+    expect(res.body.ConsultancyProfile).toBeNull();
+    expect(res.body.ContractorProfile).toBeNull();
+  });
+
+  it("never mixes up one user's profile with another's", async () => {
+    const me = await createUser();
+    const other = await createUser();
+    await createConsultancyProfile({ user: other });
+
+    const res = await request(app)
+      .get("/api/users/me/profiles")
+      .set("Authorization", `Bearer ${generateToken(me)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ConsultancyProfile).toBeNull();
   });
 });
 

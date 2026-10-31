@@ -1,6 +1,7 @@
 import express from "express";
 import {
   listDigitalProductFeed,
+  listDigitalProductsForReview,
   getDigitalProduct,
   getDigitalProductDownloadLink,
   setDigitalProductVerification,
@@ -13,6 +14,7 @@ import { setDigitalProductVerificationSchema } from "../validators/digitalProduc
 const router = express.Router();
 
 router.get("/feed", listDigitalProductFeed);
+router.get("/review", secureRole([...REVIEW_ROLES]), listDigitalProductsForReview);
 router.get("/:id/download", protect, getDigitalProductDownloadLink);
 router.patch(
   "/:id/verify",

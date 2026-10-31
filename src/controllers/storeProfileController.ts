@@ -347,7 +347,13 @@ export const searchStores = asyncHandler(async (req: Request, res: Response) => 
     data: stores.map((store) => ({
       ...toPublicStoreProfile(store as IStoreProfile),
       id: store._id,
-      previewProducts: (store.previewProducts as IProduct[]).map(toPublicProduct),
+      // Same aggregate-has-no-.id-virtual issue as the store itself, one
+      // level deeper — previewProducts are also plain objects here, not
+      // Mongoose documents.
+      previewProducts: (store.previewProducts as IProduct[]).map((p) => ({
+        ...toPublicProduct(p),
+        id: p._id,
+      })),
     })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });

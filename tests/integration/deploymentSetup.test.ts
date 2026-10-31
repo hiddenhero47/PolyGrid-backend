@@ -3,7 +3,12 @@ import { createSuperAdmin } from "../setup/fixtures";
 import { User, SYSTEM_ROLE } from "../../src/models/userModel";
 import { VerificationTemplate } from "../../src/models/verificationTemplateModel";
 import { PROFILE_TYPE } from "../../src/constants/profileTypes";
-import { ensureSuperAdminExists, ensureVerificationTemplatesSeeded } from "../../src/helpers/deploymentSetup";
+import {
+  ensureSuperAdminExists,
+  ensureVerificationTemplatesSeeded,
+  ensureConversationIndexesFixed,
+} from "../../src/helpers/deploymentSetup";
+import { Conversation } from "../../src/models/conversationModel";
 
 const SUPER_ADMIN_ENV_KEYS = ["SUPER_ADMIN_NAME", "SUPER_ADMIN_EMAIL", "SUPER_ADMIN_PASSWORD"] as const;
 const savedEnv: Record<string, string | undefined> = {};
@@ -112,5 +117,31 @@ describe("ensureVerificationTemplatesSeeded", () => {
     await ensureVerificationTemplatesSeeded();
 
     expect(await VerificationTemplate.countDocuments({ country: "NG" })).toBe(Object.values(PROFILE_TYPE).length);
+  });
+});
+
+describe("ensureConversationIndexesFixed", () => {
+  it("drops the old broken multikey-unique index and leaves the new pairKey index in place", async () => {
+    // Simulates an existing (dev/staging) database still on the old
+    // schema — Conversation.init() in connectTestDB only ever creates
+    // indexes the *current* schema declares, so the old one has to be
+    // added by hand here to have anything to migrate away from.
+    await Conversation.collection.dropIndex("pairKey_1").catch(() => {});
+    await Conversation.collection.createIndex({ participants: 1 }, { unique: true, name: "participants_1" });
+
+    const result = await ensureConversationIndexesFixed();
+    expect(result.status).toBe("success");
+    expect(result.message).toContain("participants_1");
+
+    const indexes = await Conversation.collection.indexes();
+    const indexNames = indexes.map((index) => index.name);
+    expect(indexNames).not.toContain("participants_1");
+    expect(indexNames).toContain("pairKey_1");
+  });
+
+  it("is a no-op once the database is already on the new schema", async () => {
+    const result = await ensureConversationIndexesFixed();
+    expect(result.status).toBe("success");
+    expect(result.message).toBe("Conversation indexes already correct");
   });
 });

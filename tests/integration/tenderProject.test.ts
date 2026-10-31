@@ -278,6 +278,28 @@ describe("GET /api/tender-projects/:id", () => {
       .set("Authorization", `Bearer ${generateToken(contractorUser)}`);
     expect(asContractor.status).toBe(200);
     expect(asContractor.body.title).toBe(project.title);
+    // Never bid on this one — myBid should be explicitly null, not
+    // missing, so the frontend doesn't need a second call to know.
+    expect(asContractor.body.myBid).toBeNull();
+
+    // The poster isn't a contractor bidding on their own project, so
+    // myBid doesn't apply to that view at all.
+    expect(asPoster.body.myBid).toBeUndefined();
+  });
+
+  it("includes the caller's own bid as myBid, any status, without a second lookup through /bids/mine", async () => {
+    const poster = await createUserWithActiveSubscription();
+    const project = await createTenderProject({ postedBy: poster });
+    const { user: contractorUser, profile } = await createEligibleContractor();
+    await createBid({ project, contractor: profile, bidder: contractorUser, amount: 7500 });
+
+    const res = await request(app)
+      .get(`/api/tender-projects/${project.id}`)
+      .set("Authorization", `Bearer ${generateToken(contractorUser)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.myBid.amount).toBe(7500);
+    expect(res.body.myBid.status).toBe("pending");
   });
 });
 
@@ -665,9 +687,9 @@ describe("GET /api/tender-projects/me and /bids/mine", () => {
     expect(res.body.data).toHaveLength(1);
   });
 
-  it("lists only my own bids, across every project", async () => {
+  it("lists only my own bids, across every project, each with a project summary (not just its id)", async () => {
     const poster = await createUserWithActiveSubscription();
-    const projectA = await createTenderProject({ postedBy: poster });
+    const projectA = await createTenderProject({ postedBy: poster, title: "Drainage rework" });
     const projectB = await createTenderProject({ postedBy: poster });
     const { user: contractorUser, profile } = await createEligibleContractor();
     await createBid({ project: projectA, contractor: profile, bidder: contractorUser });
@@ -678,6 +700,15 @@ describe("GET /api/tender-projects/me and /bids/mine", () => {
       .set("Authorization", `Bearer ${generateToken(contractorUser)}`);
 
     expect(res.body.data).toHaveLength(2);
+    // Newest first — projectB's bid was created after projectA's.
+    expect(res.body.data[1].project).toEqual({
+      id: projectA.id,
+      title: "Drainage rework",
+      status: projectA.status,
+      bidDeadline: projectA.bidDeadline.toISOString(),
+      awardedBid: undefined,
+      job: undefined,
+    });
   });
 });
 

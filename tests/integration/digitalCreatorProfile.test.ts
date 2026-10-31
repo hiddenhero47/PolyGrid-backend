@@ -132,21 +132,27 @@ describe("GET /api/digital-creator-profiles/:idOrSlug", () => {
     expect(res.body).toEqual({ available: false, message: expect.any(String) });
   });
 
-  it("returns the creator's active products once subscribed", async () => {
+  it("returns only the creator's active AND verified products once subscribed", async () => {
     const user = await createUserWithActiveSubscription();
     const creator = await createDigitalCreatorProfile({
       user,
       currentSubscription: user.currentSubscription,
       slug: "sub-creator",
     });
-    await createDigitalProduct({ creator });
-    await createDigitalProduct({ creator, isActive: false });
+    await createDigitalProduct({ creator, isVerified: true });
+    await createDigitalProduct({ creator, isActive: false, isVerified: true });
+    // Still awaiting review — GET /api/digital-products/:id already
+    // answers {available:false} for this one, so the creator's own page
+    // listing it (and counting it toward pagination.total) would be
+    // inconsistent with that.
+    await createDigitalProduct({ creator, isVerified: false });
 
     const res = await request(app).get("/api/digital-creator-profiles/sub-creator");
 
     expect(res.status).toBe(200);
     expect(res.body.displayName).toBeTruthy();
     expect(res.body.products).toHaveLength(1);
+    expect(res.body.pagination.total).toBe(1);
   });
 
   it("goes back to unavailable the moment the subscription expires, with no write needed", async () => {

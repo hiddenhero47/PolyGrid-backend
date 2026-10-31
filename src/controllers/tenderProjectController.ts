@@ -66,6 +66,18 @@ export const toPublicTenderProject = (project: ITenderProject) => ({
   createdAt: project.createdAt,
 });
 
+// A small, read-only slice of a project — attached per row in getMyBids
+// so the "my bids" list can show what each bid is actually on without a
+// separate GET per project.
+const toTenderProjectSummary = (project: ITenderProject) => ({
+  id: project.id,
+  title: project.title,
+  status: project.status,
+  bidDeadline: project.bidDeadline,
+  awardedBid: project.awardedBid,
+  job: project.job,
+});
+
 const toPublicBid = (bid: IBid) => ({
   id: bid.id,
   project: bid.project,
@@ -454,7 +466,17 @@ export const getTenderProject = asyncHandler(async (req: Request, res: Response)
     return;
   }
 
-  res.status(200).json({ ...toPublicTenderProject(project), files: toFilesWithLinks(project) });
+  // The caller's own bid on this project, any status — without this, a
+  // contractor checking whether (and how) they've already bid has to
+  // separately page through GET /api/tender-projects/bids/mine and
+  // search it for this project.
+  const myBid = eligible ? await Bid.findOne({ project: project._id, contractorId: eligible._id }) : null;
+
+  res.status(200).json({
+    ...toPublicTenderProject(project),
+    files: toFilesWithLinks(project),
+    ...(eligible ? { myBid: myBid ? toPublicBid(myBid) : null } : {}),
+  });
 });
 
 // @desc    Submit a bid on an open project — sealed from every other
@@ -618,8 +640,19 @@ export const getMyBids = asyncHandler(async (req: Request, res: Response) => {
     Bid.countDocuments(filter),
   ]);
 
+  const projects = await TenderProject.find({ _id: { $in: bids.map((bid) => bid.project) } }).select(
+    "title status bidDeadline awardedBid job",
+  );
+  const projectById = new Map(projects.map((project) => [project.id, project]));
+
   res.status(200).json({
-    data: bids.map(toPublicBid),
+    data: bids.map((bid) => {
+      const project = projectById.get(bid.project.toString());
+      return {
+        ...toPublicBid(bid),
+        project: project ? toTenderProjectSummary(project) : bid.project,
+      };
+    }),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });

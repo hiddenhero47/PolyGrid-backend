@@ -56,7 +56,7 @@ describe("runDeploymentSetup", () => {
     expect(res.status).toHaveBeenCalledWith(200);
     const payload = (res.json as jest.Mock).mock.calls[0][0];
     expect(payload.success).toBe(true);
-    expect(payload.results).toHaveLength(2);
+    expect(payload.results).toHaveLength(3);
     expect(payload.results.every((r: { status: string }) => r.status === "success")).toBe(true);
 
     expect(await User.findOne({ systemRole: SYSTEM_ROLE.SUPER_ADMIN })).not.toBeNull();

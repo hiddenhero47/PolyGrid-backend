@@ -8,6 +8,7 @@ import {
 } from "../controllers/digitalCreatorProfileController";
 import {
   createDigitalProduct,
+  getMyDigitalProducts,
   updateDigitalProduct,
   addDigitalProductPreviewImages,
   removeDigitalProductPreviewImage,
@@ -32,6 +33,7 @@ router.get("/me", protect, getMyDigitalCreatorProfile);
 router.patch("/me", protect, validateBody(updateDigitalCreatorProfileSchema), updateMyDigitalCreatorProfile);
 router.post("/me/avatar", protect, uploadDigitalCreatorAvatar);
 
+router.get("/me/products", protect, getMyDigitalProducts);
 router.post("/me/products", protect, validateBody(createDigitalProductSchema), createDigitalProduct);
 router.patch("/me/products/:id", protect, validateBody(updateDigitalProductSchema), updateDigitalProduct);
 router.post("/me/products/:id/preview-images", protect, addDigitalProductPreviewImages);

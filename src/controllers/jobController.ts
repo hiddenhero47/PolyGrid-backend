@@ -12,7 +12,7 @@ import {
   JobStatus,
   PAYMENT_REQUEST_STATUS,
 } from "../models/jobModel";
-import { User, IUser, SYSTEM_ROLE } from "../models/userModel";
+import { User, IUser, SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE, SystemPayoutRequestType } from "../models/systemPayoutModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
@@ -25,6 +25,7 @@ import {
   countUploadCandidates,
 } from "../helpers/fileStorage";
 import { signFileUrl, FILE_URL_MODE } from "../helpers/fileSigning";
+import { toPublicMediaFile } from "../models/mediaFile";
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { connectUsers } from "./contactController";
@@ -42,29 +43,80 @@ const withContractLinks = (party: IJobParty) => {
   if (!party.contractFile) return undefined;
 
   const ownerId = party.userId.toString();
-  const { fileName } = party.contractFile;
+  const { fileName, mime, size, uploadedAt } = party.contractFile;
 
   return {
-    ...party.contractFile,
+    // party.contractFile is a Mongoose sub-document — its schema fields
+    // are getters on the prototype, not the object's own enumerable
+    // properties, so `...party.contractFile` silently copies nothing.
+    // Picked explicitly rather than `.toObject()` so this stays exactly
+    // the shape a client should see (no stray Mongoose internals).
+    fileName,
+    mime,
+    size,
+    uploadedAt,
     requestUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.VIEW }),
     downloadUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.DOWNLOAD }),
   };
+};
+
+// A job only ever stores each party's userId — nothing on the job itself
+// resolves to a name/avatar, and GET /api/users is admin-only, so without
+// this a list/detail view has no way to show who you're actually working
+// with. Deliberately never populated onto the job document itself (see
+// loadPartyUsers below) — every existing read of job.client.userId /
+// job.provider.userId elsewhere in this file keeps seeing a plain
+// ObjectId, exactly as before.
+const toJobPartyUserSummary = (user: Pick<IUser, "id" | "fullName" | "avatar"> | undefined) =>
+  user
+    ? { id: user.id, fullName: user.fullName, avatar: user.avatar ? toPublicMediaFile(user.avatar) : undefined }
+    : null;
+
+// Fetched as a separate, batched lookup rather than job.populate() — a
+// populate on client.userId/provider.userId would replace that field's
+// value with the full User document, changing what every other call
+// site in this file (assertParty, roleOf, payout/refund handlers, ...)
+// gets back from the exact same job object.
+const loadPartyUsers = async (jobs: IJob[]): Promise<Map<string, IUser>> => {
+  const ids = new Set<string>();
+  for (const job of jobs) {
+    ids.add(job.client.userId.toString());
+    ids.add(job.provider.userId.toString());
+  }
+
+  const users = await User.find({ _id: { $in: [...ids] } }).select("fullName avatar");
+  return new Map(users.map((user) => [user.id, user]));
 };
 
 // The list view — deliberately light. A job's full detail (stages,
 // amountHistory, disputeHistory, refunds, payouts, contract links, …)
 // only matters once someone has actually opened one specific job via
 // getJob; a list of every job you're a party to doesn't need all of that
-// repeated per row.
-const toJobSummary = (job: IJob) => ({
+// repeated per row. amountPaid and a stages tally are the exception —
+// cheap to include and exactly what a job card needs to show progress
+// ("2 / 3 stages · $400 of $1,200 funded") without opening each job.
+const toJobSummary = (job: IJob, partyUsers: Map<string, IUser>) => ({
   id: job.id,
   jobTitle: job.jobTitle,
   jobType: job.jobType,
   status: job.status,
   totalAmount: job.totalAmount,
   currency: job.currency,
-  client: { userId: job.client.userId, isConfirmed: job.client.isConfirmed },
-  provider: { userId: job.provider.userId, isConfirmed: job.provider.isConfirmed },
+  amountPaid: job.amountPaid,
+  stages: {
+    total: job.stages.length,
+    verified: job.stages.filter((stage) => stage.isVerified).length,
+  },
+  client: {
+    userId: job.client.userId,
+    isConfirmed: job.client.isConfirmed,
+    user: toJobPartyUserSummary(partyUsers.get(job.client.userId.toString())),
+  },
+  provider: {
+    userId: job.provider.userId,
+    isConfirmed: job.provider.isConfirmed,
+    user: toJobPartyUserSummary(partyUsers.get(job.provider.userId.toString())),
+  },
   createdAt: job.createdAt,
 });
 
@@ -162,6 +214,24 @@ const assertParty = (job: IJob, user: IUser): JobRole | null => {
   const role = roleOf(job, user.id);
 
   if (!role && user.systemRole !== SYSTEM_ROLE.ADMIN && user.systemRole !== SYSTEM_ROLE.SUPER_ADMIN) {
+    const error: AppError = new Error("You are not a party to this job");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  return role;
+};
+
+// getJob's own, read-only-only access check — every other assertParty
+// call site in this file (proposeStages/accept/reject, raiseDispute)
+// guards a write, which customer_care must never get just because it
+// can already see this same job through the disputes/refund/payout
+// queues. REVIEW_ROLES (Admin/Super Admin/Customer Care) can look, not
+// touch.
+const assertCanViewJob = (job: IJob, user: IUser): JobRole | null => {
+  const role = roleOf(job, user.id);
+
+  if (!role && !REVIEW_ROLES.includes(user.systemRole as (typeof REVIEW_ROLES)[number])) {
     const error: AppError = new Error("You are not a party to this job");
     error.statusCode = 403;
     throw error;
@@ -290,7 +360,8 @@ export const createJob = asyncHandler(async (req: Request, res: Response) => {
 
 // @desc    Get a single job
 // @route   GET /api/jobs/:id
-// @access  Private (client, provider, or admin)
+// @access  Private (client, provider, or any REVIEW_ROLES member —
+//          Admin/Super Admin/Customer Care)
 export const getJob = asyncHandler(async (req: Request, res: Response) => {
   const job = await Job.findById(req.params.id);
 
@@ -299,14 +370,23 @@ export const getJob = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("Job not found");
   }
 
-  assertParty(job, req.user as IUser);
+  assertCanViewJob(job, req.user as IUser);
 
+  const partyUsers = await loadPartyUsers([job]);
   const plain = job.toObject();
 
   res.status(200).json({
     ...plain,
-    client: { ...plain.client, contractFile: withContractLinks(job.client) },
-    provider: { ...plain.provider, contractFile: withContractLinks(job.provider) },
+    client: {
+      ...plain.client,
+      contractFile: withContractLinks(job.client),
+      user: toJobPartyUserSummary(partyUsers.get(job.client.userId.toString())),
+    },
+    provider: {
+      ...plain.provider,
+      contractFile: withContractLinks(job.provider),
+      user: toJobPartyUserSummary(partyUsers.get(job.provider.userId.toString())),
+    },
   });
 });
 
@@ -333,8 +413,72 @@ export const getMyJobs = asyncHandler(async (req: Request, res: Response) => {
     Job.countDocuments(filter),
   ]);
 
+  const partyUsers = await loadPartyUsers(jobs);
+
   res.status(200).json({
-    data: jobs.map(toJobSummary),
+    data: jobs.map((job) => toJobSummary(job, partyUsers)),
+    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+  });
+});
+
+// @desc    Admin job search — the console otherwise only ever reaches a
+//          job through a dispute/refund/payout queue row or the payments
+//          ledger, so an admin had no way to find (and e.g. record a
+//          manual payment on) a job that isn't already in one of those.
+//          `q` matches the job's own title OR either party's name/email;
+//          `userId` scopes to every job a specific user is a party to
+//          (client or provider); `status` is an exact match. Reuses
+//          toJobSummary/loadPartyUsers so each row already carries party
+//          names, same shape /mine returns.
+// @route   GET /api/jobs?q=&status=&userId=&page=&limit=
+// @access  Private (Admin / Super Admin only)
+export const searchJobs = asyncHandler(async (req: Request, res: Response) => {
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const skip = (page - 1) * limit;
+
+  const { q, status, userId } = req.query as { q?: string; status?: string; userId?: string };
+
+  const filter: FilterQuery<IJob> = {};
+
+  if (status && Object.values(JOB_STATUS).includes(status as JobStatus)) {
+    filter.status = status as JobStatus;
+  }
+
+  const partyIsFilter = (ids: (mongoose.Types.ObjectId | string)[]) => [
+    { "client.userId": { $in: ids } },
+    { "provider.userId": { $in: ids } },
+  ];
+
+  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+    filter.$or = partyIsFilter([userId]);
+  }
+
+  if (q && q.trim()) {
+    // Same "escape before building a RegExp" convention getUsers already
+    // uses — a stray regex metacharacter in a search box can't throw or
+    // behave unexpectedly.
+    const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "i");
+
+    const matchingUsers = await User.find({ $or: [{ fullName: pattern }, { email: pattern }] }).select("_id");
+    const qOr = [{ jobTitle: pattern }, ...partyIsFilter(matchingUsers.map((u) => u._id))];
+
+    // userId and q can both be present — AND them together rather than
+    // letting the second $or silently replace the first.
+    filter.$and = [...(filter.$or ? [{ $or: filter.$or }] : []), { $or: qOr }];
+    delete filter.$or;
+  }
+
+  const [jobs, total] = await Promise.all([
+    Job.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Job.countDocuments(filter),
+  ]);
+
+  const partyUsers = await loadPartyUsers(jobs);
+
+  res.status(200).json({
+    data: jobs.map((job) => toJobSummary(job, partyUsers)),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
@@ -601,9 +745,21 @@ export const verifyStage = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("This stage has already been verified");
   }
 
+  const stageAmount = (job.totalAmount * stage.payment) / 100;
+
+  // Verifying releases this stage's share FROM escrow — it can't release
+  // more than what's actually sitting there. Without this, a job with
+  // little or nothing funded could still verify every stage, inflating
+  // amountDisbursed/platformFeeCollected for money that was never paid in
+  // (payoutAvailableAmount's min() against amountPaid stops it from
+  // actually leaving, but the job's own numbers would already be wrong).
+  if (refundableAmount(job) < stageAmount) {
+    res.status(400);
+    throw new Error("This stage isn't fully funded yet — fund it before verifying");
+  }
+
   stage.isVerified = true;
 
-  const stageAmount = (job.totalAmount * stage.payment) / 100;
   const feeAmount = (stageAmount * job.platformFeePercent) / 100;
 
   job.amountDisbursed += stageAmount - feeAmount;

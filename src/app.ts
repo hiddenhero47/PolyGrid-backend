@@ -8,6 +8,7 @@ import subscriptionRoutes from "./routes/subscriptionRoutes";
 import fileRoutes from "./routes/fileRoutes";
 import contactRoutes from "./routes/contactRoutes";
 import jobRoutes from "./routes/jobRoutes";
+import systemPayoutRoutes from "./routes/systemPayoutRoutes";
 import paymentRoutes from "./routes/paymentRoutes";
 import consultancyProfileRoutes from "./routes/consultancyProfileRoutes";
 import verificationRoutes from "./routes/verificationRoutes";
@@ -81,6 +82,7 @@ const createApp = (): Express => {
   app.use("/api/files", fileRoutes);
   app.use("/api/contacts", contactRoutes);
   app.use("/api/jobs", jobRoutes);
+  app.use("/api/system-payouts", systemPayoutRoutes);
   app.use("/api/payments", paymentRoutes);
   app.use("/api/consultancy-profiles", consultancyProfileRoutes);
   app.use("/api/verifications", verificationRoutes);

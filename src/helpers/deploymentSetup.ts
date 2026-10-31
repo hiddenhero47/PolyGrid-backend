@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { User, SYSTEM_ROLE } from "../models/userModel";
 import { VerificationTemplate, TEMPLATE_FIELD_TYPE, TEMPLATE_DOCUMENT_FORMAT } from "../models/verificationTemplateModel";
 import { PROFILE_TYPE, ProfileType } from "../constants/profileTypes";
+import { Conversation } from "../models/conversationModel";
 
 // Mirrors house-maduekwe-backend's helpers/ensureAdmin.js +
 // helpers/appSetup.js pattern — a set of idempotent "ensure X exists"
@@ -144,6 +145,41 @@ export const ensureVerificationTemplatesSeeded = async (): Promise<SetupTaskResu
       task: "Ensure Verification Templates (Nigeria)",
       status: "failed",
       message: "Failed to seed verification templates — see server logs",
+    };
+  }
+};
+
+// @task Fix Conversation's pair-uniqueness index — conversationModel.ts
+// used to enforce "one conversation per pair" with a unique index
+// directly on the `participants` array, which Mongo indexes as a
+// *multikey* index: unique per ELEMENT, not per full-array value. The
+// real effect was "every user can only ever be in one conversation,
+// ever" (see docs/jobs-and-contacts-plan.md and conversationModel.ts's
+// own comment on `pairKey`, the field that now actually carries this
+// constraint). Model.syncIndexes() is scoped to just this one model —
+// it drops the old `participants_1` index (no longer declared in the
+// schema) and creates `pairKey_1` (declared, but not yet present on an
+// existing database), leaving every other model's indexes untouched.
+// Safe to call repeatedly: a database already on the new schema has
+// nothing to sync.
+export const ensureConversationIndexesFixed = async (): Promise<SetupTaskResult> => {
+  try {
+    const dropped = await Conversation.syncIndexes();
+
+    return {
+      task: "Fix Conversation pair-uniqueness index",
+      status: "success",
+      message:
+        dropped.length > 0
+          ? `Dropped obsolete index(es): ${dropped.join(", ")}`
+          : "Conversation indexes already correct",
+    };
+  } catch (err) {
+    console.error("[DEPLOYMENT SETUP] ensureConversationIndexesFixed failed:", err);
+    return {
+      task: "Fix Conversation pair-uniqueness index",
+      status: "failed",
+      message: "Failed to sync Conversation indexes — see server logs",
     };
   }
 };

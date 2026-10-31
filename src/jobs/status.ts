@@ -12,4 +12,5 @@ export interface CronJobStatus {
 export const cronStatus: Record<string, CronJobStatus> = {
   digitalPurchaseRetention: { running: false, lastRun: null },
   profileProductCleanup: { running: false, lastRun: null },
+  pendingPaymentSweep: { running: false, lastRun: null },
 };

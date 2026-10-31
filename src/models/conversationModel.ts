@@ -11,6 +11,17 @@ import mongoose, { Document, Model, Schema, Types } from "mongoose";
 // real reason (a shared Job, or an explicit contact add).
 export interface IConversation extends Document {
   participants: [Types.ObjectId, Types.ObjectId];
+  // Derived (pre-validate, below) from the sorted pair — `${a}:${b}`.
+  // What the unique index below actually keys on. A unique index
+  // directly on `participants` (an array field) is a *multikey* index,
+  // which Mongo enforces per ELEMENT, not per full-array value — it
+  // would mean "no two conversations may ever share even one
+  // participant," not "no two conversations may have the same pair."
+  // That bug shipped once already (every user could only ever be in one
+  // conversation total) — see docs/jobs-and-contacts-plan.md and the
+  // deploymentSetup task that drops the old broken index on existing
+  // databases.
+  pairKey: string;
   lastMessageAt?: Date;
   // Short preview for a chat-list UI, so listing conversations doesn't need
   // a second query per conversation to find its last message.
@@ -25,8 +36,8 @@ export interface IConversation extends Document {
 }
 
 // Both participant ids, always in the same (sorted) order regardless of
-// who's asking — what makes the {participants:1} unique index below
-// actually prevent a duplicate conversation for the same pair.
+// who's asking — what makes `pairKey` (and its unique index) actually
+// prevent a duplicate conversation for the same pair.
 export const sortParticipants = (
   a: Types.ObjectId | string,
   b: Types.ObjectId | string,
@@ -42,6 +53,7 @@ const conversationSchema = new Schema<IConversation>(
         message: "A conversation has exactly two participants",
       },
     },
+    pairKey: { type: String, required: true },
     lastMessageAt: { type: Date },
     lastMessagePreview: { type: String },
     lastReadAt: { type: Map, of: Date, default: () => new Map() },
@@ -49,7 +61,21 @@ const conversationSchema = new Schema<IConversation>(
   { timestamps: true },
 );
 
-conversationSchema.index({ participants: 1 }, { unique: true });
+// Derives pairKey itself rather than trusting a caller to have passed
+// one — correct even if something else ever creates a Conversation
+// directly, not just through conversationController.startOrGetConversation.
+conversationSchema.pre("validate", function (next) {
+  if (this.participants?.length === 2) {
+    const [a, b] = sortParticipants(this.participants[0], this.participants[1]);
+    this.pairKey = `${a}:${b}`;
+  }
+  next();
+});
+
+// The actual "one conversation per pair" constraint — see pairKey's own
+// comment on IConversation for why this is a scalar field and not the
+// `participants` array itself.
+conversationSchema.index({ pairKey: 1 }, { unique: true });
 // "My conversations, most recently active first" — the one query the
 // conversation list screen actually runs.
 conversationSchema.index({ participants: 1, lastMessageAt: -1 });

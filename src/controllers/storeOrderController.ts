@@ -1,10 +1,11 @@
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { StoreOrder, IStoreOrder } from "../models/storeOrderModel";
-import { StoreProfile } from "../models/storeProfileModel";
+import { StoreProfile, IStoreProfile } from "../models/storeProfileModel";
 import { Product, resolveShippingPrice } from "../models/productModel";
-import { Job, JOB_TYPE } from "../models/jobModel";
+import { Job, IJob, JOB_TYPE } from "../models/jobModel";
 import { IUser } from "../models/userModel";
+import { toPublicMediaFile } from "../models/mediaFile";
 import { Subscription } from "../models/subscriptionModel";
 import { connectUsers } from "./contactController";
 import { normalizeStages, getPlatformFeePercent } from "./jobController";
@@ -29,6 +30,48 @@ const toPublicOrder = (order: IStoreOrder) => ({
   note: order.note,
   createdAt: order.createdAt,
 });
+
+const toOrderStoreSummary = (store: IStoreProfile) => ({
+  id: store.id,
+  storeName: store.storeName,
+  slug: store.slug,
+  logo: store.logo ? toPublicMediaFile(store.logo) : undefined,
+});
+
+// Just enough for a list row to show "Awaiting your confirmation" / "Paid"
+// without opening the job itself.
+const toOrderJobProgress = (job: IJob) => ({
+  id: job.id,
+  status: job.status,
+  amountPaid: job.amountPaid,
+});
+
+// Shared by getMyOrders/getStoreOrders — replaces each row's bare
+// store/job ids with a small summary, batched in two queries regardless
+// of how many rows there are (rather than once per row).
+const attachOrderSummaries = async (orders: IStoreOrder[]) => {
+  const storeIds = [...new Set(orders.map((order) => order.store.toString()))];
+  const jobIds = [...new Set(orders.map((order) => order.job.toString()))];
+
+  const [stores, jobs] = await Promise.all([
+    StoreProfile.find({ _id: { $in: storeIds } }).select("storeName slug logo"),
+    Job.find({ _id: { $in: jobIds } }).select("status amountPaid"),
+  ]);
+
+  const storeById = new Map(stores.map((store) => [store.id, store]));
+  const jobById = new Map(jobs.map((job) => [job.id, job]));
+
+  return orders.map((order) => {
+    const store = storeById.get(order.store.toString());
+    const job = jobById.get(order.job.toString());
+
+    return {
+      ...toPublicOrder(order),
+      store: store ? toOrderStoreSummary(store) : order.store,
+      job: job ? toOrderJobProgress(job) : order.job,
+    };
+  });
+};
 
 interface OrderItemInput {
   productId: string;
@@ -185,7 +228,7 @@ export const getMyOrders = asyncHandler(async (req: Request, res: Response) => {
   ]);
 
   res.status(200).json({
-    data: data.map(toPublicOrder),
+    data: await attachOrderSummaries(data),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });
@@ -211,7 +254,7 @@ export const getStoreOrders = asyncHandler(async (req: Request, res: Response) =
   ]);
 
   res.status(200).json({
-    data: data.map(toPublicOrder),
+    data: await attachOrderSummaries(data),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
 });

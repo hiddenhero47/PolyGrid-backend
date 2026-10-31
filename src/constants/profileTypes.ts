@@ -39,6 +39,36 @@ export const PROFILE_MODEL_REGISTRY: Record<ProfileType, mongoose.Model<any>> = 
 export const isKnownProfileType = (value: unknown): value is ProfileType =>
   typeof value === "string" && Object.values(PROFILE_TYPE).includes(value as ProfileType);
 
+// Every profile type's "what do I call this on a list row" field — each
+// pillar settled on its own name (ConsultancyProfile/ContractorProfile/
+// LaborProfile: headline, StoreProfile: storeName,
+// DigitalCreatorProfile/ClientProfile: displayName) rather than a shared
+// `name` field, so anything rendering a profile generically (admin
+// search, review moderation) needs this map instead of just reading
+// `.name`. Kept here, next to PROFILE_MODEL_REGISTRY, for the same
+// reason that lives here — one place that knows about every profile
+// type, read by adminProfileController.ts and reviewController.ts.
+export const PROFILE_NAME_FIELD: Record<ProfileType, string> = {
+  [PROFILE_TYPE.CONSULTANCY]: "headline",
+  [PROFILE_TYPE.CONTRACTOR]: "headline",
+  [PROFILE_TYPE.LABOR]: "headline",
+  [PROFILE_TYPE.STORE]: "storeName",
+  [PROFILE_TYPE.DIGITAL_CREATOR]: "displayName",
+  [PROFILE_TYPE.CLIENT]: "displayName",
+};
+
+// ClientProfile is the one profile type with no slug at all (it has no
+// public storefront page to slug) — omitted here rather than mapped to
+// a fake field name, so callers can tell "doesn't apply" apart from "has
+// one, just empty."
+export const PROFILE_SLUG_FIELD: Partial<Record<ProfileType, string>> = {
+  [PROFILE_TYPE.CONSULTANCY]: "slug",
+  [PROFILE_TYPE.CONTRACTOR]: "slug",
+  [PROFILE_TYPE.LABOR]: "slug",
+  [PROFILE_TYPE.STORE]: "slug",
+  [PROFILE_TYPE.DIGITAL_CREATOR]: "slug",
+};
+
 // Which pillar profile (if any) a given userId owns — reviewController
 // uses this to figure out who actually earns a review coming from a
 // completed Job, without the Job itself needing to know or trust a

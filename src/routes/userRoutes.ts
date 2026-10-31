@@ -5,6 +5,7 @@ import {
   googleLogin,
   appleLogin,
   getMe,
+  getMyProfiles,
   updateUserProfile,
   toggleAccountType,
   updatePayoutAccount,
@@ -57,6 +58,7 @@ router.post("/resend-verification", validateBody(resendVerificationSchema), rese
 router.post("/verify-email", validateBody(verifyEmailSchema), verifyEmail);
 
 router.get("/me", protect, getMe);
+router.get("/me/profiles", protect, getMyProfiles);
 router.put("/profile", protect, validateBody(updateUserProfileSchema), updateUserProfile);
 router.patch("/account-type", protect, validateBody(toggleAccountTypeSchema), toggleAccountType);
 router.put(

@@ -152,6 +152,97 @@ describe("POST /api/digital-creator-profiles/me/products", () => {
     const res = await req;
     expect(res.status).toBe(400);
   });
+
+  it("accepts spreadsheet, CAD, and archive deliverables, for categories like BOQ sheets or drawing sets", async () => {
+    const user = await createUser();
+    await createDigitalCreatorProfile({ user });
+
+    const xlsxBuffer = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("xl/workbook.xml"),
+    ]);
+    const dwgBuffer = Buffer.from("AC1032garbagebytesfollow", "ascii");
+    const zipBuffer = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("some/random/entry.txt"),
+    ]);
+    const csvBuffer = Buffer.from("item,qty,price\ncement,10,25\n", "ascii");
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({ category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN, title: "Full drawing set", price: 40 }),
+      )
+      .attach("files", xlsxBuffer, "boq.xlsx")
+      .attach("files", dwgBuffer, "plan.dwg")
+      .attach("files", zipBuffer, "set.zip")
+      .attach("files", csvBuffer, "materials.csv");
+
+    expect(res.status).toBe(201);
+    expect(res.body.warnings).toBeUndefined();
+
+    const created = await DigitalProduct.findById(res.body.id);
+    expect(created?.files.map((f) => f.fileName).sort()).toEqual(
+      ["boq.xlsx", "materials.csv", "plan.dwg", "set.zip"].sort(),
+    );
+  });
+
+  it("still rejects a mime type that isn't on the deliverable allow-list (e.g. docx)", async () => {
+    const user = await createUser();
+    await createDigitalCreatorProfile({ user });
+    const docxBuffer = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("word/document.xml"),
+    ]);
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({ category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN, title: "Plan", price: 20 }),
+      )
+      .attach("files", docxBuffer, "notes.docx");
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a .csv-named attachment whose content doesn't look like text", async () => {
+    const user = await createUser();
+    await createDigitalCreatorProfile({ user });
+    const binaryBuffer = Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff, 0xfe]);
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({ category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN, title: "Plan", price: 20 }),
+      )
+      .attach("files", binaryBuffer, "fake.csv");
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects two deliverable files sharing a name in the same create request", async () => {
+    const user = await createUser();
+    await createDigitalCreatorProfile({ user });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .field(
+        "data",
+        JSON.stringify({ category: DIGITAL_PRODUCT_CATEGORY.FLOOR_PLAN, title: "Plan", price: 20 }),
+      )
+      .attach("files", TEST_PNG_BUFFER, "plan.pdf")
+      .attach("files", TEST_PNG_BUFFER, "plan.pdf");
+
+    expect(res.status).toBe(400);
+    expect(getDigitalStorageProvider().uploadDigitalFiles).not.toHaveBeenCalled();
+  });
 });
 
 describe("PATCH /api/digital-creator-profiles/me/products/:id", () => {
@@ -182,6 +273,79 @@ describe("PATCH /api/digital-creator-profiles/me/products/:id", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.isActive).toBe(false);
+  });
+});
+
+describe("GET /api/digital-creator-profiles/me/products", () => {
+  it("requires authentication", async () => {
+    const res = await request(app).get("/api/digital-creator-profiles/me/products");
+    expect(res.status).toBe(401);
+  });
+
+  it("404s when I have no digital creator profile", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .get("/api/digital-creator-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it("lists only my own products, newest first, including unverified/inactive ones, with redacted file info", async () => {
+    const owner = await createUser();
+    // Unverified and inactive — would never show up on the public feed
+    // (getDigitalProductFeed), but this is the owner's own management
+    // list, so none of that gating applies here.
+    const ownerProfile = await createDigitalCreatorProfile({ user: owner });
+    const older = await createDigitalProduct({ creator: ownerProfile, title: "Older", isVerified: false });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = await createDigitalProduct({
+      creator: ownerProfile,
+      title: "Newer",
+      isActive: false,
+      isVerified: false,
+    });
+
+    const stranger = await createUser();
+    const strangerProfile = await createDigitalCreatorProfile({ user: stranger });
+    await createDigitalProduct({ creator: strangerProfile, title: "Not mine" });
+
+    const res = await request(app)
+      .get("/api/digital-creator-profiles/me/products")
+      .set("Authorization", `Bearer ${generateToken(owner)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0].id).toBe(newer.id);
+    expect(res.body.data[0].isActive).toBe(false);
+    expect(res.body.data[1].id).toBe(older.id);
+    expect(res.body.pagination).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+
+    // Owner gets to see the deliverable file names/sizes, but never the
+    // underlying storage key — toOwnerDigitalProduct's whole point.
+    expect(res.body.data[0].files[0]).toEqual({
+      fileName: expect.any(String),
+      mime: expect.any(String),
+      size: expect.any(Number),
+    });
+    expect(res.body.data[0].files[0].key).toBeUndefined();
+  });
+
+  it("paginates", async () => {
+    const user = await createUser();
+    const profile = await createDigitalCreatorProfile({ user });
+    for (let i = 0; i < 3; i++) {
+      await createDigitalProduct({ creator: profile, title: `Product ${i}` });
+    }
+
+    const res = await request(app)
+      .get("/api/digital-creator-profiles/me/products?page=1&limit=2")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.pagination).toEqual({ total: 3, page: 1, limit: 2, totalPages: 2 });
   });
 });
 
@@ -328,6 +492,42 @@ describe("files sub-resource — add/remove", () => {
       .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(404);
+  });
+
+  it("rejects adding a file whose name collides with an existing deliverable", async () => {
+    const user = await createUser();
+    const profile = await createDigitalCreatorProfile({ user });
+    const product = await createDigitalProduct({ creator: profile });
+    const token = generateToken(user);
+    const existingFileName = product.files[0].fileName;
+
+    const res = await request(app)
+      .post(`/api/digital-creator-profiles/me/products/${product.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("files", TEST_PNG_BUFFER, existingFileName);
+
+    expect(res.status).toBe(400);
+    // Rejected before any upload — never costs a wasted storage write.
+    expect(getDigitalStorageProvider().uploadDigitalFiles).not.toHaveBeenCalled();
+
+    const updated = await DigitalProduct.findById(product.id);
+    expect(updated?.files).toHaveLength(1);
+  });
+
+  it("rejects two files in the same batch sharing a name", async () => {
+    const user = await createUser();
+    const profile = await createDigitalCreatorProfile({ user });
+    const product = await createDigitalProduct({ creator: profile });
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .post(`/api/digital-creator-profiles/me/products/${product.id}/files`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("files", TEST_PNG_BUFFER, "plan.pdf")
+      .attach("files", TEST_PNG_BUFFER, "plan.pdf");
+
+    expect(res.status).toBe(400);
+    expect(getDigitalStorageProvider().uploadDigitalFiles).not.toHaveBeenCalled();
   });
 });
 
@@ -572,5 +772,98 @@ describe("GET /api/digital-products/:id/download", () => {
     expect(res.status).toBe(200);
     expect(res.body.files).toHaveLength(1);
     expect(res.body.files[0].downloadUrl).toEqual(expect.any(String));
+  });
+
+  it("also lets a REVIEW_ROLES member download it, to check the deliverable against the listing", async () => {
+    const customerCare = await createCustomerCare();
+    const profile = await createDigitalCreatorProfile({ user: await createUser() });
+    const product = await createDigitalProduct({ creator: profile });
+
+    const res = await request(app)
+      .get(`/api/digital-products/${product.id}/download`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.files).toHaveLength(1);
+  });
+});
+
+describe("GET /api/digital-products/review", () => {
+  it("blocks a regular user", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .get("/api/digital-products/review")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("defaults to the pending queue, any isActive state, newest first", async () => {
+    const profile = await createDigitalCreatorProfile({ user: await createUser() });
+    const older = await createDigitalProduct({ creator: profile, title: "Older" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = await createDigitalProduct({ creator: profile, title: "Newer", isActive: false });
+    await createDigitalProduct({ creator: profile, title: "Already approved", isVerified: true });
+
+    const res = await request(app)
+      .get("/api/digital-products/review")
+      .set("Authorization", `Bearer ${generateToken(await createAdmin())}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0].id).toBe(newer.id);
+    expect(res.body.data[0].isActive).toBe(false);
+    expect(res.body.data[1].id).toBe(older.id);
+    expect(res.body.pagination).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+  });
+
+  it("switches to the approved queue, and includes a creator summary plus redacted file info", async () => {
+    const creatorUser = await createUser();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      displayName: "Ada's Plans",
+      country: "NG",
+    });
+    const product = await createDigitalProduct({ creator: profile, isVerified: true });
+    await createDigitalProduct({ creator: profile }); // pending — shouldn't show up here
+
+    const res = await request(app)
+      .get("/api/digital-products/review?status=approved")
+      .set("Authorization", `Bearer ${generateToken(await createCustomerCare())}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].id).toBe(product.id);
+    expect(res.body.data[0].isVerified).toBe(true);
+    expect(res.body.data[0].files[0]).toEqual({
+      fileName: expect.any(String),
+      mime: expect.any(String),
+      size: expect.any(Number),
+    });
+    expect(res.body.data[0].files[0].key).toBeUndefined();
+    expect(res.body.data[0].creator).toEqual({
+      id: profile.id,
+      displayName: "Ada's Plans",
+      slug: profile.slug,
+      isVerified: profile.isVerified,
+      status: profile.status,
+      country: "NG",
+    });
+  });
+
+  it("paginates", async () => {
+    const profile = await createDigitalCreatorProfile({ user: await createUser() });
+    for (let i = 0; i < 3; i++) {
+      await createDigitalProduct({ creator: profile, title: `Product ${i}` });
+    }
+
+    const res = await request(app)
+      .get("/api/digital-products/review?page=1&limit=2")
+      .set("Authorization", `Bearer ${generateToken(await createAdmin())}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.pagination).toEqual({ total: 3, page: 1, limit: 2, totalPages: 2 });
   });
 });

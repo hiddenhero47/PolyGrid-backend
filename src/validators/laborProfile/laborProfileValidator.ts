@@ -47,3 +47,23 @@ export const addPortfolioItemSchema = yup
     if (!value?.startedAt || !value?.completedAt) return true;
     return value.completedAt >= value.startedAt;
   });
+
+// Same shape as addPortfolioItemSchema, every field optional — a partial
+// edit of an existing item, not a replacement of it. Cross-field ordering
+// against whichever of startedAt/completedAt the request *doesn't* touch
+// is left to portfolioItemSchema's own model-level validator (it checks
+// against the item's final, merged state at save time, which this schema
+// can't see in isolation).
+export const updatePortfolioItemSchema = yup
+  .object({
+    title: yup.string().trim().notRequired(),
+    description: yup.string().trim().notRequired(),
+    tags: yup.array().of(yup.string()).notRequired(),
+    startedAt: yup.date().notRequired(),
+    completedAt: yup.date().notRequired(),
+  })
+  .noUnknown(true)
+  .test("date-order", "completedAt must be on or after startedAt", (value) => {
+    if (!value?.startedAt || !value?.completedAt) return true;
+    return value.completedAt >= value.startedAt;
+  });

@@ -48,14 +48,38 @@ describe("detectFileSignature", () => {
     });
   });
 
-  it("does not mistake a plain/other zip for a DOCX", () => {
-    // Same zip signature, but no word/document.xml part name anywhere —
-    // e.g. an .xlsx (xl/workbook.xml) or an ordinary .zip.
+  it("detects an XLSX by its zip signature + xl/workbook.xml part name", () => {
     const buffer = Buffer.concat([
       Buffer.from([0x50, 0x4b, 0x03, 0x04]),
       Buffer.from("xl/workbook.xml"),
     ]);
-    expect(detectFileSignature(buffer)).toBeNull();
+    expect(detectFileSignature(buffer)).toEqual({
+      mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ext: "xlsx",
+    });
+  });
+
+  it("falls back to a generic zip when the part name matches neither DOCX nor XLSX", () => {
+    const buffer = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("some/random/entry.txt"),
+    ]);
+    expect(detectFileSignature(buffer)).toEqual({ mime: "application/zip", ext: "zip" });
+  });
+
+  it("detects a DWG by its AC#### version header", () => {
+    const buffer = Buffer.from("AC1032garbagebytesfollow", "ascii");
+    expect(detectFileSignature(buffer)).toEqual({ mime: "image/vnd.dwg", ext: "dwg" });
+  });
+
+  it("detects a binary DXF by its literal header", () => {
+    const buffer = Buffer.from("AutoCAD Binary DXF\r\n\x1a\x00", "ascii");
+    expect(detectFileSignature(buffer)).toEqual({ mime: "image/vnd.dxf", ext: "dxf" });
+  });
+
+  it("detects an ASCII DXF by its leading '0' / SECTION group codes", () => {
+    const buffer = Buffer.from("0\nSECTION\n2\nHEADER\n", "ascii");
+    expect(detectFileSignature(buffer)).toEqual({ mime: "image/vnd.dxf", ext: "dxf" });
   });
 
   it("returns null for plain text / unrecognized content", () => {

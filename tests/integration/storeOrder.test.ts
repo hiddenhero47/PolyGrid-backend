@@ -244,10 +244,14 @@ describe("GET /api/store-orders/mine and /store", () => {
   it("shows the buyer their own orders and the owner their store's orders", async () => {
     const buyer = await createUser();
     const owner = await createUserWithActiveSubscription();
-    const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
+    const store = await createStoreProfile({
+      user: owner,
+      currentSubscription: owner.currentSubscription,
+      storeName: "Lagos Building Supplies",
+    });
     const product = await createProduct({ store });
 
-    await request(app)
+    const created = await request(app)
       .post("/api/store-orders")
       .set("Authorization", `Bearer ${generateToken(buyer)}`)
       .send({
@@ -260,12 +264,29 @@ describe("GET /api/store-orders/mine and /store", () => {
       .get("/api/store-orders/mine")
       .set("Authorization", `Bearer ${generateToken(buyer)}`);
     expect(mine.body.data).toHaveLength(1);
+    // A small store summary — not just its id — so the buyer's order
+    // list can name the store without a separate GET per row.
+    expect(mine.body.data[0].store).toEqual({
+      id: store.id,
+      storeName: "Lagos Building Supplies",
+      slug: store.slug,
+      logo: undefined,
+    });
+    // Same for the linked job — just enough ({status, amountPaid}) to
+    // show "Awaiting your confirmation" / "Paid" inline.
+    expect(mine.body.data[0].job).toEqual({
+      id: created.body.job._id,
+      status: created.body.job.status,
+      amountPaid: created.body.job.amountPaid,
+    });
 
     const storeOrders = await request(app)
       .get("/api/store-orders/store")
       .set("Authorization", `Bearer ${generateToken(owner)}`);
     expect(storeOrders.body.data).toHaveLength(1);
     expect(storeOrders.body.data[0].buyer.fullName).toBeTruthy();
+    expect(storeOrders.body.data[0].store.storeName).toBe("Lagos Building Supplies");
+    expect(storeOrders.body.data[0].job.status).toBe(created.body.job.status);
   });
 
   it("404s for /store when the caller has no store profile", async () => {

@@ -1,9 +1,9 @@
-import mongoose from "mongoose";
+import mongoose, { FilterQuery } from "mongoose";
 import asyncHandler from "express-async-handler";
 import { Request, Response } from "express";
 import { Conversation, IConversation, sortParticipants } from "../models/conversationModel";
 import { Message, IMessage } from "../models/messageModel";
-import { MessageReport, MESSAGE_REPORT_STATUS } from "../models/messageReportModel";
+import { MessageReport, IMessageReport, MESSAGE_REPORT_STATUS, MessageReportStatus } from "../models/messageReportModel";
 import { Contact } from "../models/contactModel";
 import { User, IUser } from "../models/userModel";
 import { emitToUser } from "../socket";
@@ -107,15 +107,30 @@ export const startOrGetConversation = asyncHandler(async (req: Request, res: Res
   }
 
   const participants = sortParticipants(requester._id, otherUser._id);
+  const pairKey = `${participants[0]}:${participants[1]}`;
 
-  // Atomic find-or-create — two near-simultaneous "start a conversation"
-  // calls between the same pair can't race into two documents; the unique
-  // index on `participants` backs this up if they somehow still did.
-  const conversation = await Conversation.findOneAndUpdate(
-    { participants },
-    { $setOnInsert: { participants } },
-    { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
-  ).populate<{ participants: PopulatedParticipant[] }>("participants", "fullName avatar");
+  // findOneAndUpdate + upsert is atomic per-operation, but two genuinely
+  // concurrent first-message requests between the same pair can both read
+  // "no match" before either's insert lands — one of them then hits the
+  // unique index on `pairKey` as a real E11000, not a bug. Caught below
+  // and treated as "someone else just created it," re-reading that
+  // conversation instead of 500ing.
+  let conversation;
+  try {
+    conversation = await Conversation.findOneAndUpdate(
+      { pairKey },
+      { $setOnInsert: { participants, pairKey } },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
+    ).populate<{ participants: PopulatedParticipant[] }>("participants", "fullName avatar");
+  } catch (err) {
+    if ((err as { code?: number }).code !== 11000) throw err;
+
+    conversation = await Conversation.findOne({ pairKey }).populate<{
+      participants: PopulatedParticipant[];
+    }>("participants", "fullName avatar");
+
+    if (!conversation) throw err;
+  }
 
   res.status(200).json(await toConversationSummary(conversation, requester.id));
 });
@@ -255,21 +270,80 @@ export const reportMessage = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json(report);
 });
 
-// @desc    List reported messages, newest first
-// @route   GET /api/messages/reports
-// @access  Private (Admin / Super Admin only)
+interface PopulatedReportParty {
+  _id: mongoose.Types.ObjectId;
+  fullName: string;
+  email?: string;
+}
+
+type PopulatedReportedMessage = IMessage & { sender: PopulatedReportParty };
+
+// @desc    List reported messages, newest first, optionally filtered by
+//          ?status=pending|resolved. Populates the reported message's
+//          own sender (so a moderator knows who wrote it — previously
+//          just a bare messageId) and resolvedBy's fullName, and attaches
+//          up to 3 messages immediately before/after it from the same
+//          conversation, so the reported line can be judged in context
+//          instead of in isolation.
+// @route   GET /api/messages/reports?status=
+// @access  Private (Admin / Super Admin / Customer Care — read-only)
+const CONTEXT_MESSAGE_COUNT = 3;
+
 export const getMessageReports = asyncHandler(async (req: Request, res: Response) => {
   const { page, limit, skip } = paginationParams(req);
+  const { status } = req.query as { status?: string };
 
-  const [data, total] = await Promise.all([
-    MessageReport.find()
+  const filter: FilterQuery<IMessageReport> = {};
+  if (status && Object.values(MESSAGE_REPORT_STATUS).includes(status as MessageReportStatus)) {
+    filter.status = status as MessageReportStatus;
+  }
+
+  const [reports, total] = await Promise.all([
+    MessageReport.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .populate("reportedBy", "fullName email")
-      .populate("messageId"),
-    MessageReport.countDocuments(),
+      .populate("resolvedBy", "fullName")
+      .populate<{ messageId: PopulatedReportedMessage | null }>({
+        path: "messageId",
+        populate: { path: "sender", select: "fullName email" },
+      }),
+    MessageReport.countDocuments(filter),
   ]);
+
+  const data = await Promise.all(
+    reports.map(async (report) => {
+      const message = report.messageId;
+
+      const context = message
+        ? await (async () => {
+            const [before, after] = await Promise.all([
+              Message.find({ conversationId: report.conversationId, createdAt: { $lt: message.createdAt } })
+                .sort({ createdAt: -1 })
+                .limit(CONTEXT_MESSAGE_COUNT),
+              Message.find({ conversationId: report.conversationId, createdAt: { $gt: message.createdAt } })
+                .sort({ createdAt: 1 })
+                .limit(CONTEXT_MESSAGE_COUNT),
+            ]);
+            return { before: before.reverse(), after };
+          })()
+        : { before: [], after: [] };
+
+      return {
+        id: report.id,
+        messageId: message,
+        conversationId: report.conversationId,
+        reportedBy: report.reportedBy,
+        reason: report.reason,
+        status: report.status,
+        resolvedBy: report.resolvedBy,
+        resolvedAt: report.resolvedAt,
+        createdAt: report.createdAt,
+        context,
+      };
+    }),
+  );
 
   res.status(200).json({
     data,
@@ -290,7 +364,7 @@ const REDACTED_MESSAGE_BODY = "[message removed by moderator]";
 
 export const resolveMessageReport = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
-  const { redactMessage } = req.body;
+  const { redactMessage, note } = req.body;
 
   const report = await MessageReport.findById(req.params.id);
   if (!report) {
@@ -310,6 +384,7 @@ export const resolveMessageReport = asyncHandler(async (req: Request, res: Respo
   report.status = MESSAGE_REPORT_STATUS.RESOLVED;
   report.resolvedBy = requester._id as mongoose.Types.ObjectId;
   report.resolvedAt = new Date();
+  if (note) report.resolutionNote = note;
   await report.save();
 
   res.status(200).json(report);

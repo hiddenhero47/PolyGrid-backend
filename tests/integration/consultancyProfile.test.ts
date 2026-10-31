@@ -1,4 +1,5 @@
 import request from "supertest";
+import mongoose from "mongoose";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
@@ -814,6 +815,95 @@ describe("Portfolio", () => {
       const res = await request(app)
         .delete(`/api/consultancy-profiles/me/portfolio/${itemId}/media/does-not-exist.png`)
         .set("Authorization", `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("PATCH .../portfolio/:itemId", () => {
+    it("updates title/description/tags without touching media", async () => {
+      const user = await createUser();
+      await createConsultancyProfile({ user });
+      const token = generateToken(user);
+
+      const added = await addItem(token, { title: "Lagos Office Complex", tags: ["structural"] }).attach(
+        "file",
+        TEST_PNG_BUFFER,
+        "project.png",
+      );
+      const itemId = added.body.portfolio[0]._id;
+
+      const res = await request(app)
+        .patch(`/api/consultancy-profiles/me/portfolio/${itemId}`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ title: "Lagos Office Complex (Phase 2)", description: "Now with a basement", tags: ["structural", "renovation"] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.portfolio[0].title).toBe("Lagos Office Complex (Phase 2)");
+      expect(res.body.portfolio[0].description).toBe("Now with a basement");
+      expect(res.body.portfolio[0].tags).toEqual(["structural", "renovation"]);
+      expect(res.body.portfolio[0].media).toHaveLength(1);
+    });
+
+    it("leaves fields not included in the request untouched", async () => {
+      const user = await createUser();
+      await createConsultancyProfile({ user });
+      const token = generateToken(user);
+
+      const added = await addItem(token, { title: "Lagos Office Complex", tags: ["structural"] });
+      const itemId = added.body.portfolio[0]._id;
+
+      const res = await request(app)
+        .patch(`/api/consultancy-profiles/me/portfolio/${itemId}`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ description: "Added later" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.portfolio[0].title).toBe("Lagos Office Complex");
+      expect(res.body.portfolio[0].tags).toEqual(["structural"]);
+      expect(res.body.portfolio[0].description).toBe("Added later");
+    });
+
+    it("re-validates completedAt against the item's existing startedAt", async () => {
+      const user = await createUser();
+      await createConsultancyProfile({ user });
+      const token = generateToken(user);
+
+      const added = await addItem(token, { title: "Lagos Office Complex", startedAt: "2024-06-01" });
+      const itemId = added.body.portfolio[0]._id;
+
+      const res = await request(app)
+        .patch(`/api/consultancy-profiles/me/portfolio/${itemId}`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ completedAt: "2024-01-01" });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("404s when I have no profile", async () => {
+      const user = await createUser();
+
+      const res = await request(app)
+        .patch(`/api/consultancy-profiles/me/portfolio/${new mongoose.Types.ObjectId()}`)
+        .set("Authorization", `Bearer ${generateToken(user)}`)
+        .send({ title: "Nope" });
+
+      expect(res.status).toBe(404);
+    });
+
+    it("404s for an item that isn't mine", async () => {
+      const owner = await createUser();
+      const ownerProfile = await createConsultancyProfile({ user: owner });
+      ownerProfile.portfolio.push({ title: "Not yours", media: [], tags: [] });
+      await ownerProfile.save();
+
+      const stranger = await createUser();
+      await createConsultancyProfile({ user: stranger });
+
+      const res = await request(app)
+        .patch(`/api/consultancy-profiles/me/portfolio/${ownerProfile.portfolio[0]._id}`)
+        .set("Authorization", `Bearer ${generateToken(stranger)}`)
+        .send({ title: "Hijacked" });
 
       expect(res.status).toBe(404);
     });

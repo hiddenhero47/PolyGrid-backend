@@ -91,10 +91,10 @@ describe("POST /api/contacts", () => {
 });
 
 describe("GET /api/contacts", () => {
-  it("lists my contacts, newest first", async () => {
+  it("lists my contacts, newest first, with each contact's name and avatar", async () => {
     const me = await createUser();
-    const a = await createUser();
-    const b = await createUser();
+    const a = await createUser({ fullName: "Amaka Obi" });
+    const b = await createUser({ fullName: "Bello Hassan" });
     const token = generateToken(me);
 
     await request(app).post("/api/contacts").set("Authorization", `Bearer ${token}`).send({ userId: a.id });
@@ -105,7 +105,32 @@ describe("GET /api/contacts", () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(2);
     expect(res.body.data[0].user).toBe(b.id); // most recently connected first
+    expect(res.body.data[0].fullName).toBe("Bello Hassan");
+    expect(res.body.data[0].avatar).toBeUndefined();
+    expect(res.body.data[1].fullName).toBe("Amaka Obi");
     expect(res.body.pagination.total).toBe(2);
+  });
+
+  it("filters by name or email via ?q=", async () => {
+    const me = await createUser();
+    const amaka = await createUser({ fullName: "Amaka Obi", email: "amaka.obi@example.com" });
+    const bello = await createUser({ fullName: "Bello Hassan", email: "bello@example.com" });
+    const token = generateToken(me);
+
+    await request(app).post("/api/contacts").set("Authorization", `Bearer ${token}`).send({ userId: amaka.id });
+    await request(app).post("/api/contacts").set("Authorization", `Bearer ${token}`).send({ userId: bello.id });
+
+    const byName = await request(app).get("/api/contacts?q=amaka").set("Authorization", `Bearer ${token}`);
+    expect(byName.body.data).toHaveLength(1);
+    expect(byName.body.data[0].user).toBe(amaka.id);
+    expect(byName.body.pagination.total).toBe(1);
+
+    const byEmail = await request(app).get("/api/contacts?q=bello@example").set("Authorization", `Bearer ${token}`);
+    expect(byEmail.body.data).toHaveLength(1);
+    expect(byEmail.body.data[0].user).toBe(bello.id);
+
+    const noMatch = await request(app).get("/api/contacts?q=nobody").set("Authorization", `Bearer ${token}`);
+    expect(noMatch.body.data).toHaveLength(0);
   });
 
   it("returns an empty list for a user with no contacts", async () => {

@@ -30,6 +30,12 @@ export interface IDigitalCreatorProfile extends Document {
   // See constants/profileStatus.ts — active by default, inactive is
   // self-service, banned is admin-only.
   status: ProfileStatus;
+  // Set only by adminProfileController.setProfileStatus's ban path, and
+  // cleared again on unban — see that function's own comment for why
+  // self-service status toggling never touches these.
+  bannedBy?: Types.ObjectId;
+  bannedAt?: Date;
+  banReason?: string;
   slug: string;
   displayName: string;
   bio?: string;
@@ -52,6 +58,9 @@ const digitalCreatorProfileSchema = new Schema<IDigitalCreatorProfile>(
     isVerified: { type: Boolean, default: false },
     verification: { type: Schema.Types.ObjectId, ref: "Verification", default: null },
     status: { type: String, enum: Object.values(PROFILE_STATUS), default: PROFILE_STATUS.ACTIVE },
+    bannedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    bannedAt: { type: Date },
+    banReason: { type: String },
     slug: { type: String, required: true, unique: true },
     displayName: { type: String, required: [true, "Please add a display name"], trim: true },
     bio: { type: String },

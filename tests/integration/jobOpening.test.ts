@@ -361,6 +361,9 @@ describe("GET /api/job-openings/:id — the location-reveal safety gate", () => 
     expect(res.body.googleMapsUrl).toBeUndefined();
     expect(res.body.contactInfo).toBeUndefined();
     expect(res.body.files).toBeUndefined();
+    // Never applied — myApplication should be explicitly null, not
+    // missing, so the frontend doesn't need a second call to know.
+    expect(res.body.myApplication).toBeNull();
   });
 
   it("shows the poster the full gated tier", async () => {
@@ -375,9 +378,12 @@ describe("GET /api/job-openings/:id — the location-reveal safety gate", () => 
     expect(res.body.coordinates).toEqual({ lat: opening.coordinates!.lat, lng: opening.coordinates!.lng });
     expect(res.body.address).toBe(opening.address);
     expect(res.body.contactInfo).toBe(opening.contactInfo);
+    // The poster isn't a worker applying to their own opening, so
+    // myApplication doesn't apply to that view at all.
+    expect(res.body.myApplication).toBeUndefined();
   });
 
-  it("still withholds the gated tier from a worker who has merely applied, not been accepted", async () => {
+  it("still withholds the gated tier from a worker who has merely applied, not been accepted — but includes myApplication", async () => {
     const poster = await createEligiblePoster();
     const opening = await createJobOpening({ postedBy: poster });
     const { user: workerUser, profile } = await createEligibleWorker();
@@ -394,9 +400,10 @@ describe("GET /api/job-openings/:id — the location-reveal safety gate", () => 
 
     expect(res.body.coordinates).toBeUndefined();
     expect(res.body.contactInfo).toBeUndefined();
+    expect(res.body.myApplication.status).toBe("pending");
   });
 
-  it("reveals the gated tier only once the worker's application is accepted", async () => {
+  it("reveals the gated tier only once the worker's application is accepted, and includes the accepted myApplication", async () => {
     const poster = await createEligiblePoster();
     const opening = await createJobOpening({ postedBy: poster });
     const { user: workerUser, profile } = await createEligibleWorker();
@@ -414,6 +421,7 @@ describe("GET /api/job-openings/:id — the location-reveal safety gate", () => 
     expect(res.status).toBe(200);
     expect(res.body.coordinates).toEqual({ lat: opening.coordinates!.lat, lng: opening.coordinates!.lng });
     expect(res.body.contactInfo).toBe(opening.contactInfo);
+    expect(res.body.myApplication.status).toBe("accepted");
   });
 });
 
@@ -583,6 +591,15 @@ describe("PATCH .../applications/:applicationId/accept and /reject", () => {
       .set("Authorization", `Bearer ${generateToken(workerUser)}`);
     expect(workerNotifications.body.data).toHaveLength(1);
     expect(workerNotifications.body.data[0].type).toBe("job_application_accepted");
+
+    // Without application.job, an accepted worker has no way to get from
+    // the application to the Job it created when just listing their own
+    // applications (as opposed to the one-off accept response above,
+    // which already attaches the full job separately).
+    const myApplications = await request(app)
+      .get("/api/job-openings/applications/mine")
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`);
+    expect(myApplications.body.data[0].job).toBe(res.body.job._id);
   });
 
   it("rejects the remaining pending applications once the opening fills", async () => {
@@ -675,6 +692,19 @@ describe("GET /api/job-openings/me and /applications/mine", () => {
       .get("/api/job-openings/applications/mine")
       .set("Authorization", `Bearer ${generateToken(workerUser)}`);
     expect(myApplications.body.data).toHaveLength(1);
+    // A posting summary per row — not just its id — so "my applications"
+    // can show what each one is actually for with no extra GET.
+    const openingPlain = theirOpening.toObject();
+    expect(myApplications.body.data[0].posting).toEqual({
+      id: theirOpening.id,
+      title: openingPlain.title,
+      status: openingPlain.status,
+      applicationDeadline: openingPlain.applicationDeadline,
+      generalArea: openingPlain.generalArea,
+      payRate: openingPlain.payRate,
+      payType: openingPlain.payType,
+      currency: openingPlain.currency,
+    });
   });
 });
 

@@ -258,7 +258,7 @@ export const getDigitalCreatorProfile = asyncHandler(async (req: Request, res: R
   }
 
   const { page, limit, skip } = paginationParams(req);
-  const filter = { creatorId: profile._id, isActive: true };
+  const filter = { creatorId: profile._id, isActive: true, isVerified: true };
 
   const [products, total] = await Promise.all([
     DigitalProduct.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
