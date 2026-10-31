@@ -22,6 +22,7 @@ const templateRegistry: Record<string, string> = {
   forgotPassword: "../emails/forgot-password.html",
   paymentRequestDecision: "../emails/payment-request-decision.html",
   systemPayoutSettled: "../emails/system-payout-settled.html",
+  profileStatusChanged: "../emails/profile-status-changed.html",
   verifyEmail: "../emails/verify-email.html",
 };
 

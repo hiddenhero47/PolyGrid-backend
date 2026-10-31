@@ -319,6 +319,120 @@ describe("GET /api/reviews", () => {
   });
 });
 
+describe("GET /api/reviews/moderation", () => {
+  const leaveReview = async (
+    clientUser: Awaited<ReturnType<typeof createUser>>,
+    providerUser: Awaited<ReturnType<typeof createUser>>,
+    rating: number,
+    comment?: string,
+  ) => {
+    const job = await createActiveJob({ client: clientUser, provider: providerUser, status: JOB_STATUS.COMPLETED });
+    const res = await request(app)
+      .post("/api/reviews")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ sourceType: "Job", sourceId: job.id, rating, comment });
+    return res.body;
+  };
+
+  it("blocks a regular user", async () => {
+    const user = await createUser();
+    const res = await request(app)
+      .get("/api/reviews/moderation")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+    expect(res.status).toBe(401);
+  });
+
+  it("with neither profileType nor profileId, returns a platform-wide feed with the reviewed profile's name and the reviewer's email", async () => {
+    const admin = await createAdmin();
+    const providerUser = await createUser();
+    const contractorProfile = await createContractorProfile({ user: providerUser, headline: "Steel Frame Experts" });
+    const clientUser = await createUser({ fullName: "Chidi Okonkwo", email: "chidi@example.com" });
+
+    await leaveReview(clientUser, providerUser, 4, "Solid work");
+
+    const res = await request(app)
+      .get("/api/reviews/moderation")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    const row = res.body.data[0];
+    expect(row.profileType).toBe("ContractorProfile");
+    expect(row.profileId).toBe(contractorProfile.id);
+    expect(row.profileName).toBe("Steel Frame Experts");
+    expect(row.reviewer.fullName).toBe("Chidi Okonkwo");
+    expect(row.reviewer.email).toBe("chidi@example.com");
+  });
+
+  it("still scopes to one profile when both profileType and profileId are given", async () => {
+    const admin = await createAdmin();
+    const providerA = await createUser();
+    const profileA = await createContractorProfile({ user: providerA });
+    const clientUser = await createUser();
+    await leaveReview(clientUser, providerA, 5);
+
+    const providerB = await createUser();
+    await createContractorProfile({ user: providerB });
+    const otherClient = await createUser();
+    await leaveReview(otherClient, providerB, 2);
+
+    const res = await request(app)
+      .get(`/api/reviews/moderation?profileType=ContractorProfile&profileId=${profileA.id}`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].profileId).toBe(profileA.id);
+  });
+
+  it("filters by isHidden and by minRating/maxRating, and includes hiddenBy's fullName", async () => {
+    const admin = await createAdmin({ fullName: "Mod Erator" });
+    const providerUser = await createUser();
+    await createContractorProfile({ user: providerUser });
+    const client1 = await createUser();
+    const lowReview = await leaveReview(client1, providerUser, 1, "Bad experience");
+    const client2 = await createUser();
+    await leaveReview(client2, providerUser, 5, "Great");
+
+    await request(app)
+      .patch(`/api/reviews/${lowReview.id}/hide`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ reason: "Reviewing for authenticity" });
+
+    const hiddenOnly = await request(app)
+      .get("/api/reviews/moderation?isHidden=true")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(hiddenOnly.body.data).toHaveLength(1);
+    expect(hiddenOnly.body.data[0].id).toBe(lowReview.id);
+    expect(hiddenOnly.body.data[0].hiddenBy.fullName).toBe("Mod Erator");
+
+    const visibleOnly = await request(app)
+      .get("/api/reviews/moderation?isHidden=false")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(visibleOnly.body.data).toHaveLength(1);
+    expect(visibleOnly.body.data[0].rating).toBe(5);
+
+    const lowRatingOnly = await request(app)
+      .get("/api/reviews/moderation?maxRating=2")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(lowRatingOnly.body.data).toHaveLength(1);
+    expect(lowRatingOnly.body.data[0].id).toBe(lowReview.id);
+  });
+
+  it("rejects an invalid profileType or profileId", async () => {
+    const admin = await createAdmin();
+
+    const badType = await request(app)
+      .get("/api/reviews/moderation?profileType=NotReal")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(badType.status).toBe(400);
+
+    const badId = await request(app)
+      .get("/api/reviews/moderation?profileId=not-an-id")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(badId.status).toBe(400);
+  });
+});
+
 describe("Review moderation — hide, unhide, delete", () => {
   const leaveReview = async (clientUser: Awaited<ReturnType<typeof createUser>>, providerUser: Awaited<ReturnType<typeof createUser>>, rating: number) => {
     const job = await createActiveJob({ client: clientUser, provider: providerUser, status: JOB_STATUS.COMPLETED });

@@ -11,5 +11,8 @@ export const setProfileStatusSchema = yup
       .string()
       .oneOf([PROFILE_STATUS.ACTIVE, PROFILE_STATUS.BANNED], "status must be 'active' or 'banned'")
       .required("status must be 'active' or 'banned'"),
+    // Only meaningful on a ban — ignored (never stored) on an unban, see
+    // setProfileStatus's own comment.
+    reason: yup.string().trim().max(1000).notRequired(),
   })
   .noUnknown(true);

@@ -1,5 +1,9 @@
 import express from "express";
-import { setProfileStatus, getProfileForReview } from "../controllers/adminProfileController";
+import {
+  setProfileStatus,
+  getProfileForReview,
+  searchProfilesForAdmin,
+} from "../controllers/adminProfileController";
 import { secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 import { validateBody } from "../validators/validate";
@@ -7,6 +11,7 @@ import { setProfileStatusSchema } from "../validators/admin/adminProfileValidato
 
 const router = express.Router();
 
+router.get("/", secureRole([...REVIEW_ROLES]), searchProfilesForAdmin);
 router.get("/:profileType/:id", secureRole([...REVIEW_ROLES]), getProfileForReview);
 router.patch(
   "/:profileType/:id/status",

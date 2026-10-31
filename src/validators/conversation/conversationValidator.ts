@@ -25,5 +25,6 @@ export const reportMessageSchema = yup
 export const resolveMessageReportSchema = yup
   .object({
     redactMessage: yup.boolean().notRequired(),
+    note: yup.string().trim().max(1000).notRequired(),
   })
   .noUnknown(true);

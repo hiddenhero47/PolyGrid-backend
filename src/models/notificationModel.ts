@@ -17,6 +17,7 @@ export const NOTIFICATION_TYPE = {
   JOB_DISPUTE_RESOLVED: "job_dispute_resolved",
   PAYMENT_REQUEST_DECIDED: "payment_request_decided",
   SYSTEM_PAYOUT_SETTLED: "system_payout_settled",
+  PROFILE_STATUS_CHANGED: "profile_status_changed",
 } as const;
 export type NotificationType = (typeof NOTIFICATION_TYPE)[keyof typeof NOTIFICATION_TYPE];
 

@@ -21,6 +21,11 @@ export interface IMessageReport extends Document {
   status: MessageReportStatus;
   resolvedBy?: Types.ObjectId;
   resolvedAt?: Date;
+  // Why this was resolved the way it was — optional, since not every
+  // resolution needs an explanation (e.g. an obviously-fine message), but
+  // there otherwise the history is just a flipped flag with no reasoning
+  // behind it.
+  resolutionNote?: string;
   createdAt: Date;
 }
 
@@ -37,6 +42,7 @@ const messageReportSchema = new Schema<IMessageReport>(
     },
     resolvedBy: { type: Schema.Types.ObjectId, ref: "User" },
     resolvedAt: { type: Date },
+    resolutionNote: { type: String, trim: true, maxlength: 1000 },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
 );
