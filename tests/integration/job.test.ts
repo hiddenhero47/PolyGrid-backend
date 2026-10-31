@@ -323,14 +323,15 @@ describe("PATCH /api/jobs/:id", () => {
 });
 
 describe("GET /api/jobs/:id and /api/jobs/mine", () => {
-  it("lets client, provider and admin view; blocks a stranger", async () => {
+  it("lets client, provider, admin, and customer_care view; blocks a stranger", async () => {
     const clientUser = await createUser();
     const providerUser = await createUser();
     const admin = await createAdmin();
+    const customerCare = await createCustomerCare();
     const stranger = await createUser();
     const job = await createActiveJob(clientUser, providerUser);
 
-    for (const user of [clientUser, providerUser, admin]) {
+    for (const user of [clientUser, providerUser, admin, customerCare]) {
       const res = await request(app)
         .get(`/api/jobs/${job._id}`)
         .set("Authorization", `Bearer ${generateToken(user)}`);
@@ -341,6 +342,25 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
       .get(`/api/jobs/${job._id}`)
       .set("Authorization", `Bearer ${generateToken(stranger)}`);
     expect(blocked.status).toBe(403);
+  });
+
+  it("still blocks customer_care from the write-guarded actions on the same job", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const customerCare = await createCustomerCare();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    const proposeRes = await request(app)
+      .post(`/api/jobs/${job._id}/stages/propose`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`)
+      .send({ stages: [{ details: ["x"], payment: 100 }] });
+    expect(proposeRes.status).toBe(403);
+
+    const disputeRes = await request(app)
+      .patch(`/api/jobs/${job._id}/dispute`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`)
+      .send({ reason: "not my job" });
+    expect(disputeRes.status).toBe(403);
   });
 
   it("getJob returns full detail with no contract files when none uploaded yet", async () => {
@@ -405,6 +425,85 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
     expect(summary.stages).toEqual({ total: 1, verified: 0 });
     expect(summary.amountHistory).toBeUndefined();
     expect(summary.disputeHistory).toBeUndefined();
+  });
+});
+
+describe("GET /api/jobs (admin search)", () => {
+  it("blocks a non-admin, including customer_care", async () => {
+    const user = await createUser();
+    const customerCare = await createCustomerCare();
+
+    for (const caller of [user, customerCare]) {
+      const res = await request(app).get("/api/jobs").set("Authorization", `Bearer ${generateToken(caller)}`);
+      expect(res.status).toBe(401);
+    }
+  });
+
+  it("matches the job title", async () => {
+    const admin = await createAdmin();
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    await createActiveJob(clientUser, providerUser, { jobTitle: "Repaint the back fence" });
+    await createActiveJob(clientUser, providerUser, { jobTitle: "Unrelated roofing job" });
+
+    const res = await request(app)
+      .get("/api/jobs?q=fence")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].jobTitle).toBe("Repaint the back fence");
+  });
+
+  it("matches either party's name or email, and includes party names on each row", async () => {
+    const admin = await createAdmin();
+    const clientUser = await createUser({ fullName: "Chidi Okonkwo", email: "chidi.okonkwo@example.com" });
+    const providerUser = await createUser({ fullName: "Ada Eze" });
+    const job = await createActiveJob(clientUser, providerUser, { jobTitle: "Totally unrelated title" });
+    const other = await createUser();
+    const otherJob = await createActiveJob(other, providerUser, { jobTitle: "Another job" });
+
+    const byName = await request(app)
+      .get("/api/jobs?q=chidi")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(byName.body.data).toHaveLength(1);
+    expect(byName.body.data[0].id).toBe(job._id);
+    expect(byName.body.data[0].client.user.fullName).toBe("Chidi Okonkwo");
+
+    const byEmail = await request(app)
+      .get("/api/jobs?q=chidi.okonkwo@example.com")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(byEmail.body.data).toHaveLength(1);
+    expect(byEmail.body.data[0].id).toBe(job._id);
+
+    // Matches the shared provider on both jobs.
+    const byProvider = await request(app)
+      .get("/api/jobs?q=Ada Eze")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(byProvider.body.data.map((d: { id: string }) => d.id).sort()).toEqual(
+      [job._id, otherJob._id].sort(),
+    );
+  });
+
+  it("filters by userId (every job that user is a party to) and by status", async () => {
+    const admin = await createAdmin();
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const active = await createActiveJob(clientUser, providerUser);
+    const other = await createActiveJob(clientUser, await createUser());
+    await Job.updateOne({ _id: other._id }, { status: "completed" });
+
+    const byUser = await request(app)
+      .get(`/api/jobs?userId=${providerUser.id}`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(byUser.body.data).toHaveLength(1);
+    expect(byUser.body.data[0].id).toBe(active._id);
+
+    const byStatus = await request(app)
+      .get(`/api/jobs?userId=${clientUser.id}&status=completed`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+    expect(byStatus.body.data).toHaveLength(1);
+    expect(byStatus.body.data[0].status).toBe("completed");
   });
 });
 
@@ -572,6 +671,13 @@ describe("POST /api/jobs/:id/contract", () => {
     expect(detail.status).toBe(200);
     expect(detail.body.client.contractFile.requestUrl).toEqual(expect.any(String));
     expect(detail.body.client.contractFile.downloadUrl).toEqual(expect.any(String));
+    // Regression check: withContractLinks used to spread the contract
+    // sub-document directly, which silently copies none of its fields —
+    // only requestUrl/downloadUrl ever came through.
+    expect(detail.body.client.contractFile.fileName).toEqual(expect.any(String));
+    expect(detail.body.client.contractFile.mime).toBe("application/pdf");
+    expect(detail.body.client.contractFile.size).toBeGreaterThan(0);
+    expect(detail.body.client.contractFile.uploadedAt).toBeTruthy();
 
     // That signed link works with no Authorization header at all.
     const requestUrl = new URL(detail.body.client.contractFile.requestUrl);

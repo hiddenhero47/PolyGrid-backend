@@ -12,7 +12,7 @@ import {
   JobStatus,
   PAYMENT_REQUEST_STATUS,
 } from "../models/jobModel";
-import { User, IUser, SYSTEM_ROLE } from "../models/userModel";
+import { User, IUser, SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE, SystemPayoutRequestType } from "../models/systemPayoutModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
@@ -43,10 +43,18 @@ const withContractLinks = (party: IJobParty) => {
   if (!party.contractFile) return undefined;
 
   const ownerId = party.userId.toString();
-  const { fileName } = party.contractFile;
+  const { fileName, mime, size, uploadedAt } = party.contractFile;
 
   return {
-    ...party.contractFile,
+    // party.contractFile is a Mongoose sub-document — its schema fields
+    // are getters on the prototype, not the object's own enumerable
+    // properties, so `...party.contractFile` silently copies nothing.
+    // Picked explicitly rather than `.toObject()` so this stays exactly
+    // the shape a client should see (no stray Mongoose internals).
+    fileName,
+    mime,
+    size,
+    uploadedAt,
     requestUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.VIEW }),
     downloadUrl: signFileUrl({ ownerId, fileName, mode: FILE_URL_MODE.DOWNLOAD }),
   };
@@ -214,6 +222,24 @@ const assertParty = (job: IJob, user: IUser): JobRole | null => {
   return role;
 };
 
+// getJob's own, read-only-only access check — every other assertParty
+// call site in this file (proposeStages/accept/reject, raiseDispute)
+// guards a write, which customer_care must never get just because it
+// can already see this same job through the disputes/refund/payout
+// queues. REVIEW_ROLES (Admin/Super Admin/Customer Care) can look, not
+// touch.
+const assertCanViewJob = (job: IJob, user: IUser): JobRole | null => {
+  const role = roleOf(job, user.id);
+
+  if (!role && !REVIEW_ROLES.includes(user.systemRole as (typeof REVIEW_ROLES)[number])) {
+    const error: AppError = new Error("You are not a party to this job");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  return role;
+};
+
 // How much of what's been paid in is still sitting in escrow, unreleased
 // toward any verified stage — the only part a refund can ever safely
 // claw back. amountDisbursed/platformFeeCollected is money already gone
@@ -334,7 +360,8 @@ export const createJob = asyncHandler(async (req: Request, res: Response) => {
 
 // @desc    Get a single job
 // @route   GET /api/jobs/:id
-// @access  Private (client, provider, or admin)
+// @access  Private (client, provider, or any REVIEW_ROLES member —
+//          Admin/Super Admin/Customer Care)
 export const getJob = asyncHandler(async (req: Request, res: Response) => {
   const job = await Job.findById(req.params.id);
 
@@ -343,7 +370,7 @@ export const getJob = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("Job not found");
   }
 
-  assertParty(job, req.user as IUser);
+  assertCanViewJob(job, req.user as IUser);
 
   const partyUsers = await loadPartyUsers([job]);
   const plain = job.toObject();
@@ -379,6 +406,68 @@ export const getMyJobs = asyncHandler(async (req: Request, res: Response) => {
   const status = req.query.status as string | undefined;
   if (status && Object.values(JOB_STATUS).includes(status as JobStatus)) {
     filter.status = status as JobStatus;
+  }
+
+  const [jobs, total] = await Promise.all([
+    Job.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Job.countDocuments(filter),
+  ]);
+
+  const partyUsers = await loadPartyUsers(jobs);
+
+  res.status(200).json({
+    data: jobs.map((job) => toJobSummary(job, partyUsers)),
+    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+  });
+});
+
+// @desc    Admin job search — the console otherwise only ever reaches a
+//          job through a dispute/refund/payout queue row or the payments
+//          ledger, so an admin had no way to find (and e.g. record a
+//          manual payment on) a job that isn't already in one of those.
+//          `q` matches the job's own title OR either party's name/email;
+//          `userId` scopes to every job a specific user is a party to
+//          (client or provider); `status` is an exact match. Reuses
+//          toJobSummary/loadPartyUsers so each row already carries party
+//          names, same shape /mine returns.
+// @route   GET /api/jobs?q=&status=&userId=&page=&limit=
+// @access  Private (Admin / Super Admin only)
+export const searchJobs = asyncHandler(async (req: Request, res: Response) => {
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const skip = (page - 1) * limit;
+
+  const { q, status, userId } = req.query as { q?: string; status?: string; userId?: string };
+
+  const filter: FilterQuery<IJob> = {};
+
+  if (status && Object.values(JOB_STATUS).includes(status as JobStatus)) {
+    filter.status = status as JobStatus;
+  }
+
+  const partyIsFilter = (ids: (mongoose.Types.ObjectId | string)[]) => [
+    { "client.userId": { $in: ids } },
+    { "provider.userId": { $in: ids } },
+  ];
+
+  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+    filter.$or = partyIsFilter([userId]);
+  }
+
+  if (q && q.trim()) {
+    // Same "escape before building a RegExp" convention getUsers already
+    // uses — a stray regex metacharacter in a search box can't throw or
+    // behave unexpectedly.
+    const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "i");
+
+    const matchingUsers = await User.find({ $or: [{ fullName: pattern }, { email: pattern }] }).select("_id");
+    const qOr = [{ jobTitle: pattern }, ...partyIsFilter(matchingUsers.map((u) => u._id))];
+
+    // userId and q can both be present — AND them together rather than
+    // letting the second $or silently replace the first.
+    filter.$and = [...(filter.$or ? [{ $or: filter.$or }] : []), { $or: qOr }];
+    delete filter.$or;
   }
 
   const [jobs, total] = await Promise.all([

@@ -3,6 +3,7 @@ import {
   createJob,
   getJob,
   getMyJobs,
+  searchJobs,
   confirmJob,
   updateJob,
   proposeStages,
@@ -45,6 +46,7 @@ import {
 const router = express.Router();
 
 router.post("/", protect, validateBody(createJobSchema), createJob);
+router.get("/", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), searchJobs);
 router.get("/mine", protect, getMyJobs);
 // Read-only queues — customer_care can see them too; resolving/approving/
 // declining are real changes and stay admin-only below. Must be
