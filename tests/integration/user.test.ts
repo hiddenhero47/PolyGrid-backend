@@ -39,7 +39,7 @@ afterAll(async () => {
 });
 
 describe("POST /api/users (register)", () => {
-  it("registers a new user and returns a usable token", async () => {
+  it("registers a new user without logging them in — no auth token until the email is verified", async () => {
     const res = await request(app)
       .post("/api/users")
       .send({ fullName: "Jane Doe", email: "jane@example.com", password: "password123" });
@@ -47,35 +47,38 @@ describe("POST /api/users (register)", () => {
     expect(res.status).toBe(201);
     expect(res.body.systemRole).toBe(SYSTEM_ROLE.USER);
     expect(res.body.activeAccountType).toBe(ACCOUNT_TYPE.NORMAL);
-    expect(res.body.token).toEqual(expect.any(String));
+    expect(res.body.verified).toBe(false);
+    expect(res.body.token).toBeUndefined();
 
-    const me = await request(app)
-      .get("/api/users/me")
-      .set("Authorization", `Bearer ${res.body.token}`);
-
-    expect(me.status).toBe(200);
-    expect(me.body.email).toBe("jane@example.com");
-    expect(me.body.verified).toBe(false);
+    const login = await request(app)
+      .post("/api/users/login")
+      .send({ email: "jane@example.com", password: "password123" });
+    expect(login.status).toBe(403);
+    expect(login.body.code).toBe("EMAIL_NOT_VERIFIED");
   });
 
-  it("sends a verification email on register, without it overwriting the auth token", async () => {
+  it("sends a verification email on register, and verifying it is what unlocks login", async () => {
     const res = await request(app)
       .post("/api/users")
       .send({ fullName: "Jane Doe", email: "verify-me@example.com", password: "password123" });
 
     expect(res.status).toBe(201);
-    expect(res.body.token).toEqual(expect.any(String));
+    expect(res.body.token).toBeUndefined();
     expect(res.body.verifyEmailToken).toEqual(expect.any(String));
-    expect(res.body.token).not.toBe(res.body.verifyEmailToken);
     expect(sendTemplatedEmail).toHaveBeenCalledWith(
       expect.objectContaining({ to: "verify-me@example.com", template: "verifyEmail" }),
     );
 
-    // The auth token from registration still logs them in.
-    const me = await request(app)
-      .get("/api/users/me")
-      .set("Authorization", `Bearer ${res.body.token}`);
-    expect(me.status).toBe(200);
+    const verify = await request(app)
+      .post("/api/users/verify-email")
+      .send({ token: res.body.verifyEmailToken });
+    expect(verify.status).toBe(200);
+
+    const login = await request(app)
+      .post("/api/users/login")
+      .send({ email: "verify-me@example.com", password: "password123" });
+    expect(login.status).toBe(200);
+    expect(login.body.token).toEqual(expect.any(String));
   });
 
   it("rejects a duplicate email", async () => {
@@ -154,7 +157,7 @@ describe("GET /api/users/me/profiles", () => {
 describe("POST /api/users/login", () => {
   it("logs in with correct credentials", async () => {
     const password = "password123";
-    const user = await createUser({ password: await bcrypt.hash(password, 4) });
+    const user = await createUser({ password: await bcrypt.hash(password, 4), verified: true });
 
     const res = await request(app)
       .post("/api/users/login")
@@ -165,7 +168,7 @@ describe("POST /api/users/login", () => {
   });
 
   it("rejects a wrong password", async () => {
-    const user = await createUser();
+    const user = await createUser({ verified: true });
 
     const res = await request(app)
       .post("/api/users/login")
@@ -174,11 +177,24 @@ describe("POST /api/users/login", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects login for an unverified email, even with the correct password", async () => {
+    const password = "password123";
+    const user = await createUser({ password: await bcrypt.hash(password, 4), verified: false });
+
+    const res = await request(app)
+      .post("/api/users/login")
+      .send({ email: user.email, password });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("EMAIL_NOT_VERIFIED");
+  });
+
   it("requires a 2FA code once it's enabled, and rejects a wrong one", async () => {
     const secret = authenticator.generateSecret();
     const password = "password123";
     const user = await createUser({
       password: await bcrypt.hash(password, 4),
+      verified: true,
       user2fa: { enable: true, secret },
     });
 
@@ -320,7 +336,7 @@ describe("PUT /api/users/profile", () => {
 
   it("changes password and invalidates the old session", async () => {
     const password = "password123";
-    const user = await createUser({ password: await bcrypt.hash(password, 4) });
+    const user = await createUser({ password: await bcrypt.hash(password, 4), verified: true });
     const token = generateToken(user);
 
     const res = await request(app)
@@ -584,7 +600,7 @@ describe("PATCH /api/users/invalidate", () => {
 
 describe("password reset flow", () => {
   it("requests a reset token then resets the password", async () => {
-    const user = await createUser();
+    const user = await createUser({ verified: true });
 
     const requestRes = await request(app)
       .post("/api/users/request-reset")
@@ -637,9 +653,14 @@ describe("email verification flow", () => {
 
     expect(verifyRes.status).toBe(200);
 
+    const loginRes = await request(app)
+      .post("/api/users/login")
+      .send({ email: "jane-verify@example.com", password: "password123" });
+    expect(loginRes.status).toBe(200);
+
     const me = await request(app)
       .get("/api/users/me")
-      .set("Authorization", `Bearer ${registerRes.body.token}`);
+      .set("Authorization", `Bearer ${loginRes.body.token}`);
     expect(me.body.verified).toBe(true);
   });
 

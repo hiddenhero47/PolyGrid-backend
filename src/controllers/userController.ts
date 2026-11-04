@@ -160,9 +160,10 @@ export const registerUser = asyncHandler(async (req: Request, res: Response) => 
   });
 
   // Never lets a Mailgun hiccup fail the registration itself — the account
-  // is already created and usable (verified or not, nothing gates on it
-  // today); resendVerification below is the recovery path if this fails
-  // or the email never arrives.
+  // is created either way; resendVerification below is the recovery path
+  // if this fails or the email never arrives. No auth token is issued here:
+  // loginUser now rejects an unverified account, so the account isn't
+  // usable until the owner actually clicks the emailed link.
   let verification: { verifyEmailToken: string; verifyUrl: string } | undefined;
   try {
     verification = await sendVerificationEmail(user);
@@ -172,11 +173,9 @@ export const registerUser = asyncHandler(async (req: Request, res: Response) => 
 
   res.status(201).json({
     ...toPublicUser(user),
-    token: generateToken(user),
     // Outside production only — same reasoning as requestReset's dev-mode
     // resetUrl/token: lets the verify flow be exercised end-to-end without
-    // real Mailgun credentials configured locally. Named distinctly from
-    // the auth `token` above so spreading this never overwrites it.
+    // real Mailgun credentials configured locally.
     ...(process.env.NODE_ENV !== "production" && verification ? verification : {}),
   });
 });
@@ -272,6 +271,18 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
   if (!user || !(await bcrypt.compare(password, user.password))) {
     res.status(400);
     throw new Error("Invalid user credentials");
+  }
+
+  // Password login is the one path where we've never independently
+  // confirmed the user owns this email — googleLogin/appleLogin skip this
+  // because the provider already proved that (and createOAuthUser marks
+  // Google accounts verified outright). resendVerification is the recovery
+  // path for someone stuck here.
+  if (!user.verified) {
+    res.status(403);
+    const error: AppError = new Error("Please verify your email before logging in");
+    error.code = "EMAIL_NOT_VERIFIED";
+    throw error;
   }
 
   enforceTwoFactor(user, token, res);
