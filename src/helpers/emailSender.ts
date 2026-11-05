@@ -2,14 +2,20 @@ import fs from "fs/promises";
 import path from "path";
 import Handlebars from "handlebars";
 import getMailgunClient from "../config/mailgun";
+import getMailpitTransporter from "../config/mailpit";
 
 // Mirrors house-maduekwe-backend's server-src/helpers/emailSender.js —
-// same Mailgun + Handlebars shape, same loadTemplates/sendEmail/
-// renderTemplate/sendTemplatedEmail surface — so this can be extended the
-// same way there without inventing a second convention. Every test file
-// that touches a controller calling sendTemplatedEmail mocks this whole
-// module (`jest.mock("../../src/helpers/emailSender", ...)`), same as HM's
-// own test suite — no real Mailgun call is ever made in tests.
+// same Handlebars shape, same loadTemplates/sendEmail/renderTemplate/
+// sendTemplatedEmail surface — so this can be extended the same way there
+// without inventing a second convention. Every test file that touches a
+// controller calling sendTemplatedEmail mocks this whole module
+// (`jest.mock("../../src/helpers/emailSender", ...)`), same as HM's own
+// test suite — no real Mailgun/Mailpit call is ever made in tests.
+//
+// sendEmail is the one choke point everything funnels through: outside
+// production it hands off to a local Mailpit SMTP catcher (config/mailpit.ts),
+// in production to Mailgun (config/mailgun.ts) — never call either config's
+// client directly from anywhere else.
 
 Handlebars.registerHelper("uppercase", (text: unknown) =>
   typeof text === "string" ? text.toUpperCase() : "",
@@ -47,6 +53,18 @@ export const sendEmail = async ({
   subject: string;
   html: string;
 }) => {
+  // Every email in the app goes through this one function — dev/local
+  // mail is caught by Mailpit (nothing leaves the machine, nothing needs
+  // real Mailgun credentials), production keeps sending through Mailgun.
+  if (process.env.NODE_ENV !== "production") {
+    return getMailpitTransporter().sendMail({
+      from: process.env.EMAIL_FROM || "noreply@polygrid.local",
+      to,
+      subject,
+      html,
+    });
+  }
+
   return getMailgunClient().messages.create(process.env.MAILGUN_DOMAIN as string, {
     from: process.env.EMAIL_FROM,
     to,
