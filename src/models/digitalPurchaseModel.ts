@@ -20,6 +20,20 @@ export const DIGITAL_PURCHASE_STATUS = {
 export type DigitalPurchaseStatus =
   (typeof DIGITAL_PURCHASE_STATUS)[keyof typeof DIGITAL_PURCHASE_STATUS];
 
+// The creator's own earnings on this purchase never had any payout path
+// at all before Stripe Connect — this is that path, first time. Mirrors
+// Job's requestPayout/approvePayoutRequest shape, just without a
+// counterparty (there's no single "client" on a digital purchase to ask —
+// see digitalCreatorProfileController.ts's requestDigitalCreatorPayout,
+// which bundles every `unpaid` purchase into one SystemPayout at once).
+export const DIGITAL_PURCHASE_PAYOUT_STATUS = {
+  UNPAID: "unpaid",
+  REQUESTED: "requested",
+  PAID: "paid",
+} as const;
+export type DigitalPurchasePayoutStatus =
+  (typeof DIGITAL_PURCHASE_PAYOUT_STATUS)[keyof typeof DIGITAL_PURCHASE_PAYOUT_STATUS];
+
 export interface IDigitalPurchase extends Document {
   product: Types.ObjectId;
   buyer: Types.ObjectId;
@@ -50,6 +64,16 @@ export interface IDigitalPurchase extends Document {
   // completed" (files empty, this still null — an operational gap, not an
   // expiry).
   filesDeletedAt: Date | null;
+  // Snapshotted at purchase time from getPlatformFeePercent() (the same
+  // single source of truth Job uses) — a later env change never
+  // retroactively changes what an already-made purchase owes the
+  // creator, same reasoning as Job.platformFeePercent.
+  platformFeePercent: number;
+  payoutStatus: DigitalPurchasePayoutStatus;
+  // Set when a creator payout request bundles this purchase in — the
+  // backstop against ever counting the same purchase toward two
+  // different payout requests.
+  payoutRequestId?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -69,9 +93,20 @@ const digitalPurchaseSchema = new Schema<IDigitalPurchase>(
     fileManifest: { type: [digitalFileSchema], default: [] },
     files: { type: [digitalFileSchema], default: [] },
     filesDeletedAt: { type: Date, default: null },
+    platformFeePercent: { type: Number, required: true, min: 0, max: 100 },
+    payoutStatus: {
+      type: String,
+      enum: Object.values(DIGITAL_PURCHASE_PAYOUT_STATUS),
+      default: DIGITAL_PURCHASE_PAYOUT_STATUS.UNPAID,
+    },
+    payoutRequestId: { type: Schema.Types.ObjectId },
   },
   { timestamps: true },
 );
+
+// requestDigitalCreatorPayout's own read pattern (digitalCreatorProfileController.ts):
+// every SUCCESS, UNPAID purchase for one creator.
+digitalPurchaseSchema.index({ creator: 1, status: 1, payoutStatus: 1 });
 
 // "Have I already bought this" (download-access check, and blocking a
 // duplicate purchase) and "my purchase history" are the only two lookups

@@ -24,6 +24,19 @@ export const PAYMENT_STATUS = {
 } as const;
 export type PaymentStatus = (typeof PAYMENT_STATUS)[keyof typeof PAYMENT_STATUS];
 
+// Which pocket this charge's bulk lands in once Stripe Connect is in play
+// (see helpers/stripeConnect.ts) — `platform` for a Subscription (100%
+// stays with PolyGrid), `marketplace` for a Job or DigitalPurchase (the
+// provider/creator's cut moves to their own connected account later, via
+// a real Transfer — see systemPayoutController.ts's markSystemPayoutPaid).
+// Orthogonal to `provider` below (stripe vs manual) — this is about where
+// the money is headed, not which gateway moved it.
+export const PAYMENT_RAIL = {
+  PLATFORM: "platform",
+  MARKETPLACE: "marketplace",
+} as const;
+export type PaymentRail = (typeof PAYMENT_RAIL)[keyof typeof PAYMENT_RAIL];
+
 export interface IPayment extends Document {
   targetType: PaymentTargetType;
   targetId: Types.ObjectId;
@@ -33,6 +46,16 @@ export interface IPayment extends Document {
   userEmail: string;
   amount: number;
   currency: string;
+  rail: PaymentRail;
+  // The buyer's own country at charge time, and where the bulk of this
+  // charge is ultimately headed — SYSTEM_COUNTRY for a platform-rail
+  // payment, the provider/creator's own country for a marketplace-rail
+  // one. Descriptive metadata for now (which gateway/provider a given
+  // country pair could use later) — not itself a gate; see
+  // helpers/paymentGuardrails.ts for the actual supported-country check,
+  // which only ever looks at transactionCountryFrom.
+  transactionCountryFrom?: string;
+  transactionCountryTo?: string;
   // The gateway's own actual reported cut (0 for a manual entry) — separate
   // from PaymentProvider.percentageFee/flatFee, which is an estimate/config,
   // not ground truth for any specific transaction.
@@ -66,6 +89,9 @@ const paymentSchema = new Schema<IPayment>(
     userEmail: { type: String, required: true },
     amount: { type: Number, required: true, min: 0 },
     currency: { ...currencyField, required: true, default: PLATFORM_CURRENCY },
+    rail: { type: String, required: true, enum: Object.values(PAYMENT_RAIL) },
+    transactionCountryFrom: { type: String, uppercase: true, trim: true },
+    transactionCountryTo: { type: String, uppercase: true, trim: true },
     providerFeeAmount: { type: Number, default: 0, min: 0 },
     provider: {
       type: String,

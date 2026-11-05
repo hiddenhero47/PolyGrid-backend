@@ -6,11 +6,21 @@ import {
   createUserWithActiveSubscription,
   createDigitalCreatorProfile,
   createDigitalProduct,
+  createDigitalPurchase,
   generateToken,
   TEST_PNG_BUFFER,
 } from "../setup/fixtures";
 import { DigitalCreatorProfile } from "../../src/models/digitalCreatorProfileModel";
 import { Subscription } from "../../src/models/subscriptionModel";
+import { DigitalPurchase } from "../../src/models/digitalPurchaseModel";
+import { SystemPayout } from "../../src/models/systemPayoutModel";
+
+const TEST_PAYOUT_ACCOUNT = {
+  accountName: "Test Recipient",
+  accountNumber: "0123456789",
+  bankName: "Test Bank",
+  country: "NG",
+};
 
 const app = createApp();
 
@@ -181,5 +191,114 @@ describe("GET /api/digital-creator-profiles/:idOrSlug", () => {
 describe("model", () => {
   it("requires a userId, slug, displayName, and country", async () => {
     await expect(DigitalCreatorProfile.create({})).rejects.toThrow();
+  });
+});
+
+describe("POST /api/digital-creator-profiles/me/request-payout", () => {
+  it("requires authentication", async () => {
+    const res = await request(app).post("/api/digital-creator-profiles/me/request-payout");
+    expect(res.status).toBe(401);
+  });
+
+  it("404s when the caller has no digital creator profile", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when nothing is unpaid yet", async () => {
+    const creatorUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    await createDigitalCreatorProfile({ user: creatorUser });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when the creator hasn't set up a payout account yet", async () => {
+    const creatorUser = await createUser();
+    const profile = await createDigitalCreatorProfile({ user: creatorUser });
+    const product = await createDigitalProduct({ creator: profile, price: 100 });
+    const buyer = await createUser();
+    await createDigitalPurchase({ product, buyer, creator: profile });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("bundles every unpaid purchase into one SystemPayout, net of the platform fee, and marks them requested", async () => {
+    const creatorUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const profile = await createDigitalCreatorProfile({ user: creatorUser });
+    const product = await createDigitalProduct({ creator: profile, price: 100 });
+    const buyerA = await createUser();
+    const buyerB = await createUser();
+
+    const purchaseA = await createDigitalPurchase({
+      product,
+      buyer: buyerA,
+      creator: profile,
+      platformFeePercent: 10,
+    });
+    const purchaseB = await createDigitalPurchase({
+      product,
+      buyer: buyerB,
+      creator: profile,
+      platformFeePercent: 10,
+    });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+
+    expect(res.status).toBe(201);
+    expect(res.body.purchasesBundled).toBe(2);
+    // Each purchase: 100 * (1 - 10/100) = 90, so 180 total across both.
+    expect(res.body.systemPayout.amount).toBeCloseTo(180);
+    expect(res.body.systemPayout.settlementMethod).toBe("manual");
+    expect(res.body.systemPayout.user).toBe(creatorUser.id);
+
+    const updatedA = await DigitalPurchase.findById(purchaseA.id);
+    const updatedB = await DigitalPurchase.findById(purchaseB.id);
+    expect(updatedA?.payoutStatus).toBe("requested");
+    expect(updatedB?.payoutStatus).toBe("requested");
+    expect(updatedA?.payoutRequestId?.toString()).toBe(res.body.systemPayout._id);
+
+    // A second request right away has nothing new to bundle.
+    const again = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+    expect(again.status).toBe(400);
+  });
+
+  it("uses settlementMethod 'stripe' once the creator has a usable Connect account", async () => {
+    const creatorUser = await createUser({
+      payoutAccount: TEST_PAYOUT_ACCOUNT,
+      stripeConnectedAccountId: "acct_123",
+      stripeConnectPayoutsEnabled: true,
+    });
+    const profile = await createDigitalCreatorProfile({ user: creatorUser });
+    const product = await createDigitalProduct({ creator: profile, price: 50 });
+    const buyer = await createUser();
+    await createDigitalPurchase({ product, buyer, creator: profile, platformFeePercent: 0 });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+
+    expect(res.status).toBe(201);
+    expect(res.body.systemPayout.settlementMethod).toBe("stripe");
+
+    const payout = await SystemPayout.findById(res.body.systemPayout._id);
+    expect(payout?.targetType).toBe("DigitalCreatorProfile");
+    expect(payout?.targetId.toString()).toBe(profile.id);
   });
 });

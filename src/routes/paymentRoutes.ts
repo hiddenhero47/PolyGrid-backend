@@ -5,6 +5,7 @@ import {
   createPaymentIntent,
   refreshPayment,
   stripeWebhook,
+  stripeConnectWebhook,
 } from "../controllers/paymentController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
@@ -22,5 +23,9 @@ router.post("/:id/refresh", protect, refreshPayment);
 // raw-body scoping for this exact path is registered in app.ts, before the
 // global express.json().
 router.post("/stripe/webhook", stripeWebhook);
+// Same raw-body/no-`protect` reasoning as /stripe/webhook above, just a
+// separate Connect-specific endpoint with its own signing secret — see
+// helpers/stripeConnect.ts's constructConnectWebhookEvent.
+router.post("/stripe/connect-webhook", stripeConnectWebhook);
 
 export default router;

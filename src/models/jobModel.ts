@@ -91,6 +91,33 @@ export const PAYMENT_REQUEST_STATUS = {
 } as const;
 export type PaymentRequestStatus = (typeof PAYMENT_REQUEST_STATUS)[keyof typeof PAYMENT_REQUEST_STATUS];
 
+// Before an admin can finalize either side's money movement, the OTHER
+// party must sign off first — the provider approves a refund (it's their
+// escrowed earnings being given back), the client approves a payout
+// (it's confirming the provider should actually be paid). An admin can
+// still finalize without it (see approveRefundRequest/approvePayoutRequest's
+// bypassReason), but that's logged honestly as a bypass, never faked as
+// real consent — `status` stays whatever the counterparty actually left
+// it at, and bypassedBy/bypassedAt/bypassReason record that admin acted
+// without it.
+export const COUNTERPARTY_APPROVAL_STATUS = {
+  PENDING: "pending",
+  APPROVED: "approved",
+  REJECTED: "rejected",
+} as const;
+export type CounterpartyApprovalStatus =
+  (typeof COUNTERPARTY_APPROVAL_STATUS)[keyof typeof COUNTERPARTY_APPROVAL_STATUS];
+
+export interface ICounterpartyApproval {
+  status: CounterpartyApprovalStatus;
+  decidedBy?: Types.ObjectId;
+  decidedAt?: Date;
+  declineReason?: string;
+  bypassedBy?: Types.ObjectId;
+  bypassedAt?: Date;
+  bypassReason?: string;
+}
+
 // The client asking for money back. Kept as a history array, never a
 // single overwritten field — same "never overwrite" instinct as
 // oldStages/disputeHistory. A second, corrective request (or a second
@@ -105,6 +132,9 @@ export interface IRefund {
   decidedBy?: Types.ObjectId;
   decidedAt?: Date;
   declineReason?: string;
+  // The provider's own sign-off — required before approveRefundRequest
+  // will finalize this, unless an admin explicitly bypasses it.
+  counterpartyApproval: ICounterpartyApproval;
 }
 
 // The provider asking to be paid their earned-but-undisbursed funds
@@ -124,6 +154,9 @@ export interface IPayout {
   decidedBy?: Types.ObjectId;
   decidedAt?: Date;
   declineReason?: string;
+  // The client's own sign-off — required before approvePayoutRequest will
+  // finalize this, unless an admin explicitly bypasses it.
+  counterpartyApproval: ICounterpartyApproval;
 }
 
 export interface IJobParty {
@@ -241,6 +274,23 @@ const amountChangeSchema = new Schema<IAmountChange>(
   { _id: false },
 );
 
+const counterpartyApprovalSchema = new Schema<ICounterpartyApproval>(
+  {
+    status: {
+      type: String,
+      enum: Object.values(COUNTERPARTY_APPROVAL_STATUS),
+      default: COUNTERPARTY_APPROVAL_STATUS.PENDING,
+    },
+    decidedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    decidedAt: { type: Date },
+    declineReason: { type: String },
+    bypassedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    bypassedAt: { type: Date },
+    bypassReason: { type: String },
+  },
+  { _id: false },
+);
+
 const refundSchema = new Schema<IRefund>({
   amount: { type: Number, required: true, min: 0 },
   reason: { type: String, required: true },
@@ -254,6 +304,10 @@ const refundSchema = new Schema<IRefund>({
   decidedBy: { type: Schema.Types.ObjectId, ref: "User" },
   decidedAt: { type: Date },
   declineReason: { type: String },
+  counterpartyApproval: {
+    type: counterpartyApprovalSchema,
+    default: () => ({ status: COUNTERPARTY_APPROVAL_STATUS.PENDING }),
+  },
 });
 
 const payoutSchema = new Schema<IPayout>({
@@ -269,6 +323,10 @@ const payoutSchema = new Schema<IPayout>({
   decidedBy: { type: Schema.Types.ObjectId, ref: "User" },
   decidedAt: { type: Date },
   declineReason: { type: String },
+  counterpartyApproval: {
+    type: counterpartyApprovalSchema,
+    default: () => ({ status: COUNTERPARTY_APPROVAL_STATUS.PENDING }),
+  },
 });
 
 const jobPartySchema = new Schema<IJobParty>(

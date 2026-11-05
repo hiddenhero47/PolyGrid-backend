@@ -27,6 +27,7 @@ import {
 import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { PROFILE_MODEL_REGISTRY, ProfileType } from "../constants/profileTypes";
+import { createConnectedAccount, createOnboardingLink, updateExternalAccount } from "../helpers/stripeConnect";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -42,6 +43,7 @@ const toPublicUser = (user: IUser) => ({
   id: user.id,
   fullName: user.fullName,
   email: user.email,
+  country: user.country,
   phoneNumber: user.phoneNumber,
   // storagePath is internal only (used to delete the old file on replace) —
   // never sent to a client.
@@ -56,6 +58,10 @@ const toPublicUser = (user: IUser) => ({
     enable: user.user2fa?.enable || false,
   },
   payoutAccount: user.payoutAccount,
+  stripeConnect: {
+    onboarded: Boolean(user.stripeConnectedAccountId),
+    payoutsEnabled: user.stripeConnectPayoutsEnabled,
+  },
 });
 
 // Shared by loginUser/googleLogin/appleLogin — whichever path actually
@@ -555,7 +561,7 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
     throw new Error("User not found");
   }
 
-  const { fullName, phoneNumber, password, oldPassword } = req.body;
+  const { fullName, phoneNumber, country, password, oldPassword } = req.body;
 
   if (password) {
     if (!oldPassword) {
@@ -578,6 +584,7 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
 
   if (fullName) user.fullName = fullName;
   if (phoneNumber) user.phoneNumber = phoneNumber;
+  if (country) user.country = country;
 
   // An avatar is one optional field on a form that's mostly about other
   // things — a bad/missing image must never fail the whole profile update.
@@ -662,6 +669,13 @@ export const toggleAccountType = asyncHandler(async (req: Request, res: Response
 //          whatever's on file here onto a SystemPayout record at approval
 //          time, not a live reference, so a later change here never
 //          silently redirects an already-approved payout.
+//
+//          If this user has already onboarded to Stripe Connect, this
+//          also pushes the new bank account to Stripe and makes it the
+//          one actually paid out to (updateExternalAccount) — pushed
+//          *before* saving locally, so a Stripe-side rejection (a bad
+//          routing number, say) never leaves PolyGrid showing a bank
+//          account Stripe doesn't actually have on file.
 // @route   PUT /api/users/payout-account
 // @access  Private
 export const updatePayoutAccount = asyncHandler(async (req: Request, res: Response) => {
@@ -673,11 +687,51 @@ export const updatePayoutAccount = asyncHandler(async (req: Request, res: Respon
   }
 
   const { accountName, accountNumber, bankName, bankCode, country } = req.body;
+  const payoutAccount = { accountName, accountNumber, bankName, bankCode, country };
 
-  user.payoutAccount = { accountName, accountNumber, bankName, bankCode, country };
+  if (user.stripeConnectedAccountId) {
+    await updateExternalAccount(user.stripeConnectedAccountId, payoutAccount);
+  }
+
+  user.payoutAccount = payoutAccount;
   await user.save();
 
   res.status(200).json({ payoutAccount: user.payoutAccount });
+});
+
+// @desc    Start (or resume) Stripe Connect Express onboarding — creates
+//          the connected account on first call (pre-filling its bank
+//          account from payoutAccount if one is already on file, see
+//          helpers/stripeConnect.ts), then always returns a fresh
+//          onboarding link. Safe to call again later to resume/redo
+//          onboarding (Stripe's own refresh_url flow).
+// @route   POST /api/users/me/connect/onboard
+// @access  Private
+export const startConnectOnboarding = asyncHandler(async (req: Request, res: Response) => {
+  const user = await User.findById((req.user as IUser).id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  if (!user.country) {
+    res.status(400);
+    throw new Error("Set your country before starting Stripe Connect onboarding");
+  }
+
+  if (!user.stripeConnectedAccountId) {
+    user.stripeConnectedAccountId = await createConnectedAccount(user);
+    await user.save();
+  }
+
+  const onboardingUrl = await createOnboardingLink(
+    user.stripeConnectedAccountId,
+    `${process.env.FRONTEND_URL}/connect/refresh`,
+    `${process.env.FRONTEND_URL}/connect/return`,
+  );
+
+  res.status(200).json({ onboardingUrl });
 });
 
 // @desc    Start (or restart) 2FA enrollment — generates a fresh TOTP

@@ -64,6 +64,7 @@ export const appleLoginSchema = yup
 export const updateUserProfileSchema = yup
   .object({
     fullName: yup.string().trim().notRequired(),
+    country: yup.string().trim().uppercase().notRequired(),
     phoneNumber: yup
       .object({
         number: yup.string().trim().notRequired(),

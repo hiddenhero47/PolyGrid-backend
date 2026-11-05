@@ -20,6 +20,15 @@ import {
   countUploadCandidates,
 } from "../helpers/fileStorage";
 import { toPublicDigitalProduct } from "./digitalProductController";
+import { DigitalPurchase, DIGITAL_PURCHASE_STATUS, DIGITAL_PURCHASE_PAYOUT_STATUS } from "../models/digitalPurchaseModel";
+import { User } from "../models/userModel";
+import {
+  SystemPayout,
+  SYSTEM_PAYOUT_REQUEST_TYPE,
+  SYSTEM_PAYOUT_TARGET_TYPE,
+  SETTLEMENT_METHOD,
+  SettlementMethod,
+} from "../models/systemPayoutModel";
 
 const slugify = (value: string): string =>
   value
@@ -270,4 +279,76 @@ export const getDigitalCreatorProfile = asyncHandler(async (req: Request, res: R
     products: products.map(toPublicDigitalProduct),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
   });
+});
+
+// @desc    Request payout of every one of my digital products' earnings
+//          that's still unpaid — the first real payout path digital
+//          creators have ever had (previously none existed at all).
+//          Bundles every SUCCESS/unpaid DigitalPurchase into ONE
+//          SystemPayout, same net-of-platform-fee math Job payouts use.
+//          No counterparty approval here, deliberately — unlike a Job,
+//          there's no single "client" to ask (a payout can span many
+//          buyers' purchases); the admin's own mark-paid click is still
+//          the control point (see systemPayoutController.ts).
+// @route   POST /api/digital-creator-profiles/me/request-payout
+// @access  Private (the creator themself)
+export const requestDigitalCreatorPayout = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const profile = await DigitalCreatorProfile.findOne({ userId: requester._id });
+
+  if (!profile) {
+    res.status(404);
+    throw new Error("You don't have a digital creator profile");
+  }
+
+  const unpaidPurchases = await DigitalPurchase.find({
+    creator: profile._id,
+    status: DIGITAL_PURCHASE_STATUS.SUCCESS,
+    payoutStatus: DIGITAL_PURCHASE_PAYOUT_STATUS.UNPAID,
+  });
+
+  if (unpaidPurchases.length === 0) {
+    res.status(400);
+    throw new Error("Nothing is currently available to pay out");
+  }
+
+  const beneficiary = await User.findById(requester._id).select(
+    "payoutAccount stripeConnectedAccountId stripeConnectPayoutsEnabled",
+  );
+
+  if (!beneficiary?.payoutAccount) {
+    res.status(400);
+    throw new Error("Set up your payout account before requesting a payout");
+  }
+
+  const amount = unpaidPurchases.reduce(
+    (total, purchase) => total + purchase.priceSnapshot * (1 - purchase.platformFeePercent / 100),
+    0,
+  );
+  const currency = unpaidPurchases[0].currency;
+
+  const settlementMethod: SettlementMethod =
+    beneficiary.stripeConnectedAccountId && beneficiary.stripeConnectPayoutsEnabled
+      ? SETTLEMENT_METHOD.STRIPE
+      : SETTLEMENT_METHOD.MANUAL;
+
+  const systemPayout = await SystemPayout.create({
+    requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
+    targetType: SYSTEM_PAYOUT_TARGET_TYPE.DIGITAL_CREATOR_PROFILE,
+    targetId: profile._id,
+    requestId: new mongoose.Types.ObjectId(),
+    user: requester._id,
+    amount,
+    currency,
+    settlementMethod,
+    payoutAccount: beneficiary.payoutAccount,
+    createdBy: requester._id,
+  });
+
+  await DigitalPurchase.updateMany(
+    { _id: { $in: unpaidPurchases.map((purchase) => purchase._id) } },
+    { payoutStatus: DIGITAL_PURCHASE_PAYOUT_STATUS.REQUESTED, payoutRequestId: systemPayout._id },
+  );
+
+  res.status(201).json({ systemPayout, purchasesBundled: unpaidPurchases.length });
 });

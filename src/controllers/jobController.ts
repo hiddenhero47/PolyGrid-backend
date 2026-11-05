@@ -11,11 +11,19 @@ import {
   JOB_STATUS,
   JobStatus,
   PAYMENT_REQUEST_STATUS,
+  COUNTERPARTY_APPROVAL_STATUS,
 } from "../models/jobModel";
 import { User, IUser, SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
-import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE, SystemPayoutRequestType } from "../models/systemPayoutModel";
+import {
+  SystemPayout,
+  SYSTEM_PAYOUT_REQUEST_TYPE,
+  SystemPayoutRequestType,
+  SETTLEMENT_METHOD,
+  SettlementMethod,
+} from "../models/systemPayoutModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
+import { resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
 import {
   uploadHandler,
   deleteStoredFile,
@@ -264,6 +272,14 @@ const payoutAvailableAmount = (job: IJob): number =>
 // systemPayoutModel.ts. Fails loudly (before the request is marked
 // approved) if the beneficiary has never set up a payout account: there's
 // nowhere to record this money going, so the approval can't proceed.
+//
+// Also decides `settlementMethod` here, once, at creation — not
+// recomputed later at settle time — so a recipient's Connect status
+// changing between approval and settlement never silently changes which
+// rail a specific record uses: "stripe" for a payout when the recipient
+// already has a usable Connect account, or for a refund when there's a
+// real Stripe charge on this job to refund against; "manual" otherwise
+// (today's unchanged behavior).
 const createSystemPayout = async ({
   requestType,
   job,
@@ -279,7 +295,9 @@ const createSystemPayout = async ({
   amount: number;
   createdBy: mongoose.Types.ObjectId;
 }): Promise<void> => {
-  const beneficiary = await User.findById(beneficiaryId).select("payoutAccount");
+  const beneficiary = await User.findById(beneficiaryId).select(
+    "payoutAccount stripeConnectedAccountId stripeConnectPayoutsEnabled",
+  );
 
   if (!beneficiary?.payoutAccount) {
     const error: AppError = new Error(
@@ -287,6 +305,23 @@ const createSystemPayout = async ({
     );
     error.statusCode = 400;
     throw error;
+  }
+
+  let settlementMethod: SettlementMethod = SETTLEMENT_METHOD.MANUAL;
+
+  if (requestType === SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT) {
+    if (beneficiary.stripeConnectedAccountId && beneficiary.stripeConnectPayoutsEnabled) {
+      settlementMethod = SETTLEMENT_METHOD.STRIPE;
+    }
+  } else {
+    const hasRefundableStripePayment = await Payment.exists({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      providerPaymentId: { $exists: true },
+    });
+    if (hasRefundableStripePayment) settlementMethod = SETTLEMENT_METHOD.STRIPE;
   }
 
   await SystemPayout.create({
@@ -297,6 +332,7 @@ const createSystemPayout = async ({
     user: beneficiaryId,
     amount,
     currency: job.currency,
+    settlementMethod,
     payoutAccount: beneficiary.payoutAccount,
     createdBy,
   });
@@ -1008,10 +1044,13 @@ export const recordPayment = asyncHandler(async (req: Request, res: Response) =>
 
   const { amount } = req.body;
 
-  const client = await User.findById(job.client.userId).select("email");
+  const client = await User.findById(job.client.userId).select("email country");
+  const providerUser = await User.findById(job.provider.userId).select("country");
 
   job.amountPaid += amount;
   await job.save();
+
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.JOB);
 
   await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.JOB,
@@ -1022,6 +1061,8 @@ export const recordPayment = asyncHandler(async (req: Request, res: Response) =>
     currency: job.currency,
     provider: PAYMENT_PROVIDER_NAME.MANUAL,
     status: PAYMENT_STATUS.SUCCESS,
+    rail,
+    ...buildTransactionCountries(rail, client?.country, providerUser?.country),
     recordedBy: admin._id,
   });
 
@@ -1100,6 +1141,104 @@ export const requestRefund = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json(job);
 });
 
+// @desc    The provider approves a pending refund request — required
+//          before approveRefundRequest will finalize it (see that
+//          function's own bypassReason for the admin override path).
+// @route   PATCH /api/jobs/:id/refund-requests/:refundId/counterparty-approve
+// @access  Private (the job's provider, or admin/super_admin)
+export const approveRefundCounterparty = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const refund = job.refunds.id(req.params.refundId as string);
+
+  if (!refund) {
+    res.status(404);
+    throw new Error("Refund request not found");
+  }
+
+  const isAdmin = requester.systemRole === SYSTEM_ROLE.ADMIN || requester.systemRole === SYSTEM_ROLE.SUPER_ADMIN;
+
+  if (job.provider.userId.toString() !== requester.id && !isAdmin) {
+    res.status(403);
+    throw new Error("Only this job's provider can approve a refund request");
+  }
+
+  if (refund.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This refund request has already been ${refund.status}`);
+  }
+
+  if (refund.counterpartyApproval.status !== COUNTERPARTY_APPROVAL_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`You have already ${refund.counterpartyApproval.status} this refund request`);
+  }
+
+  refund.counterpartyApproval.status = COUNTERPARTY_APPROVAL_STATUS.APPROVED;
+  refund.counterpartyApproval.decidedBy = requester._id as mongoose.Types.ObjectId;
+  refund.counterpartyApproval.decidedAt = new Date();
+
+  await job.save();
+
+  res.status(200).json(job);
+});
+
+// @desc    The provider rejects a pending refund request — always with a
+//          reason. Doesn't decide the request itself; an admin still has
+//          the final say (declineRefundRequest, or approveRefundRequest
+//          with an explicit bypassReason if the law requires it anyway).
+// @route   PATCH /api/jobs/:id/refund-requests/:refundId/counterparty-reject
+// @access  Private (the job's provider, or admin/super_admin)
+export const rejectRefundCounterparty = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const refund = job.refunds.id(req.params.refundId as string);
+
+  if (!refund) {
+    res.status(404);
+    throw new Error("Refund request not found");
+  }
+
+  const isAdmin = requester.systemRole === SYSTEM_ROLE.ADMIN || requester.systemRole === SYSTEM_ROLE.SUPER_ADMIN;
+
+  if (job.provider.userId.toString() !== requester.id && !isAdmin) {
+    res.status(403);
+    throw new Error("Only this job's provider can reject a refund request");
+  }
+
+  if (refund.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This refund request has already been ${refund.status}`);
+  }
+
+  if (refund.counterpartyApproval.status !== COUNTERPARTY_APPROVAL_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`You have already ${refund.counterpartyApproval.status} this refund request`);
+  }
+
+  const { declineReason } = req.body;
+
+  refund.counterpartyApproval.status = COUNTERPARTY_APPROVAL_STATUS.REJECTED;
+  refund.counterpartyApproval.decidedBy = requester._id as mongoose.Types.ObjectId;
+  refund.counterpartyApproval.decidedAt = new Date();
+  refund.counterpartyApproval.declineReason = declineReason;
+
+  await job.save();
+
+  res.status(200).json(job);
+});
+
 // @desc    Every pending refund request across every job — the admin's
 //          working queue.
 // @route   GET /api/jobs/refund-requests
@@ -1161,6 +1300,24 @@ export const approveRefundRequest = asyncHandler(async (req: Request, res: Respo
   if (refund.status !== PAYMENT_REQUEST_STATUS.PENDING) {
     res.status(400);
     throw new Error(`This refund request has already been ${refund.status}`);
+  }
+
+  // The provider must sign off before this is finalized — unless an
+  // admin explicitly bypasses it (e.g. the law forces a decision). A
+  // bypass is logged honestly, never faked as the provider's own consent.
+  if (refund.counterpartyApproval.status !== COUNTERPARTY_APPROVAL_STATUS.APPROVED) {
+    const { bypassReason } = req.body;
+
+    if (!bypassReason) {
+      res.status(400);
+      throw new Error(
+        "This refund needs the provider's approval first — or an explicit bypassReason to override it",
+      );
+    }
+
+    refund.counterpartyApproval.bypassedBy = admin._id as mongoose.Types.ObjectId;
+    refund.counterpartyApproval.bypassedAt = new Date();
+    refund.counterpartyApproval.bypassReason = bypassReason;
   }
 
   // Recomputed fresh, not trusted from request time — another refund may
@@ -1308,6 +1465,104 @@ export const requestPayout = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json(job);
 });
 
+// @desc    The client approves a pending payout request — required
+//          before approvePayoutRequest will finalize it (see that
+//          function's own bypassReason for the admin override path).
+// @route   PATCH /api/jobs/:id/payout-requests/:payoutId/counterparty-approve
+// @access  Private (the job's client, or admin/super_admin)
+export const approvePayoutCounterparty = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const payout = job.payouts.id(req.params.payoutId as string);
+
+  if (!payout) {
+    res.status(404);
+    throw new Error("Payout request not found");
+  }
+
+  const isAdmin = requester.systemRole === SYSTEM_ROLE.ADMIN || requester.systemRole === SYSTEM_ROLE.SUPER_ADMIN;
+
+  if (job.client.userId.toString() !== requester.id && !isAdmin) {
+    res.status(403);
+    throw new Error("Only this job's client can approve a payout request");
+  }
+
+  if (payout.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This payout request has already been ${payout.status}`);
+  }
+
+  if (payout.counterpartyApproval.status !== COUNTERPARTY_APPROVAL_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`You have already ${payout.counterpartyApproval.status} this payout request`);
+  }
+
+  payout.counterpartyApproval.status = COUNTERPARTY_APPROVAL_STATUS.APPROVED;
+  payout.counterpartyApproval.decidedBy = requester._id as mongoose.Types.ObjectId;
+  payout.counterpartyApproval.decidedAt = new Date();
+
+  await job.save();
+
+  res.status(200).json(job);
+});
+
+// @desc    The client rejects a pending payout request — always with a
+//          reason. Doesn't decide the request itself; an admin still has
+//          the final say (declinePayoutRequest, or approvePayoutRequest
+//          with an explicit bypassReason if the law requires it anyway).
+// @route   PATCH /api/jobs/:id/payout-requests/:payoutId/counterparty-reject
+// @access  Private (the job's client, or admin/super_admin)
+export const rejectPayoutCounterparty = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    res.status(404);
+    throw new Error("Job not found");
+  }
+
+  const payout = job.payouts.id(req.params.payoutId as string);
+
+  if (!payout) {
+    res.status(404);
+    throw new Error("Payout request not found");
+  }
+
+  const isAdmin = requester.systemRole === SYSTEM_ROLE.ADMIN || requester.systemRole === SYSTEM_ROLE.SUPER_ADMIN;
+
+  if (job.client.userId.toString() !== requester.id && !isAdmin) {
+    res.status(403);
+    throw new Error("Only this job's client can reject a payout request");
+  }
+
+  if (payout.status !== PAYMENT_REQUEST_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`This payout request has already been ${payout.status}`);
+  }
+
+  if (payout.counterpartyApproval.status !== COUNTERPARTY_APPROVAL_STATUS.PENDING) {
+    res.status(400);
+    throw new Error(`You have already ${payout.counterpartyApproval.status} this payout request`);
+  }
+
+  const { declineReason } = req.body;
+
+  payout.counterpartyApproval.status = COUNTERPARTY_APPROVAL_STATUS.REJECTED;
+  payout.counterpartyApproval.decidedBy = requester._id as mongoose.Types.ObjectId;
+  payout.counterpartyApproval.decidedAt = new Date();
+  payout.counterpartyApproval.declineReason = declineReason;
+
+  await job.save();
+
+  res.status(200).json(job);
+});
+
 // @desc    Every pending payout request across every job — the admin's
 //          working queue.
 // @route   GET /api/jobs/payout-requests
@@ -1370,6 +1625,24 @@ export const approvePayoutRequest = asyncHandler(async (req: Request, res: Respo
   if (payout.status !== PAYMENT_REQUEST_STATUS.PENDING) {
     res.status(400);
     throw new Error(`This payout request has already been ${payout.status}`);
+  }
+
+  // The client must sign off before this is finalized — unless an admin
+  // explicitly bypasses it (e.g. the law forces a decision). A bypass is
+  // logged honestly, never faked as the client's own consent.
+  if (payout.counterpartyApproval.status !== COUNTERPARTY_APPROVAL_STATUS.APPROVED) {
+    const { bypassReason } = req.body;
+
+    if (!bypassReason) {
+      res.status(400);
+      throw new Error(
+        "This payout needs the client's approval first — or an explicit bypassReason to override it",
+      );
+    }
+
+    payout.counterpartyApproval.bypassedBy = admin._id as mongoose.Types.ObjectId;
+    payout.counterpartyApproval.bypassedAt = new Date();
+    payout.counterpartyApproval.bypassReason = bypassReason;
   }
 
   // Recomputed fresh, not trusted from request time or any caller-

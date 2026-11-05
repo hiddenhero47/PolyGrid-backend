@@ -122,12 +122,26 @@ export interface IUser extends Document {
   fullName: string;
   email: string;
   password: string;
+  // The user's own country — distinct from phoneNumber.country (a dialing
+  // code) and payoutAccount.country (a bank's country). Drives the
+  // supported-countries payment gate and Payment.transactionCountryFrom/To
+  // (see helpers/paymentGuardrails.ts) — required before this user can pay
+  // or be paid, but not required to simply have an account.
+  country?: string;
   phoneNumber?: IPhoneNumber;
   avatar?: IAvatar;
   authProviders: IAuthProvider[];
   verified: boolean;
   user2fa: IUser2fa;
   payoutAccount?: IPayoutAccount;
+  // Stripe Connect Express account — set once onboarding starts (see
+  // helpers/stripeConnect.ts/userController.ts's startConnectOnboarding).
+  // stripeConnectPayoutsEnabled mirrors Stripe's own
+  // Account.payouts_enabled, kept in sync by the dedicated Connect
+  // webhook (see routes/paymentRoutes.ts) — true once onboarding/KYC is
+  // actually complete, not just started.
+  stripeConnectedAccountId?: string;
+  stripeConnectPayoutsEnabled: boolean;
   systemRole: SystemRole;
   activeAccountType: AccountType;
   accountStatus: AccountStatus;
@@ -169,6 +183,15 @@ const userSchema = new Schema<IUser>(
     password: {
       type: String,
       required: [true, "Please add a password"],
+    },
+    country: {
+      type: String,
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: (value: string) => !value || isValidCountryCode(value),
+        message: (props: { value: string }) => `${props.value} is not a recognized ISO country code`,
+      },
     },
     phoneNumber: {
       number: {
@@ -234,6 +257,8 @@ const userSchema = new Schema<IUser>(
       required: false,
       _id: false,
     },
+    stripeConnectedAccountId: { type: String },
+    stripeConnectPayoutsEnabled: { type: Boolean, default: false },
     systemRole: {
       type: String,
       default: SYSTEM_ROLE.USER,

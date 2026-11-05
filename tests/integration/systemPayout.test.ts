@@ -5,7 +5,17 @@ jest.mock("../../src/helpers/emailSender", () => ({
   loadTemplates: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Same boundary, for the real Stripe Connect calls settlementMethod:
+// 'stripe' now makes — no real Transfer/Refund ever happens in CI.
+const mockCreateTransfer = jest.fn();
+const mockCreateRefund = jest.fn();
+jest.mock("../../src/helpers/stripeConnect", () => ({
+  createTransfer: mockCreateTransfer,
+  createRefund: mockCreateRefund,
+}));
+
 import request from "supertest";
+import mongoose from "mongoose";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import { createUser, createAdmin, createCustomerCare, createActiveJob, generateToken } from "../setup/fixtures";
@@ -13,8 +23,10 @@ import {
   SystemPayout,
   SYSTEM_PAYOUT_REQUEST_TYPE,
   SYSTEM_PAYOUT_STATUS,
+  SETTLEMENT_METHOD,
 } from "../../src/models/systemPayoutModel";
-import { PAYMENT_TARGET_TYPE } from "../../src/models/paymentModel";
+import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../../src/models/paymentModel";
+import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 
 const app = createApp();
@@ -54,6 +66,7 @@ const createSystemPayoutRecord = async (overrides: Record<string, unknown> = {})
     user: recipient._id,
     amount: 342,
     currency: "USD",
+    settlementMethod: SETTLEMENT_METHOD.MANUAL,
     payoutAccount: TEST_PAYOUT_ACCOUNT,
     createdBy: createdBy._id,
     ...overrides,
@@ -190,6 +203,214 @@ describe("PATCH /api/system-payouts/:id/paid", () => {
       .send({});
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/system-payouts/:id/paid — settlementMethod: 'stripe'", () => {
+  it("calls stripe.transfers.create for a payout, and records the real transfer id", async () => {
+    const admin = await createAdmin();
+    const recipient = await createUser({ stripeConnectedAccountId: "acct_123", stripeConnectPayoutsEnabled: true });
+    const clientUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: recipient });
+    mockCreateTransfer.mockResolvedValue("tr_abc");
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: recipient._id,
+      amount: 200,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.STRIPE,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.transferReference).toBe("tr_abc");
+    expect(mockCreateTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 200, currency: "USD", destinationAccountId: "acct_123" }),
+    );
+  });
+
+  it("leaves the payout PENDING (502) when the Stripe transfer fails", async () => {
+    const admin = await createAdmin();
+    const recipient = await createUser({ stripeConnectedAccountId: "acct_123", stripeConnectPayoutsEnabled: true });
+    const clientUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: recipient });
+    mockCreateTransfer.mockRejectedValue(new Error("insufficient available balance"));
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: recipient._id,
+      amount: 200,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.STRIPE,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(502);
+    const stillPending = await SystemPayout.findById(payout.id);
+    expect(stillPending?.status).toBe("pending");
+  });
+
+  it("refunds against the job's single successful Stripe payment", async () => {
+    const admin = await createAdmin();
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: providerUser });
+    mockCreateRefund.mockResolvedValue("re_xyz");
+
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: clientUser._id,
+      userEmail: clientUser.email,
+      amount: 300,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      providerPaymentId: "pi_only",
+      rail: PAYMENT_RAIL.MARKETPLACE,
+    });
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.REFUND,
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: clientUser._id,
+      amount: 200,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.STRIPE,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.transferReference).toBe("re_xyz");
+    expect(mockCreateRefund).toHaveBeenCalledTimes(1);
+    expect(mockCreateRefund).toHaveBeenCalledWith({ paymentIntentId: "pi_only", amount: 200 });
+  });
+
+  it("walks back across multiple successful Stripe payments when one alone doesn't cover the refund", async () => {
+    const admin = await createAdmin();
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: providerUser });
+    mockCreateRefund.mockResolvedValueOnce("re_recent").mockResolvedValueOnce("re_older");
+
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: clientUser._id,
+      userEmail: clientUser.email,
+      amount: 100,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      providerPaymentId: "pi_older",
+      rail: PAYMENT_RAIL.MARKETPLACE,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: clientUser._id,
+      userEmail: clientUser.email,
+      amount: 100,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      providerPaymentId: "pi_recent",
+      rail: PAYMENT_RAIL.MARKETPLACE,
+    });
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.REFUND,
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: clientUser._id,
+      amount: 150,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.STRIPE,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    // Most recent first: 100 off pi_recent, then the remaining 50 off pi_older.
+    expect(mockCreateRefund).toHaveBeenNthCalledWith(1, { paymentIntentId: "pi_recent", amount: 100 });
+    expect(mockCreateRefund).toHaveBeenNthCalledWith(2, { paymentIntentId: "pi_older", amount: 50 });
+    expect(res.body.transferReference).toBe("re_recent, re_older");
+  });
+
+  it("leaves the refund PENDING (502) when there isn't enough successful Stripe payment to cover it", async () => {
+    const admin = await createAdmin();
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: providerUser });
+
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: clientUser._id,
+      userEmail: clientUser.email,
+      amount: 50,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      providerPaymentId: "pi_small",
+      rail: PAYMENT_RAIL.MARKETPLACE,
+    });
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.REFUND,
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: clientUser._id,
+      amount: 200,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.STRIPE,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(502);
+    const stillPending = await SystemPayout.findById(payout.id);
+    expect(stillPending?.status).toBe("pending");
   });
 });
 

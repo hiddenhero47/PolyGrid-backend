@@ -9,6 +9,7 @@ import {
   updateUserProfile,
   toggleAccountType,
   updatePayoutAccount,
+  startConnectOnboarding,
   setupTwoFactor,
   verifyTwoFactor,
   toggleTwoFactor,
@@ -68,6 +69,7 @@ router.put(
   validateBody(updatePayoutAccountSchema),
   updatePayoutAccount,
 );
+router.post("/me/connect/onboard", protect, startConnectOnboarding);
 
 router.post(
   "/2fa/setup",

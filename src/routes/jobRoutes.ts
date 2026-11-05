@@ -22,10 +22,14 @@ import {
   getPendingRefundRequests,
   approveRefundRequest,
   declineRefundRequest,
+  approveRefundCounterparty,
+  rejectRefundCounterparty,
   requestPayout,
   getPendingPayoutRequests,
   approvePayoutRequest,
   declinePayoutRequest,
+  approvePayoutCounterparty,
+  rejectPayoutCounterparty,
 } from "../controllers/jobController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
@@ -41,6 +45,8 @@ import {
   declineRefundRequestSchema,
   requestPayoutSchema,
   declinePayoutRequestSchema,
+  rejectCounterpartyApprovalSchema,
+  approveWithBypassSchema,
 } from "../validators/job/jobValidator";
 
 const router = express.Router();
@@ -88,8 +94,20 @@ router.get("/:id/payments", secureRole([...REVIEW_ROLES]), getJobPayments);
 
 router.post("/:id/refund-requests", protect, validateBody(requestRefundSchema), requestRefund);
 router.patch(
+  "/:id/refund-requests/:refundId/counterparty-approve",
+  protect,
+  approveRefundCounterparty,
+);
+router.patch(
+  "/:id/refund-requests/:refundId/counterparty-reject",
+  protect,
+  validateBody(rejectCounterpartyApprovalSchema),
+  rejectRefundCounterparty,
+);
+router.patch(
   "/:id/refund-requests/:refundId/approve",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(approveWithBypassSchema),
   approveRefundRequest,
 );
 router.patch(
@@ -101,8 +119,20 @@ router.patch(
 
 router.post("/:id/payout-requests", protect, validateBody(requestPayoutSchema), requestPayout);
 router.patch(
+  "/:id/payout-requests/:payoutId/counterparty-approve",
+  protect,
+  approvePayoutCounterparty,
+);
+router.patch(
+  "/:id/payout-requests/:payoutId/counterparty-reject",
+  protect,
+  validateBody(rejectCounterpartyApprovalSchema),
+  rejectPayoutCounterparty,
+);
+router.patch(
   "/:id/payout-requests/:payoutId/approve",
   secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]),
+  validateBody(approveWithBypassSchema),
   approvePayoutRequest,
 );
 router.patch(

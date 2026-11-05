@@ -1190,6 +1190,11 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
       .send({ reason: "client cancelled" });
     const refundId = requested.body.refunds[0]._id;
 
+    // The provider must sign off before an admin can finalize this.
+    await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+
     const approved = await request(app)
       .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
       .set("Authorization", `Bearer ${adminToken}`);
@@ -1232,6 +1237,10 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
       .send({ reason: "found an extra duplicate payment" });
     const secondRefundId = secondRequest.body.refunds[1]._id;
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${secondRefundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
 
     const secondApproved = await request(app)
       .patch(`/api/jobs/${job._id}/refund-requests/${secondRefundId}/approve`)
@@ -1291,6 +1300,148 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
         }),
       }),
     );
+  });
+});
+
+describe("refund counterparty approval (counterparty-approve/-reject, and approveRefundRequest's bypassReason)", () => {
+  it("blocks the admin from finalizing a refund with no counterparty approval and no bypassReason", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/provider's approval/);
+  });
+
+  it("blocks the client from counterparty-approving their own refund request — only the provider can", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(await createAdmin())}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    expect(res.status).toBe(403);
+  });
+
+  it("lets the provider reject a refund request with a reason, and a second attempt to decide it again is rejected", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const rejected = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-reject`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`)
+      .send({ declineReason: "I disagree with this refund" });
+
+    expect(rejected.status).toBe(200);
+    expect(rejected.body.refunds[0].counterpartyApproval.status).toBe("rejected");
+    expect(rejected.body.refunds[0].counterpartyApproval.declineReason).toBe("I disagree with this refund");
+
+    const again = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    expect(again.status).toBe(400);
+  });
+
+  it("lets an admin finalize a refund the provider rejected, via an explicit bypassReason — logged honestly, not faked as consent", async () => {
+    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-reject`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`)
+      .send({ declineReason: "I disagree" });
+
+    const approved = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ bypassReason: "Legal order requires this refund regardless" });
+
+    expect(approved.status).toBe(200);
+    expect(approved.body.status).toBe("closed");
+    expect(approved.body.refunds[0].counterpartyApproval.status).toBe("rejected");
+    expect(approved.body.refunds[0].counterpartyApproval.bypassedBy).toBe(admin.id);
+    expect(approved.body.refunds[0].counterpartyApproval.bypassReason).toBe(
+      "Legal order requires this refund regardless",
+    );
+  });
+
+  it("lets an admin counterparty-approve on the provider's behalf (the existing assertParty-style bypass)", async () => {
+    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.refunds[0].counterpartyApproval.status).toBe("approved");
+    expect(res.body.refunds[0].counterpartyApproval.decidedBy).toBe(admin.id);
   });
 });
 
@@ -1387,6 +1538,9 @@ describe("POST /api/jobs/:id/payout-requests", () => {
       .set("Authorization", `Bearer ${generateToken(clientUser)}`)
       .send({ reason: "cancelled by agreement" });
     await request(app)
+      .patch(`/api/jobs/${closedJob._id}/refund-requests/${refundReq.body.refunds[0]._id}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+    await request(app)
       .patch(`/api/jobs/${closedJob._id}/refund-requests/${refundReq.body.refunds[0]._id}/approve`)
       .set("Authorization", `Bearer ${generateToken(admin)}`);
 
@@ -1430,6 +1584,11 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
     expect(queue.body.data).toHaveLength(1);
     const firstPayoutId = queue.body.data[0].payout._id;
 
+    // The client must sign off before an admin can finalize this.
+    await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${firstPayoutId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${clientToken}`);
+
     const firstApproved = await request(app)
       .patch(`/api/jobs/${job._id}/payout-requests/${firstPayoutId}/approve`)
       .set("Authorization", `Bearer ${adminToken}`);
@@ -1468,6 +1627,10 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
       .send({ note: "please wire to my bank" });
     expect(secondRequest.status).toBe(201);
     const secondPayoutId = secondRequest.body.payouts[1]._id;
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${secondPayoutId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${clientToken}`);
 
     const secondApproved = await request(app)
       .patch(`/api/jobs/${job._id}/payout-requests/${secondPayoutId}/approve`)
@@ -1527,6 +1690,113 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
           declineReason: "wrong bank details on file",
         }),
       }),
+    );
+  });
+});
+
+describe("payout counterparty approval (counterparty-approve/-reject, and approvePayoutRequest's bypassReason)", () => {
+  it("blocks the admin from finalizing a payout with no counterparty approval and no bypassReason", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+    const providerToken = generateToken(providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 1000 });
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/done`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/verify`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    const payoutId = requested.body.payouts[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${payoutId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/client's approval/);
+  });
+
+  it("blocks the provider from counterparty-approving their own payout request — only the client can", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const providerToken = generateToken(providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 1000 });
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/done`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/verify`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`);
+
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    const payoutId = requested.body.payouts[0]._id;
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${payoutId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${providerToken}`);
+
+    expect(res.status).toBe(403);
+  });
+
+  it("lets an admin finalize a payout the client rejected, via an explicit bypassReason", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const admin = await createAdmin();
+    const job = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+    const providerToken = generateToken(providerUser);
+    const clientToken = generateToken(clientUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 1000 });
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/done`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    await request(app)
+      .patch(`/api/jobs/${job._id}/stages/${job.stages[0]._id}/verify`)
+      .set("Authorization", `Bearer ${clientToken}`);
+
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/payout-requests`)
+      .set("Authorization", `Bearer ${providerToken}`);
+    const payoutId = requested.body.payouts[0]._id;
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${payoutId}/counterparty-reject`)
+      .set("Authorization", `Bearer ${clientToken}`)
+      .send({ declineReason: "work not actually done" });
+
+    const approved = await request(app)
+      .patch(`/api/jobs/${job._id}/payout-requests/${payoutId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ bypassReason: "Verified independently — paying out anyway" });
+
+    expect(approved.status).toBe(200);
+    expect(approved.body.payouts[0].counterpartyApproval.status).toBe("rejected");
+    expect(approved.body.payouts[0].counterpartyApproval.bypassedBy).toBe(admin.id);
+    expect(approved.body.payouts[0].counterpartyApproval.bypassReason).toBe(
+      "Verified independently — paying out anyway",
     );
   });
 });

@@ -1,7 +1,22 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
-import { PAYMENT_TARGET_TYPE, PaymentTargetType } from "./paymentModel";
 import { IPayoutAccount } from "./userModel";
 import { currencyField } from "../helpers/currencyReference";
+
+// Deliberately its own enum, not a reuse of paymentModel's
+// PAYMENT_TARGET_TYPE — a Payment (money IN) is only ever for a Job,
+// Subscription, or DigitalPurchase, but a SystemPayout (money OWED) can
+// also target a DigitalCreatorProfile directly (one payout request
+// bundles many purchases at once — see
+// digitalCreatorProfileController.ts's requestDigitalCreatorPayout).
+// String values match real registered Mongoose model names (same
+// convention PROFILE_TYPE already uses) so `.populate('targetId')` keeps
+// working generically via refPath.
+export const SYSTEM_PAYOUT_TARGET_TYPE = {
+  JOB: "Job",
+  DIGITAL_CREATOR_PROFILE: "DigitalCreatorProfile",
+} as const;
+export type SystemPayoutTargetType =
+  (typeof SYSTEM_PAYOUT_TARGET_TYPE)[keyof typeof SYSTEM_PAYOUT_TARGET_TYPE];
 
 // The ledger of money PolyGrid actually owes someone (a provider's
 // approved payout, or a client's approved refund) once an admin has
@@ -10,10 +25,13 @@ import { currencyField } from "../helpers/currencyReference";
 // from Payment (money moving *into* PolyGrid) and from Job's own
 // refunds/payouts sub-documents (the *request*, still just an ask until
 // approved) — this is the record of what's now actually owed and where
-// it should go. No automated payout rail exists yet (see REQUEST_TYPE's
-// own comment) — for now this is purely a record admin/finance ops reads
-// to go move the money by hand; `isLocked` exists so whoever's processing
-// a batch by hand can mark one as claimed without a DB transaction.
+// it should go. `settlementMethod` (below) decides what actually happens
+// when an admin clicks "mark paid": a real Stripe Transfer/Refund call
+// when the recipient has a usable Connect account or there's a real
+// charge to refund, or still the original fully-manual "admin moved the
+// money by hand" flow otherwise — `isLocked` exists so whoever's
+// processing a batch by hand can mark one as claimed without a DB
+// transaction.
 export const SYSTEM_PAYOUT_REQUEST_TYPE = {
   REFUND: "refund",
   PAYOUT: "payout",
@@ -29,18 +47,34 @@ export const SYSTEM_PAYOUT_STATUS = {
 } as const;
 export type SystemPayoutStatus = (typeof SYSTEM_PAYOUT_STATUS)[keyof typeof SYSTEM_PAYOUT_STATUS];
 
+// Snapshotted at creation (see jobController.ts's createSystemPayout) —
+// "stripe" when a real gateway call can settle this (the recipient has a
+// usable Connect account for a payout, or the job has a real Stripe
+// charge to refund for a refund); "manual" otherwise, the exact unchanged
+// behavior from before Connect existed. systemPayoutController.ts's
+// markSystemPayoutPaid is where this actually matters — it's the one
+// place that now calls Stripe for real instead of just recording a flag.
+export const SETTLEMENT_METHOD = {
+  STRIPE: "stripe",
+  MANUAL: "manual",
+} as const;
+export type SettlementMethod = (typeof SETTLEMENT_METHOD)[keyof typeof SETTLEMENT_METHOD];
+
 export interface ISystemPayout extends Document {
   requestType: SystemPayoutRequestType;
-  // Polymorphic the same way Payment.targetType/targetId is — "Job" is
-  // the only real value today (a store/siteforce/tenders/engineering
-  // payout or refund is always a Job underneath), kept open rather than
-  // hardcoded for whatever a future non-Job-backed payout target turns
-  // out to be.
-  targetType: PaymentTargetType;
+  // Polymorphic — "Job" (a store/siteforce/tenders/engineering payout or
+  // refund is always a Job underneath) or "DigitalCreatorProfile" (a
+  // digital creator's bundled payout request, no originating Job at all).
+  targetType: SystemPayoutTargetType;
   targetId: Types.ObjectId;
   // The specific Job.refunds[]/Job.payouts[] sub-document this came from
   // — traceability back to the original request/approval, not a second
-  // source of truth for the amount (that's snapshotted below).
+  // source of truth for the amount (that's snapshotted below). Not
+  // meaningful for a DigitalCreatorProfile target (there's no single
+  // originating sub-document to point at — the SystemPayout itself IS
+  // the record); set to the SystemPayout's own future _id isn't possible
+  // at creation time, so requestDigitalCreatorPayout uses a fresh
+  // ObjectId here purely to satisfy the schema's uniqueness constraint.
   requestId: Types.ObjectId;
   // Who actually receives the money — the job's client for a refund, its
   // provider for a payout.
@@ -48,6 +82,7 @@ export interface ISystemPayout extends Document {
   amount: number;
   currency: string;
   status: SystemPayoutStatus;
+  settlementMethod: SettlementMethod;
   // Snapshotted off User.payoutAccount at approval time — never a live
   // reference, so a recipient changing their account afterward can't
   // silently redirect money already approved for a specific destination.
@@ -96,7 +131,7 @@ const systemPayoutSchema = new Schema<ISystemPayout>(
     },
     targetType: {
       type: String,
-      enum: Object.values(PAYMENT_TARGET_TYPE),
+      enum: Object.values(SYSTEM_PAYOUT_TARGET_TYPE),
       required: true,
     },
     targetId: { type: Schema.Types.ObjectId, required: true, refPath: "targetType" },
@@ -108,6 +143,11 @@ const systemPayoutSchema = new Schema<ISystemPayout>(
       type: String,
       enum: Object.values(SYSTEM_PAYOUT_STATUS),
       default: SYSTEM_PAYOUT_STATUS.PENDING,
+    },
+    settlementMethod: {
+      type: String,
+      enum: Object.values(SETTLEMENT_METHOD),
+      required: true,
     },
     payoutAccount: { type: payoutAccountSnapshotSchema, required: true },
     isLocked: { type: Boolean, default: false },

@@ -105,3 +105,24 @@ export const declinePayoutRequestSchema = yup
     declineReason: yup.string().trim().required("A decline reason is required"),
   })
   .noUnknown(true);
+
+// Shared by refund and payout counterparty-reject — same shape as
+// decline*RequestSchema above, just for the OTHER party's own rejection
+// rather than an admin's.
+export const rejectCounterpartyApprovalSchema = yup
+  .object({
+    declineReason: yup.string().trim().required("A decline reason is required"),
+  })
+  .noUnknown(true);
+
+// Shared by approveRefundRequest/approvePayoutRequest — optional, and
+// only actually required (enforced in the controller, not here) when the
+// counterparty hasn't approved yet. The whole body is optional —
+// `.default({})` means validateBody always hands the controller a real
+// object either way, never undefined.
+export const approveWithBypassSchema = yup
+  .object({
+    bypassReason: yup.string().trim().max(1000).notRequired(),
+  })
+  .noUnknown(true)
+  .default({});

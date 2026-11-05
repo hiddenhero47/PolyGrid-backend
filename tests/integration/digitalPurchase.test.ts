@@ -19,7 +19,7 @@ import {
 } from "../setup/fixtures";
 import { DigitalProduct } from "../../src/models/digitalProductModel";
 import { DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
-import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../../src/models/paymentModel";
+import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../../src/models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 
 const app = createApp();
@@ -83,6 +83,7 @@ describe("GET /api/digital-purchases/mine", () => {
       provider: PAYMENT_PROVIDER_NAME.STRIPE,
       status: PAYMENT_STATUS.FAILED,
       providerPaymentId: "pi_dead",
+      rail: PAYMENT_RAIL.MARKETPLACE,
     });
     // A later, freshly-resumed payment against the same purchase (see
     // paymentController.resumeDigitalPurchaseIntent) — the row should
@@ -98,6 +99,7 @@ describe("GET /api/digital-purchases/mine", () => {
       provider: PAYMENT_PROVIDER_NAME.STRIPE,
       status: PAYMENT_STATUS.PENDING,
       providerPaymentId: "pi_fresh",
+      rail: PAYMENT_RAIL.MARKETPLACE,
     });
     expect(deadPayment.id).not.toBe(freshPayment.id);
 

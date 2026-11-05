@@ -6,6 +6,15 @@ jest.mock("../../src/helpers/emailSender", () => ({
   loadTemplates: jest.fn().mockResolvedValue(undefined),
 }));
 
+// No real Stripe Connect calls in CI — same boundary. Only
+// updateExternalAccount is exercised from this file (updatePayoutAccount);
+// createConnectedAccount/createOnboardingLink aren't called from any route
+// this file tests.
+const mockUpdateExternalAccount = jest.fn().mockResolvedValue(undefined);
+jest.mock("../../src/helpers/stripeConnect", () => ({
+  updateExternalAccount: mockUpdateExternalAccount,
+}));
+
 import request from "supertest";
 import { authenticator } from "otplib";
 import createApp from "../../src/app";
@@ -19,7 +28,7 @@ import {
   createConsultancyProfile,
   createStoreProfile,
 } from "../setup/fixtures";
-import { SYSTEM_ROLE, ACCOUNT_TYPE } from "../../src/models/userModel";
+import { SYSTEM_ROLE, ACCOUNT_TYPE, User } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 import bcrypt from "bcryptjs";
 
@@ -258,6 +267,29 @@ describe("PUT /api/users/profile", () => {
       number: "+2348012345678",
       country: "NG",
     });
+  });
+
+  it("sets the user's own country, used by the payment guardrails (helpers/paymentGuardrails.ts)", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ country: "ng" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.country).toBe("NG");
+  });
+
+  it("rejects a country that isn't a real ISO code", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ country: "ZZ" });
+
+    expect(res.status).toBe(400);
   });
 
   it("uploads a public avatar", async () => {
@@ -578,6 +610,54 @@ describe("PUT /api/users/payout-account", () => {
       .send({ ...payoutAccountPayload, otpToken: authenticator.generate(secret) });
 
     expect(res.status).toBe(200);
+  });
+
+  it("never touches Stripe when the user hasn't onboarded to Connect", async () => {
+    const user = await createUser();
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, currentPassword: "password123" });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdateExternalAccount).not.toHaveBeenCalled();
+  });
+
+  it("pushes the new bank account to Stripe once a Connect account already exists", async () => {
+    const user = await createUser({ stripeConnectedAccountId: "acct_123" });
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, currentPassword: "password123" });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdateExternalAccount).toHaveBeenCalledWith(
+      "acct_123",
+      expect.objectContaining({ accountNumber: "0123456789", bankName: "Test Bank" }),
+    );
+  });
+
+  it("never saves locally when Stripe rejects the new bank account — no drift between PolyGrid and Stripe", async () => {
+    const user = await createUser({
+      stripeConnectedAccountId: "acct_123",
+      payoutAccount: { ...payoutAccountPayload, accountNumber: "9999999999" },
+    });
+    const token = generateToken(user);
+    mockUpdateExternalAccount.mockRejectedValueOnce(new Error("invalid routing number"));
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, currentPassword: "password123" });
+
+    expect(res.status).toBe(500);
+
+    const stillOld = await User.findById(user.id);
+    expect(stillOld?.payoutAccount?.accountNumber).toBe("9999999999");
   });
 });
 

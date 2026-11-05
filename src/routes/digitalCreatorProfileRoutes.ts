@@ -5,6 +5,7 @@ import {
   updateMyDigitalCreatorProfile,
   uploadDigitalCreatorAvatar,
   getDigitalCreatorProfile,
+  requestDigitalCreatorPayout,
 } from "../controllers/digitalCreatorProfileController";
 import {
   createDigitalProduct,
@@ -32,6 +33,7 @@ router.post("/", protect, validateBody(createDigitalCreatorProfileSchema), creat
 router.get("/me", protect, getMyDigitalCreatorProfile);
 router.patch("/me", protect, validateBody(updateDigitalCreatorProfileSchema), updateMyDigitalCreatorProfile);
 router.post("/me/avatar", protect, uploadDigitalCreatorAvatar);
+router.post("/me/request-payout", protect, requestDigitalCreatorPayout);
 
 router.get("/me/products", protect, getMyDigitalProducts);
 router.post("/me/products", protect, validateBody(createDigitalProductSchema), createDigitalProduct);

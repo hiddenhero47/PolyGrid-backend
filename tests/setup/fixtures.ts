@@ -503,6 +503,7 @@ export const createDigitalPurchase = async ({
     status,
     fileManifest: manifest,
     files: status === DIGITAL_PURCHASE_STATUS.SUCCESS ? manifest : [],
+    platformFeePercent: 5,
     ...overrides,
   });
 };

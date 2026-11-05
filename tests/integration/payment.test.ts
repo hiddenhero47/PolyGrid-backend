@@ -20,18 +20,18 @@ import Stripe from "stripe";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
-  createUser,
+  createUser as createUserFixture,
   createAdmin,
   createActiveJob,
   createPlan,
   createSubscription,
-  createUserWithActiveSubscription,
+  createUserWithActiveSubscription as createUserWithActiveSubscriptionFixture,
   createDigitalCreatorProfile,
   createDigitalProduct,
   createDigitalPurchase,
   generateToken,
 } from "../setup/fixtures";
-import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../../src/models/paymentModel";
+import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../../src/models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { Job } from "../../src/models/jobModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../../src/models/subscriptionModel";
@@ -39,6 +39,19 @@ import { User } from "../../src/models/userModel";
 import { PLAN_TIER } from "../../src/models/planModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
 import { sweepPendingStripePayments } from "../../src/helpers/paymentReconciliation";
+import { SystemSettings } from "../../src/models/systemSettingsModel";
+
+// Every buyer in this file needs a supported country for the new payment
+// guardrails (helpers/paymentGuardrails.ts) to let a payment-intent
+// through at all — shadowing the shared fixtures here (not editing
+// fixtures.ts itself) keeps that requirement local to payment tests
+// rather than changing createUser's default for the other ~40 test files
+// that never touch a payment-creating endpoint.
+const createUser = (overrides: Record<string, unknown> = {}) =>
+  createUserFixture({ country: "NG", ...overrides });
+
+const createUserWithActiveSubscription = (overrides: Record<string, unknown> = {}) =>
+  createUserWithActiveSubscriptionFixture({ country: "NG", ...overrides });
 
 const app = createApp();
 
@@ -64,6 +77,19 @@ beforeAll(async () => {
   await connectTestDB();
 });
 
+// clearTestDB wipes SystemSettings along with everything else between
+// tests (see tests/setup/db.ts), and its own defaults are deliberately
+// restrictive (nothing supported, both caps 0) — every test here needs a
+// permissive baseline instead, same as a real admin would configure once
+// before accepting real payments.
+beforeEach(async () => {
+  await SystemSettings.create({
+    maxOutstandingExposure: 1_000_000,
+    maxTransactionAmount: 1_000_000,
+    supportedCountries: ["NG"],
+  });
+});
+
 afterEach(async () => {
   await clearTestDB();
 });
@@ -80,6 +106,7 @@ const createPayment = (overrides: Record<string, unknown>) =>
     currency: "USD",
     provider: PAYMENT_PROVIDER_NAME.MANUAL,
     status: PAYMENT_STATUS.SUCCESS,
+    rail: PAYMENT_RAIL.MARKETPLACE,
     ...overrides,
   });
 
@@ -492,6 +519,107 @@ describe("POST /api/payments/intent — validation (no Stripe network calls)", (
       expect(payment?.status).toBe("success");
       expect(payment?.provider).toBe("manual");
     });
+  });
+});
+
+describe("POST /api/payments/intent — payment guardrails (helpers/paymentGuardrails.ts)", () => {
+  it("blocks a buyer with no country set", async () => {
+    const user = await createUserFixture(); // no country override — the shared default
+    const job = await createActiveJob({ client: user, provider: await createUser() });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 100 });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a buyer whose country isn't in the supported list", async () => {
+    const user = await createUser({ country: "FR" }); // beforeEach only seeds "NG"
+    const job = await createActiveJob({ client: user, provider: await createUser() });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 100 });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks an amount over the global max-transaction cap", async () => {
+    await SystemSettings.updateOne({}, { maxTransactionAmount: 50 });
+    const user = await createUser();
+    const job = await createActiveJob({ client: user, provider: await createUser() });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 100 });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("blocks a Job funding once it would push outstanding exposure over the cap, but a Subscription (no holding period) is unaffected", async () => {
+    await SystemSettings.updateOne({}, { maxOutstandingExposure: 50 });
+    const user = await createUser();
+    const job = await createActiveJob({ client: user, provider: await createUser() });
+
+    const jobRes = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 100 });
+    expect(jobRes.status).toBe(400);
+
+    const plan = await createPlan({ price: 1000, planTier: PLAN_TIER.PRO });
+    const subRes = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ targetType: "Subscription", planTier: plan.planTier });
+    expect(subRes.status).toBe(201);
+  });
+
+  it("lets a Job funding through once below every cap, and tags the Payment's rail/transaction countries", async () => {
+    const client = await createUser({ country: "NG" });
+    const provider = await createUser({ country: "FR" }); // not itself gated — see paymentGuardrails.ts
+    const job = await createActiveJob({ client, provider });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(client)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 100 });
+
+    expect(res.status).toBe(201);
+    const payment = await Payment.findById(res.body.paymentId);
+    expect(payment?.rail).toBe("marketplace");
+    expect(payment?.transactionCountryFrom).toBe("NG");
+    expect(payment?.transactionCountryTo).toBe("FR");
+  });
+
+  it("counts an unpaid digital purchase's creator share toward the outstanding exposure cap too", async () => {
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 100 });
+    const existingBuyer = await createUser();
+    // 100 at a 5% platform fee (fixtures.ts default) = 95 of exposure already sitting unpaid.
+    await createDigitalPurchase({ product, buyer: existingBuyer, creator: profile });
+
+    await SystemSettings.updateOne({}, { maxOutstandingExposure: 100 });
+
+    const client = await createUser();
+    const job = await createActiveJob({ client, provider: await createUser() });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(client)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 10 });
+
+    // 95 (unpaid digital purchase) + 10 (this job funding) > 100.
+    expect(res.status).toBe(400);
   });
 });
 

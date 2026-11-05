@@ -1,5 +1,13 @@
 import { Country, State, City, ICountry, IState, ICity } from "country-state-city";
 
+// PolyGrid's own country — used as `Payment.transactionCountryTo` for any
+// platform-rail payment (subscriptions; the platform's own cut of a
+// marketplace payment), since that money's destination is PolyGrid itself,
+// not a buyer or provider. Matches deploymentSetup.ts's existing Nigeria
+// placeholder for verification templates — set this to PolyGrid's actual
+// country of incorporation, don't leave it as a guess.
+export const SYSTEM_COUNTRY = "NG";
+
 // A single source of truth for "is this a real country/state" — used both
 // to validate input (every `country`/`state` field across the app was
 // previously just an uppercased free string with no check against reality)

@@ -6,6 +6,7 @@ import { Plan } from "../models/planModel";
 import { Subscription } from "../models/subscriptionModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
+import { resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
 import {
   syncProfilesSubscription,
   supersedeActiveSubscriptions,
@@ -67,6 +68,8 @@ export const grantSubscription = asyncHandler(async (req: Request, res: Response
   await supersedeActiveSubscriptions(user._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
   await syncProfilesSubscription(user._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
 
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.SUBSCRIPTION);
+
   await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
     targetId: subscription._id,
@@ -76,6 +79,8 @@ export const grantSubscription = asyncHandler(async (req: Request, res: Response
     currency: plan.currency,
     provider: PAYMENT_PROVIDER_NAME.MANUAL,
     status: PAYMENT_STATUS.SUCCESS,
+    rail,
+    ...buildTransactionCountries(rail, user.country),
     recordedBy: admin._id,
   });
 

@@ -15,9 +15,14 @@ import {
 } from "../setup/fixtures";
 import { PROFILE_TYPE } from "../../src/constants/profileTypes";
 import { Job, JOB_STATUS, PAYMENT_REQUEST_STATUS } from "../../src/models/jobModel";
-import { Payment, PAYMENT_STATUS, PAYMENT_TARGET_TYPE, PaymentStatus } from "../../src/models/paymentModel";
+import { Payment, PAYMENT_STATUS, PAYMENT_TARGET_TYPE, PAYMENT_RAIL, PaymentStatus } from "../../src/models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
-import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE, SYSTEM_PAYOUT_STATUS } from "../../src/models/systemPayoutModel";
+import {
+  SystemPayout,
+  SYSTEM_PAYOUT_REQUEST_TYPE,
+  SYSTEM_PAYOUT_STATUS,
+  SETTLEMENT_METHOD,
+} from "../../src/models/systemPayoutModel";
 import { MessageReport } from "../../src/models/messageReportModel";
 import { Verification, VERIFICATION_STATUS } from "../../src/models/verificationModel";
 
@@ -160,6 +165,7 @@ describe("GET /api/stats/overview", () => {
       user: recipient._id,
       amount: 75,
       currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.MANUAL,
       payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
       createdBy: recipient._id,
       status: SYSTEM_PAYOUT_STATUS.PENDING,
@@ -173,6 +179,7 @@ describe("GET /api/stats/overview", () => {
       user: recipient._id,
       amount: 999,
       currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.MANUAL,
       payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
       createdBy: recipient._id,
       status: SYSTEM_PAYOUT_STATUS.PAID,
@@ -188,6 +195,7 @@ describe("GET /api/stats/overview", () => {
         currency: "USD",
         provider: PAYMENT_PROVIDER_NAME.STRIPE,
         status,
+        rail: targetType === PAYMENT_TARGET_TYPE.SUBSCRIPTION ? PAYMENT_RAIL.PLATFORM : PAYMENT_RAIL.MARKETPLACE,
       });
     await makePayment(PAYMENT_TARGET_TYPE.JOB, 1000);
     await makePayment(PAYMENT_TARGET_TYPE.SUBSCRIPTION, 50);
@@ -261,6 +269,7 @@ describe("GET /api/stats/overview", () => {
       user: provider._id,
       amount: 50,
       currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.MANUAL,
       payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
       createdBy: client._id,
       status: SYSTEM_PAYOUT_STATUS.PENDING,
@@ -321,6 +330,7 @@ describe("GET /api/stats/overview", () => {
       currency: "USD",
       provider: PAYMENT_PROVIDER_NAME.STRIPE,
       status: PAYMENT_STATUS.SUCCESS,
+      rail: PAYMENT_RAIL.MARKETPLACE,
     });
 
     const admin = await createAdmin();

@@ -11,6 +11,7 @@ import { DigitalProduct } from "../models/digitalProductModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { DigitalPurchase, IDigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
+import { getPlatformFeePercent } from "./jobController";
 import {
   syncProfilesSubscription,
   supersedeActiveSubscriptions,
@@ -19,6 +20,8 @@ import {
 } from "../helpers/profileSubscriptionSync";
 import { reconcilePaymentIntent } from "../helpers/paymentReconciliation";
 import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
+import { assertPaymentAllowed, resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
+import { constructConnectWebhookEvent } from "../helpers/stripeConnect";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -70,6 +73,11 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     throw new Error("This job is not active");
   }
 
+  await assertPaymentAllowed(requester, amount, PAYMENT_TARGET_TYPE.JOB);
+
+  const providerUser = await User.findById(job.provider.userId).select("country");
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.JOB);
+
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.JOB,
     targetId: job._id,
@@ -79,6 +87,8 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     currency: job.currency,
     provider: PAYMENT_PROVIDER_NAME.STRIPE,
     status: PAYMENT_STATUS.PENDING,
+    rail,
+    ...buildTransactionCountries(rail, requester.country, providerUser?.country),
   });
 
   const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
@@ -128,6 +138,8 @@ const activateFreeSubscription = async (
   await supersedeActiveSubscriptions(requester._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
   await syncProfilesSubscription(requester._id as mongoose.Types.ObjectId, subscription._id as mongoose.Types.ObjectId);
 
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.SUBSCRIPTION);
+
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
     targetId: subscription._id,
@@ -137,6 +149,8 @@ const activateFreeSubscription = async (
     currency: plan.currency,
     provider: PAYMENT_PROVIDER_NAME.MANUAL,
     status: PAYMENT_STATUS.SUCCESS,
+    rail,
+    ...buildTransactionCountries(rail, requester.country),
   });
 
   return { subscriptionId: subscription.id, paymentId: payment.id };
@@ -165,6 +179,8 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   const periodStarted = new Date();
   const expiresAt = new Date(periodStarted.getTime() + plan.duration * DAY_MS);
 
+  await assertPaymentAllowed(requester, plan.price, PAYMENT_TARGET_TYPE.SUBSCRIPTION);
+
   const subscription = await Subscription.create({
     user: requester._id,
     plan: plan._id,
@@ -176,6 +192,8 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     expiresAt,
   });
 
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.SUBSCRIPTION);
+
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
     targetId: subscription._id,
@@ -185,6 +203,8 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     currency: plan.currency,
     provider: PAYMENT_PROVIDER_NAME.STRIPE,
     status: PAYMENT_STATUS.PENDING,
+    rail,
+    ...buildTransactionCountries(rail, requester.country),
   });
 
   const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
@@ -248,6 +268,14 @@ const resumeDigitalPurchaseIntent = async (
     }
   }
 
+  await assertPaymentAllowed(requester, purchase.priceSnapshot, PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+
+  const purchaseCreator = await DigitalCreatorProfile.findById(purchase.creator).select("userId");
+  const creatorUser = purchaseCreator
+    ? await User.findById(purchaseCreator.userId).select("country")
+    : null;
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+
   // No provider intent at all (shouldn't happen in practice), or it's
   // genuinely dead (canceled) — a brand new Payment record, never the
   // old one. createIntent's idempotency key is derived from the Payment
@@ -264,6 +292,8 @@ const resumeDigitalPurchaseIntent = async (
     currency: purchase.currency,
     provider: PAYMENT_PROVIDER_NAME.STRIPE,
     status: PAYMENT_STATUS.PENDING,
+    rail,
+    ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
 
   const { providerPaymentId, clientSecret } = await provider.createIntent({
@@ -328,6 +358,13 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     return resumeDigitalPurchaseIntent(req, res, existing);
   }
 
+  if (product.price > 0) {
+    await assertPaymentAllowed(requester, product.price, PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+  }
+
+  const rail = resolveRail(PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+  const creatorUser = await User.findById(creator.userId).select("country");
+
   const purchase = await DigitalPurchase.create({
     product: product._id,
     buyer: requester._id,
@@ -335,6 +372,10 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     priceSnapshot: product.price,
     currency: product.currency,
     status: DIGITAL_PURCHASE_STATUS.PENDING,
+    // Snapshotted now — a later env change never retroactively changes
+    // what this purchase owes the creator (see Job.platformFeePercent's
+    // own reasoning).
+    platformFeePercent: getPlatformFeePercent(),
     // Frozen now, before anything else can change — see
     // DigitalPurchase.fileManifest and docs/digital-storefront-plan.md.
     fileManifest: product.files.map((file) => ({
@@ -362,6 +403,8 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
       currency: product.currency,
       provider: PAYMENT_PROVIDER_NAME.MANUAL,
       status: PAYMENT_STATUS.SUCCESS,
+      rail,
+      ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
     });
 
     await copyPurchaseFiles(purchase._id as mongoose.Types.ObjectId);
@@ -379,6 +422,8 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     currency: product.currency,
     provider: PAYMENT_PROVIDER_NAME.STRIPE,
     status: PAYMENT_STATUS.PENDING,
+    rail,
+    ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
 
   const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
@@ -460,6 +505,45 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
   const intent = await provider.retrieveIntent(intentObject.id);
 
   await reconcilePaymentIntent(payment, intentObject.id, intent);
+});
+
+// @desc    Stripe Connect webhook — on account.updated, keeps
+//          User.stripeConnectPayoutsEnabled in sync with Stripe's own
+//          Account.payouts_enabled (true once onboarding/KYC is actually
+//          complete). Registered as a separate "Connect" webhook in the
+//          Stripe dashboard, with its own signing secret — see
+//          helpers/stripeConnect.ts's constructConnectWebhookEvent.
+// @route   POST /api/payments/stripe/connect-webhook
+// @access  Public — authenticated by Stripe's signature, not a user token.
+//          Mounted on a raw body (see app.ts); never put `protect` here.
+export const stripeConnectWebhook = asyncHandler(async (req: Request, res: Response) => {
+  const signature = req.headers["stripe-signature"];
+
+  if (typeof signature !== "string") {
+    res.status(400);
+    throw new Error("Missing Stripe signature");
+  }
+
+  let event: { type: string; data: { object: { id: string; payouts_enabled?: boolean } } };
+
+  try {
+    event = constructConnectWebhookEvent(req.body, signature);
+  } catch (err) {
+    res.status(400);
+    throw new Error(`Webhook signature verification failed: ${(err as Error).message}`);
+  }
+
+  // Acknowledge immediately — same reasoning as stripeWebhook above.
+  res.sendStatus(200);
+
+  if (event.type !== "account.updated") return;
+
+  const account = event.data.object;
+
+  await User.updateOne(
+    { stripeConnectedAccountId: account.id },
+    { stripeConnectPayoutsEnabled: Boolean(account.payouts_enabled) },
+  );
 });
 
 // @desc    Re-check a still-pending payment directly against the provider —
