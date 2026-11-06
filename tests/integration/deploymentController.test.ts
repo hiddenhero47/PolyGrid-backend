@@ -11,6 +11,7 @@ import { Response } from "express";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import { User, SYSTEM_ROLE } from "../../src/models/userModel";
 import { VerificationTemplate } from "../../src/models/verificationTemplateModel";
+import { SystemSettings } from "../../src/models/systemSettingsModel";
 import { PROFILE_TYPE } from "../../src/constants/profileTypes";
 import { runDeploymentSetup } from "../../src/controllers/deploymentController";
 
@@ -56,13 +57,36 @@ describe("runDeploymentSetup", () => {
     expect(res.status).toHaveBeenCalledWith(200);
     const payload = (res.json as jest.Mock).mock.calls[0][0];
     expect(payload.success).toBe(true);
-    expect(payload.results).toHaveLength(3);
+    expect(payload.results).toHaveLength(4);
     expect(payload.results.every((r: { status: string }) => r.status === "success")).toBe(true);
 
     expect(await User.findOne({ systemRole: SYSTEM_ROLE.SUPER_ADMIN })).not.toBeNull();
     expect(await VerificationTemplate.countDocuments({ country: "NG", isActive: true })).toBe(
       Object.values(PROFILE_TYPE).length,
     );
+
+    const settings = await SystemSettings.findOne();
+    expect(settings?.supportedCountries).toEqual(["NG"]);
+    expect(settings?.maxTransactionAmount).toBeGreaterThan(0);
+  });
+
+  it("never overwrites SystemSettings an admin has already configured", async () => {
+    process.env.SUPER_ADMIN_NAME = "Test Admin";
+    process.env.SUPER_ADMIN_EMAIL = "controller-test-super-admin-2@example.com";
+    process.env.SUPER_ADMIN_PASSWORD = "a-strong-password";
+
+    await SystemSettings.create({
+      maxOutstandingExposure: 999,
+      maxTransactionAmount: 999,
+      supportedCountries: ["US"],
+    });
+
+    await runDeploymentSetup({} as never, mockRes(), jest.fn());
+
+    expect(await SystemSettings.countDocuments()).toBe(1);
+    const settings = await SystemSettings.findOne();
+    expect(settings?.supportedCountries).toEqual(["US"]);
+    expect(settings?.maxTransactionAmount).toBe(999);
   });
 
   it("reports overall failure (but still 200s, with per-task detail) when a task fails", async () => {

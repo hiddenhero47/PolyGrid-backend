@@ -3,6 +3,7 @@ import { User, SYSTEM_ROLE } from "../models/userModel";
 import { VerificationTemplate, TEMPLATE_FIELD_TYPE, TEMPLATE_DOCUMENT_FORMAT } from "../models/verificationTemplateModel";
 import { PROFILE_TYPE, ProfileType } from "../constants/profileTypes";
 import { Conversation } from "../models/conversationModel";
+import { SystemSettings } from "../models/systemSettingsModel";
 
 // Mirrors house-maduekwe-backend's helpers/ensureAdmin.js +
 // helpers/appSetup.js pattern — a set of idempotent "ensure X exists"
@@ -162,6 +163,55 @@ export const ensureVerificationTemplatesSeeded = async (): Promise<SetupTaskResu
 // existing database), leaving every other model's indexes untouched.
 // Safe to call repeatedly: a database already on the new schema has
 // nothing to sync.
+// @task Ensure SystemSettings is seeded — paymentGuardrails.ts's checks
+// are deliberately closed by default (helpers/systemSettings.ts's own
+// DEFAULTS: no country supported, every cap 0), so without this nothing
+// payment-related works at all on a fresh deploy. All whole USD, not
+// cents — same unit Payment.amount itself already uses everywhere;
+// conversion to Stripe's minor units only happens inside
+// providers/paymentProviders/stripeProvider.ts, right before the API
+// call. One named constant below so these are easy to tweak later.
+// Only ever seeds while the singleton doesn't exist yet — never
+// overwrites values an admin has since changed via
+// PATCH /api/system-settings; this is a one-time seed, not a sync.
+const INITIAL_SYSTEM_SETTINGS = {
+  supportedCountries: ["NG"],
+  maxTransactionAmount: 7463, // ~10,000,000 NGN
+  maxOutstandingExposure: 7463, // ~10,000,000 NGN
+  fraudHoldThresholdAmount: 746, // ~1,000,000 NGN
+  fraudHoldHours: 24,
+  manualReviewThresholdAmount: 74627, // ~100,000,000 NGN
+};
+
+export const ensureSystemSettingsSeeded = async (): Promise<SetupTaskResult> => {
+  try {
+    const existing = await SystemSettings.findOne();
+
+    if (existing) {
+      return {
+        task: "Ensure SystemSettings seeded",
+        status: "success",
+        message: "SystemSettings already configured — left untouched",
+      };
+    }
+
+    await SystemSettings.create(INITIAL_SYSTEM_SETTINGS);
+
+    return {
+      task: "Ensure SystemSettings seeded",
+      status: "success",
+      message: "SystemSettings created with initial values",
+    };
+  } catch (err) {
+    console.error("[DEPLOYMENT SETUP] ensureSystemSettingsSeeded failed:", err);
+    return {
+      task: "Ensure SystemSettings seeded",
+      status: "failed",
+      message: "Failed to seed SystemSettings — see server logs",
+    };
+  }
+};
+
 export const ensureConversationIndexesFixed = async (): Promise<SetupTaskResult> => {
   try {
     const dropped = await Conversation.syncIndexes();

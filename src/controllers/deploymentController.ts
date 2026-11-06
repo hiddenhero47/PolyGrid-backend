@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import {
   ensureSuperAdminExists,
   ensureVerificationTemplatesSeeded,
+  ensureSystemSettingsSeeded,
   ensureConversationIndexesFixed,
   SetupTaskResult,
 } from "../helpers/deploymentSetup";
@@ -16,6 +17,7 @@ import {
 export const runDeploymentSetupTasks = async (): Promise<SetupTaskResult[]> => [
   await ensureSuperAdminExists(),
   await ensureVerificationTemplatesSeeded(),
+  await ensureSystemSettingsSeeded(),
   await ensureConversationIndexesFixed(),
 ];
 

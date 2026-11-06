@@ -32,6 +32,13 @@ export const verifyCurrentPasswordOr2FA = async (
     if (!otpToken) {
       const error: AppError = new Error("A 2FA code is required to confirm this change");
       error.statusCode = 400;
+      // Stable, message-independent signal — paymentGuardrails.ts's
+      // caller (a buyer's checkout) can't read SystemSettings to know
+      // the manual-review threshold in advance, so it has to send the
+      // intent, catch this exact code, and resend with proof. Only the
+      // two "missing" branches get it; a wrong password/code is a 403
+      // with no code — that's a real rejection, not "please retry with more".
+      error.code = "IDENTITY_REQUIRED";
       throw error;
     }
 
@@ -54,6 +61,7 @@ export const verifyCurrentPasswordOr2FA = async (
   if (!currentPassword) {
     const error: AppError = new Error("Your current password is required to confirm this change");
     error.statusCode = 400;
+    error.code = "IDENTITY_REQUIRED";
     throw error;
   }
 
