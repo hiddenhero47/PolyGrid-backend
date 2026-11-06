@@ -22,13 +22,23 @@ export const getSettings = asyncHandler(async (_req: Request, res: Response) => 
 // @access  Private (Super Admin only)
 export const updateSettings = asyncHandler(async (req: Request, res: Response) => {
   const admin = req.user as IUser;
-  const { maxOutstandingExposure, maxTransactionAmount, supportedCountries } = req.body;
+  const {
+    maxOutstandingExposure,
+    maxTransactionAmount,
+    supportedCountries,
+    fraudHoldThresholdAmount,
+    fraudHoldHours,
+    manualReviewThresholdAmount,
+  } = req.body;
 
   const settings = await getSystemSettings();
 
   if (maxOutstandingExposure !== undefined) settings.maxOutstandingExposure = maxOutstandingExposure;
   if (maxTransactionAmount !== undefined) settings.maxTransactionAmount = maxTransactionAmount;
   if (supportedCountries !== undefined) settings.supportedCountries = supportedCountries;
+  if (fraudHoldThresholdAmount !== undefined) settings.fraudHoldThresholdAmount = fraudHoldThresholdAmount;
+  if (fraudHoldHours !== undefined) settings.fraudHoldHours = fraudHoldHours;
+  if (manualReviewThresholdAmount !== undefined) settings.manualReviewThresholdAmount = manualReviewThresholdAmount;
   settings.updatedBy = admin._id as typeof settings.updatedBy;
 
   await settings.save();

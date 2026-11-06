@@ -22,6 +22,9 @@ import { reconcilePaymentIntent } from "../helpers/paymentReconciliation";
 import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
 import { assertPaymentAllowed, resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
 import { constructConnectWebhookEvent } from "../helpers/stripeConnect";
+import { completePaymentTarget } from "../helpers/paymentCompletion";
+import { notifyPaymentHoldUpdate } from "../helpers/paymentHoldNotify";
+import { getSystemSettings } from "../helpers/systemSettings";
 
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -54,7 +57,7 @@ export const getMyPayments = asyncHandler(async (req: Request, res: Response) =>
 
 const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { targetId, amount } = req.body;
+  const { targetId, amount, currentPassword, otpToken } = req.body;
 
   const job = await Job.findById(targetId);
 
@@ -73,7 +76,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     throw new Error("This job is not active");
   }
 
-  await assertPaymentAllowed(requester, amount, PAYMENT_TARGET_TYPE.JOB);
+  await assertPaymentAllowed(requester, amount, PAYMENT_TARGET_TYPE.JOB, { currentPassword, otpToken });
 
   const providerUser = await User.findById(job.provider.userId).select("country");
   const rail = resolveRail(PAYMENT_TARGET_TYPE.JOB);
@@ -158,7 +161,7 @@ const activateFreeSubscription = async (
 
 const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { planTier, autoRenew } = req.body;
+  const { planTier, autoRenew, currentPassword, otpToken } = req.body;
 
   const plan = await Plan.findOne({ planTier, isActive: true });
 
@@ -179,7 +182,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   const periodStarted = new Date();
   const expiresAt = new Date(periodStarted.getTime() + plan.duration * DAY_MS);
 
-  await assertPaymentAllowed(requester, plan.price, PAYMENT_TARGET_TYPE.SUBSCRIPTION);
+  await assertPaymentAllowed(requester, plan.price, PAYMENT_TARGET_TYPE.SUBSCRIPTION, { currentPassword, otpToken });
 
   const subscription = await Subscription.create({
     user: requester._id,
@@ -268,7 +271,10 @@ const resumeDigitalPurchaseIntent = async (
     }
   }
 
-  await assertPaymentAllowed(requester, purchase.priceSnapshot, PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+  await assertPaymentAllowed(requester, purchase.priceSnapshot, PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE, {
+    currentPassword: req.body?.currentPassword,
+    otpToken: req.body?.otpToken,
+  });
 
   const purchaseCreator = await DigitalCreatorProfile.findById(purchase.creator).select("userId");
   const creatorUser = purchaseCreator
@@ -320,7 +326,7 @@ const resumeDigitalPurchaseIntent = async (
 // its creator's page in the first place.
 const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { targetId } = req.body;
+  const { targetId, currentPassword, otpToken } = req.body;
 
   const product = await DigitalProduct.findById(targetId);
   if (!product || !product.isActive) {
@@ -359,7 +365,10 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
   }
 
   if (product.price > 0) {
-    await assertPaymentAllowed(requester, product.price, PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+    await assertPaymentAllowed(requester, product.price, PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE, {
+      currentPassword,
+      otpToken,
+    });
   }
 
   const rail = resolveRail(PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
@@ -491,6 +500,11 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
   // writing again, so a later throw here is handled safely.
   res.sendStatus(200);
 
+  if (event.type === "charge.dispute.created") {
+    await handleChargeDispute(event.data as { payment_intent: string | null });
+    return;
+  }
+
   if (event.type !== "payment_intent.succeeded") return;
 
   const intentObject = event.data as { id: string; metadata?: { paymentId?: string } };
@@ -506,6 +520,30 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
 
   await reconcilePaymentIntent(payment, intentObject.id, intent);
 });
+
+// This is what makes the fraud hold (helpers/paymentReconciliation.ts)
+// actually protective rather than just a dumb delay: if a dispute arrives
+// while the payment is still held, nothing was ever credited/unlocked/
+// activated — flip it to DISPUTED and stop, the hold did its job. If
+// value was already released (never held, or the hold already cleared),
+// automatic clawback is out of scope — this just records disputedAt so
+// it's discoverable (GET /api/payments?hasDispute=true), and an admin
+// decides what to do about it by hand.
+const handleChargeDispute = async (dispute: { payment_intent: string | null }): Promise<void> => {
+  if (!dispute.payment_intent) return;
+
+  const payment = await Payment.findOne({ providerPaymentId: dispute.payment_intent });
+  if (!payment) return;
+
+  payment.disputedAt = new Date();
+
+  if (payment.isOnHold) {
+    payment.isOnHold = false;
+    payment.status = PAYMENT_STATUS.DISPUTED;
+  }
+
+  await payment.save();
+};
 
 // @desc    Stripe Connect webhook — on account.updated, keeps
 //          User.stripeConnectPayoutsEnabled in sync with Stripe's own
@@ -596,16 +634,61 @@ export const refreshPayment = asyncHandler(async (req: Request, res: Response) =
 
   res.status(200).json(result);
 });
+
+// @desc    Manually release a held payment (helpers/paymentReconciliation.ts)
+//          right now — crediting escrow/unlocking a download/activating a
+//          subscription immediately, regardless of whether holdReleaseAt
+//          has passed. Admin discretion is its own override here, same
+//          spirit as jobController.ts's approveRefundRequest/
+//          approvePayoutRequest bypassReason — deliberately general-
+//          purpose (works on any held payment, not only ones above
+//          SystemSettings.manualReviewThresholdAmount), since the sweep
+//          (helpers/paymentHoldRelease.ts) already handles the ordinary
+//          case on its own; this is for whenever an admin wants to act
+//          sooner than the timer, or on one the sweep deliberately
+//          skipped for review.
+// @route   POST /api/payments/:id/approve-hold
+// @access  Private (Admin / Super Admin only)
+export const approveHeldPayment = asyncHandler(async (req: Request, res: Response) => {
+  const id = req.params.id as string;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(404);
+    throw new Error("Payment not found");
+  }
+
+  const payment = await Payment.findById(id);
+  if (!payment) {
+    res.status(404);
+    throw new Error("Payment not found");
+  }
+
+  if (!payment.isOnHold) {
+    res.status(400);
+    throw new Error("This payment isn't on hold");
+  }
+
+  await completePaymentTarget(payment);
+
+  payment.isOnHold = false;
+  await payment.save();
+
+  await notifyPaymentHoldUpdate(payment, true);
+
+  res.status(200).json(payment);
+});
 // @route   GET /api/payments
 // @access  Private (Admin / Super Admin only)
 export const getPayments = asyncHandler(async (req: Request, res: Response) => {
   const { page, limit, skip } = paginationParams(req);
-  const { status, targetType, targetId, user, provider } = req.query as {
+  const { status, targetType, targetId, user, provider, hasDispute, pendingManualReview } = req.query as {
     status?: string;
     targetType?: string;
     targetId?: string;
     user?: string;
     provider?: string;
+    hasDispute?: string;
+    pendingManualReview?: string;
   };
 
   const filter: FilterQuery<IPayment> = {};
@@ -628,6 +711,24 @@ export const getPayments = asyncHandler(async (req: Request, res: Response) => {
 
   if (provider) {
     filter.provider = provider as IPayment["provider"];
+  }
+
+  // Surfaces a dispute whose value was already released (no automatic
+  // clawback — see paymentController.ts's handleChargeDispute) without
+  // needing a new admin-notification mechanism; a fully-intercepted
+  // dispute is already findable via status=disputed above.
+  if (hasDispute === "true") {
+    filter.disputedAt = { $exists: true };
+  }
+
+  // Resolved against the *current* setting value, not a stored flag —
+  // same instinct as every other SystemSettings-driven check this
+  // session — so raising/lowering manualReviewThresholdAmount is
+  // reflected immediately, not just for payments created afterward.
+  if (pendingManualReview === "true") {
+    const settings = await getSystemSettings();
+    filter.isOnHold = true;
+    filter.amount = { $gt: settings.manualReviewThresholdAmount };
   }
 
   const [data, total] = await Promise.all([

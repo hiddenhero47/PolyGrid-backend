@@ -29,5 +29,10 @@ export const createPaymentIntentSchema = yup
       otherwise: (schema) => schema.notRequired(),
     }),
     autoRenew: yup.boolean().notRequired(),
+    // Only actually required above SystemSettings.manualReviewThresholdAmount
+    // — see helpers/paymentGuardrails.ts's assertPaymentAllowed, which
+    // decides that at request time, not here.
+    currentPassword: yup.string().notRequired(),
+    otpToken: yup.string().notRequired(),
   })
   .noUnknown(true);

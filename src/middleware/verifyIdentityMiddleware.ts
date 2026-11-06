@@ -17,52 +17,61 @@ import { AppError } from "./errorMiddleware";
 // `user.user2fa.secret` and flipped `enable` — until then (the default,
 // for every account that's never gone through that flow) this always
 // takes the password branch instead.
-export const verifyIdentity = asyncHandler(
-  async (req: Request, _res: Response, next: NextFunction) => {
-    const user = req.user as IUser;
-
-    if (user.user2fa?.enable) {
-      const otpToken = req.body?.otpToken;
-
-      if (!otpToken) {
-        const error: AppError = new Error("A 2FA code is required to confirm this change");
-        error.statusCode = 400;
-        throw error;
-      }
-
-      let isValid: boolean;
-      try {
-        isValid = authenticator.verify({ token: otpToken, secret: user.user2fa.secret as string });
-      } catch {
-        isValid = false;
-      }
-
-      if (!isValid) {
-        const error: AppError = new Error("Invalid 2FA code");
-        error.statusCode = 403;
-        throw error;
-      }
-
-      next();
-      return;
-    }
-
-    const currentPassword = req.body?.currentPassword;
-
-    if (!currentPassword) {
-      const error: AppError = new Error("Your current password is required to confirm this change");
+//
+// Extracted from the middleware below so helpers/paymentGuardrails.ts can
+// run the exact same "prove it's really you" check for a large payment
+// (see docs/payments-plan.md's manual-review threshold) without
+// duplicating it — a stolen-card fraudster essentially never also has
+// the legitimate buyer's password or 2FA device, so this is a lever
+// that's orthogonal to the payment method entirely.
+export const verifyCurrentPasswordOr2FA = async (
+  user: IUser,
+  { currentPassword, otpToken }: { currentPassword?: string; otpToken?: string },
+): Promise<void> => {
+  if (user.user2fa?.enable) {
+    if (!otpToken) {
+      const error: AppError = new Error("A 2FA code is required to confirm this change");
       error.statusCode = 400;
       throw error;
     }
 
-    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    let isValid: boolean;
+    try {
+      isValid = authenticator.verify({ token: otpToken, secret: user.user2fa.secret as string });
+    } catch {
+      isValid = false;
+    }
 
-    if (!isMatch) {
-      const error: AppError = new Error("Current password is incorrect");
+    if (!isValid) {
+      const error: AppError = new Error("Invalid 2FA code");
       error.statusCode = 403;
       throw error;
     }
 
+    return;
+  }
+
+  if (!currentPassword) {
+    const error: AppError = new Error("Your current password is required to confirm this change");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const isMatch = await bcrypt.compare(currentPassword, user.password);
+
+  if (!isMatch) {
+    const error: AppError = new Error("Current password is incorrect");
+    error.statusCode = 403;
+    throw error;
+  }
+};
+
+export const verifyIdentity = asyncHandler(
+  async (req: Request, _res: Response, next: NextFunction) => {
+    await verifyCurrentPasswordOr2FA(req.user as IUser, {
+      currentPassword: req.body?.currentPassword,
+      otpToken: req.body?.otpToken,
+    });
     next();
   },
 );

@@ -21,6 +21,12 @@ export const PAYMENT_STATUS = {
   FAILED: "failed",
   REFUNDED: "refunded",
   CANCELLED: "cancelled",
+  // The charge succeeded but a dispute arrived while it was still on
+  // hold (isOnHold below) — never set for a payment whose value was
+  // already released; see paymentController.ts's stripeWebhook handling
+  // of charge.dispute.created. The hold did its job: no escrow credit, no
+  // download, no subscription activation ever happened for this one.
+  DISPUTED: "disputed",
 } as const;
 export type PaymentStatus = (typeof PAYMENT_STATUS)[keyof typeof PAYMENT_STATUS];
 
@@ -64,6 +70,17 @@ export interface IPayment extends Document {
   // e.g. a Stripe PaymentIntent id — absent for a manual entry.
   providerPaymentId?: string;
   status: PaymentStatus;
+  // Card-fraud mitigation (see helpers/paymentReconciliation.ts,
+  // helpers/paymentHoldRelease.ts) — a successful charge over
+  // SystemSettings.fraudHoldThresholdAmount sets isOnHold + holdReleaseAt
+  // instead of immediately crediting escrow/unlocking a download/
+  // activating a subscription; the sweep releases it once holdReleaseAt
+  // passes. disputedAt is set whenever a charge.dispute.created webhook
+  // arrives for this payment, hold or not — see PAYMENT_STATUS.DISPUTED
+  // above for the "caught it in time" case.
+  isOnHold: boolean;
+  holdReleaseAt?: Date;
+  disputedAt?: Date;
   // Snapshot of the gateway's event/response payload, for audit — not
   // something application code should read back to make decisions from.
   rawProviderPayload?: Record<string, unknown>;
@@ -104,6 +121,9 @@ const paymentSchema = new Schema<IPayment>(
       enum: Object.values(PAYMENT_STATUS),
       default: PAYMENT_STATUS.PENDING,
     },
+    isOnHold: { type: Boolean, default: false },
+    holdReleaseAt: { type: Date },
+    disputedAt: { type: Date },
     rawProviderPayload: { type: Object },
     recordedBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
@@ -113,6 +133,9 @@ const paymentSchema = new Schema<IPayment>(
 paymentSchema.index({ targetType: 1, targetId: 1 });
 paymentSchema.index({ user: 1, createdAt: -1 });
 paymentSchema.index({ status: 1 });
+// helpers/paymentHoldRelease.ts's own read pattern: every payment still
+// on hold whose release time has passed.
+paymentSchema.index({ isOnHold: 1, holdReleaseAt: 1 });
 // Guards against the same gateway transaction ever being recorded twice.
 // Deliberately `partialFilterExpression`, not `sparse`: for a *compound*
 // index, "sparse" only excludes a document when EVERY indexed field is

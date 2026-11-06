@@ -1,14 +1,10 @@
-import mongoose from "mongoose";
 import { Payment, IPayment, PAYMENT_STATUS, PAYMENT_TARGET_TYPE } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
-import { Job } from "../models/jobModel";
-import { Plan } from "../models/planModel";
-import { Subscription, ISubscription, SUBSCRIPTION_STATUS } from "../models/subscriptionModel";
-import { User } from "../models/userModel";
-import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
+import { ISubscription, SUBSCRIPTION_STATUS, Subscription } from "../models/subscriptionModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
-import { syncProfilesSubscription, supersedeActiveSubscriptions, getCarryoverDays, DAY_MS } from "./profileSubscriptionSync";
-import { copyPurchaseFiles } from "./digitalPurchaseFiles";
+import { completePaymentTarget } from "./paymentCompletion";
+import { getSystemSettings } from "./systemSettings";
+import { notifyPaymentHoldUpdate } from "./paymentHoldNotify";
 
 export interface ReconcileResult {
   status: "success" | "pending" | "failed";
@@ -59,51 +55,26 @@ export const reconcilePaymentIntent = async (
   payment.rawProviderPayload = intent.raw as Record<string, unknown>;
   await payment.save();
 
-  if (payment.targetType === PAYMENT_TARGET_TYPE.JOB) {
-    await Job.updateOne({ _id: payment.targetId }, { $inc: { amountPaid: payment.amount } });
+  // Card-fraud mitigation (see docs/payments-plan.md): the charge
+  // succeeded — Stripe already has the money — but above this threshold
+  // the *value* (escrow credit, download, subscription activation) is
+  // deliberately deferred, giving a stolen-card chargeback time to arrive
+  // before PolyGrid hands anything over. paymentController.ts's
+  // stripeWebhook handling of charge.dispute.created is what actually
+  // cancels the release if that signal arrives; helpers/
+  // paymentHoldRelease.ts's sweep is what releases it otherwise.
+  const settings = await getSystemSettings();
+
+  if (payment.amount > settings.fraudHoldThresholdAmount) {
+    payment.isOnHold = true;
+    payment.holdReleaseAt = new Date(Date.now() + settings.fraudHoldHours * 60 * 60 * 1000);
+    await payment.save();
+    await notifyPaymentHoldUpdate(payment, false);
     return { status: "success", payment };
   }
 
-  if (payment.targetType === PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE) {
-    const result = await DigitalPurchase.updateOne(
-      { _id: payment.targetId, status: DIGITAL_PURCHASE_STATUS.PENDING },
-      { status: DIGITAL_PURCHASE_STATUS.SUCCESS },
-    );
-
-    // Only the caller that actually performed the PENDING->SUCCESS
-    // transition should copy files — a redelivery/refresh of an
-    // already-processed payment must stay a pure no-op (matches the
-    // payment.status idempotency guard above), otherwise retrying would
-    // re-copy (harmless but wasteful) every time.
-    if (result.modifiedCount === 1) {
-      await copyPurchaseFiles(payment.targetId as mongoose.Types.ObjectId);
-    }
-    return { status: "success", payment };
-  }
-
-  const subscription = await Subscription.findById(payment.targetId);
-
-  if (subscription && subscription.status === SUBSCRIPTION_STATUS.PENDING) {
-    const plan = await Plan.findById(subscription.plan);
-    const periodStarted = new Date();
-    // Read before supersedeActiveSubscriptions below cancels it — see
-    // getCarryoverDays' own comment for why this is 1-for-1, not
-    // value-adjusted, today.
-    const carryoverDays = await getCarryoverDays(subscription.user);
-
-    subscription.status = SUBSCRIPTION_STATUS.ACTIVE;
-    subscription.periodStarted = periodStarted;
-    subscription.expiresAt = new Date(
-      periodStarted.getTime() + ((plan?.duration ?? 30) + carryoverDays) * DAY_MS,
-    );
-    await subscription.save();
-
-    await User.updateOne({ _id: subscription.user }, { currentSubscription: subscription._id });
-    await supersedeActiveSubscriptions(subscription.user, subscription._id as mongoose.Types.ObjectId);
-    await syncProfilesSubscription(subscription.user, subscription._id as mongoose.Types.ObjectId);
-  }
-
-  return { status: "success", payment, subscription: subscription ?? undefined };
+  const { subscription } = await completePaymentTarget(payment);
+  return { status: "success", payment, subscription };
 };
 
 // 10 minutes — long enough that a webhook delivered promptly has already

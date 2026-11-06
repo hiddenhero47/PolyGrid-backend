@@ -24,6 +24,14 @@ export const stripeProvider: PaymentProviderAdapter = {
         // methods are out of scope for now; revisit together with whatever
         // confirms these client-side once one exists.
         automatic_payment_methods: { enabled: true, allow_redirects: "never" },
+        // Forces a 3D Secure challenge on every card charge, rather than
+        // leaving it to Stripe's own risk-based "automatic" default — a
+        // deliberate fraud-mitigation choice (see docs/payments-plan.md),
+        // not something per-request callers opt into. This is an in-page
+        // modal Stripe.js resolves via confirmCardPayment/handleNextAction
+        // on a `requires_action` status, not a full-page redirect, so it's
+        // compatible with allow_redirects: 'never' above.
+        payment_method_options: { card: { request_three_d_secure: "any" } },
         metadata,
       },
       // Same Payment doc retried (e.g. a flaky client re-submitting) never

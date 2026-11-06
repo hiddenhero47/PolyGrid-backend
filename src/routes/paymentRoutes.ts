@@ -4,6 +4,7 @@ import {
   getPayments,
   createPaymentIntent,
   refreshPayment,
+  approveHeldPayment,
   stripeWebhook,
   stripeConnectWebhook,
 } from "../controllers/paymentController";
@@ -18,6 +19,7 @@ router.get("/me", protect, getMyPayments);
 router.get("/", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), getPayments);
 router.post("/intent", protect, validateBody(createPaymentIntentSchema), createPaymentIntent);
 router.post("/:id/refresh", protect, refreshPayment);
+router.post("/:id/approve-hold", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), approveHeldPayment);
 // No `protect` — Stripe calls this directly, authenticated by signature
 // (see stripeWebhook). Body must stay raw for signature verification; the
 // raw-body scoping for this exact path is registered in app.ts, before the

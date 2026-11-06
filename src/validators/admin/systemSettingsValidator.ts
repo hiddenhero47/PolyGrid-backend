@@ -15,5 +15,8 @@ export const updateSystemSettingsSchema = yup
           .test("is-country", "Not a recognized ISO country code", (value) => !value || isValidCountryCode(value)),
       )
       .notRequired(),
+    fraudHoldThresholdAmount: yup.number().min(0).notRequired(),
+    fraudHoldHours: yup.number().min(0).notRequired(),
+    manualReviewThresholdAmount: yup.number().min(0).notRequired(),
   })
   .noUnknown(true);

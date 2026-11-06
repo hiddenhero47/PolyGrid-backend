@@ -9,6 +9,9 @@ const DEFAULTS = {
   maxOutstandingExposure: 0,
   maxTransactionAmount: 0,
   supportedCountries: [] as string[],
+  fraudHoldThresholdAmount: 0,
+  fraudHoldHours: 24,
+  manualReviewThresholdAmount: 0,
 };
 
 // The one singleton — created on first read if it doesn't exist yet,

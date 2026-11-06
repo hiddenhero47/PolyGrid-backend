@@ -1,10 +1,11 @@
 import { Job } from "../models/jobModel";
 import { IUser } from "../models/userModel";
-import { PAYMENT_TARGET_TYPE, PAYMENT_RAIL, PaymentRail, PaymentTargetType } from "../models/paymentModel";
+import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_RAIL, PaymentRail, PaymentTargetType } from "../models/paymentModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS, DIGITAL_PURCHASE_PAYOUT_STATUS } from "../models/digitalPurchaseModel";
 import { SYSTEM_COUNTRY } from "./countryReference";
 import { getSystemSettings } from "./systemSettings";
 import { AppError } from "../middleware/errorMiddleware";
+import { verifyCurrentPasswordOr2FA } from "../middleware/verifyIdentityMiddleware";
 
 const badRequest = (message: string): AppError => {
   const error: AppError = new Error(message);
@@ -83,13 +84,31 @@ const getDigitalPurchaseExposure = async (): Promise<number> => {
   return result?.total ?? 0;
 };
 
-export const getOutstandingExposure = async (): Promise<number> => {
-  const [jobExposure, digitalPurchaseExposure] = await Promise.all([
-    getJobExposure(),
-    getDigitalPurchaseExposure(),
+// A payment on fraud-hold (helpers/paymentReconciliation.ts) is real
+// money already sitting in PolyGrid's Stripe balance that isn't yet
+// reflected in any Job/DigitalPurchase field (crediting escrow/unlocking
+// a download is exactly what's deferred while held) — without this, the
+// live cap would temporarily under-count precisely the riskiest money in
+// the system. No double-counting: a held Job payment hasn't incremented
+// amountPaid yet, and a held DigitalPurchase stays PENDING (excluded from
+// getDigitalPurchaseExposure's own SUCCESS-only match) until released.
+const getHeldPaymentExposure = async (): Promise<number> => {
+  const [result] = await Payment.aggregate<{ total: number }>([
+    { $match: { isOnHold: true } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
   ]);
 
-  return jobExposure + digitalPurchaseExposure;
+  return result?.total ?? 0;
+};
+
+export const getOutstandingExposure = async (): Promise<number> => {
+  const [jobExposure, digitalPurchaseExposure, heldPaymentExposure] = await Promise.all([
+    getJobExposure(),
+    getDigitalPurchaseExposure(),
+    getHeldPaymentExposure(),
+  ]);
+
+  return jobExposure + digitalPurchaseExposure + heldPaymentExposure;
 };
 
 // The one choke point every payment-intent creation path runs through
@@ -101,6 +120,7 @@ export const assertPaymentAllowed = async (
   buyer: IUser,
   amount: number,
   targetType: PaymentTargetType,
+  identityProof: { currentPassword?: string; otpToken?: string } = {},
 ): Promise<void> => {
   if (!buyer.country) {
     throw badRequest("Set your country before making a payment");
@@ -114,6 +134,19 @@ export const assertPaymentAllowed = async (
 
   if (amount > settings.maxTransactionAmount) {
     throw badRequest("This amount exceeds the maximum allowed per transaction right now");
+  }
+
+  // Card fraud mitigation (see docs/payments-plan.md): above this
+  // ceiling, the payment still goes through (there's no safer payment
+  // method to redirect to for any supported country yet — confirmed
+  // Stripe has no usable Nigerian bank-transfer rail), but it needs a
+  // fresh proof of identity — a stolen-card fraudster essentially never
+  // also has the legitimate buyer's password or 2FA device. The matching
+  // other half of this threshold — the fraud-hold release sweep no
+  // longer auto-releasing a payment this large — lives in
+  // helpers/paymentHoldRelease.ts.
+  if (amount > settings.manualReviewThresholdAmount) {
+    await verifyCurrentPasswordOr2FA(buyer, identityProof);
   }
 
   if (targetType === PAYMENT_TARGET_TYPE.SUBSCRIPTION) return;
