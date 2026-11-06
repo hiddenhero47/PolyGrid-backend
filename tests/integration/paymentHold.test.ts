@@ -23,6 +23,7 @@ import {
   createActiveJob,
   createPlan,
   createSubscription,
+  createUserWithActiveSubscription,
   createDigitalCreatorProfile,
   createDigitalProduct,
   createDigitalPurchase,
@@ -34,9 +35,11 @@ import { Job } from "../../src/models/jobModel";
 import { Subscription, SUBSCRIPTION_STATUS } from "../../src/models/subscriptionModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
 import { SystemSettings } from "../../src/models/systemSettingsModel";
+import { Notification, NOTIFICATION_TYPE } from "../../src/models/notificationModel";
 import { reconcilePaymentIntent } from "../../src/helpers/paymentReconciliation";
 import { releaseExpiredPaymentHolds } from "../../src/helpers/paymentHoldRelease";
 import { getOutstandingExposure } from "../../src/helpers/paymentGuardrails";
+import { stripeProvider } from "../../src/providers/paymentProviders/stripeProvider";
 
 const app = createApp();
 
@@ -63,6 +66,7 @@ beforeAll(async () => {
 afterEach(async () => {
   await clearTestDB();
   jest.clearAllMocks();
+  jest.restoreAllMocks();
 });
 
 afterAll(async () => {
@@ -115,6 +119,16 @@ describe("reconcilePaymentIntent — fraud hold (helpers/paymentReconciliation.t
 
     const updatedJob = await Job.findById(job._id);
     expect(updatedJob?.amountPaid).toBe(0);
+
+    // The bell needs to open this exact job, not a generic payments page.
+    const notification = await Notification.findOne({
+      userId: client._id,
+      type: NOTIFICATION_TYPE.PAYMENT_ON_HOLD,
+    });
+    expect(notification?.data).toMatchObject({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+    });
   });
 
   it("holds a digital purchase over the threshold instead of unlocking the download", async () => {
@@ -650,5 +664,183 @@ describe("GET /api/payments?pendingManualReview=true", () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].providerPaymentId).toBe("pi_above_review");
+  });
+});
+
+describe("GET /api/payments?isOnHold=true", () => {
+  it("lists every held payment as a group, regardless of amount", async () => {
+    const client = await createUser();
+    const provider = await createUser();
+    const job = await createActiveJob({ client, provider });
+
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: client._id,
+      userEmail: client.email,
+      amount: 500,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "pi_on_hold",
+      isOnHold: true,
+      holdReleaseAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: client._id,
+      userEmail: client.email,
+      amount: 500,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "pi_already_released",
+      isOnHold: false,
+    });
+
+    const admin = await createAdmin();
+    const res = await request(app)
+      .get("/api/payments?isOnHold=true")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].providerPaymentId).toBe("pi_on_hold");
+  });
+});
+
+describe("reconcilePaymentIntent never resurrects a disputed payment", () => {
+  it("refuses to flip a DISPUTED payment back to success, even if the intent still reads 'succeeded' at Stripe", async () => {
+    const client = await createUser();
+    const provider = await createUser();
+    const job = await createActiveJob({ client, provider });
+
+    const payment = await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: client._id,
+      userEmail: client.email,
+      amount: 500,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.DISPUTED,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "pi_already_disputed",
+      isOnHold: false,
+      disputedAt: new Date(),
+    });
+
+    const result = await reconcilePaymentIntent(payment, "pi_already_disputed", succeededIntent(500));
+
+    expect(result.status).toBe("failed");
+    expect(payment.status).toBe("disputed");
+    expect(payment.isOnHold).toBe(false);
+
+    const updatedJob = await Job.findById(job._id);
+    expect(updatedJob?.amountPaid).toBe(0);
+  });
+});
+
+describe("POST /api/payments/intent — resuming an existing DigitalPurchase, never a second charge", () => {
+  it("refuses to resume a disputed purchase, without ever calling the provider again", async () => {
+    const retrieveIntentSpy = jest.spyOn(stripeProvider, "retrieveIntent");
+
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 500 });
+    const buyer = await createUser();
+    const purchase = await createDigitalPurchase({
+      product,
+      buyer,
+      creator: profile,
+      status: DIGITAL_PURCHASE_STATUS.PENDING,
+      files: [],
+    });
+
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+      targetId: purchase._id,
+      user: buyer._id,
+      userEmail: buyer.email,
+      amount: 500,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.DISPUTED,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "pi_disputed_purchase",
+      disputedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(res.status).toBe(400);
+    expect(retrieveIntentSpy).not.toHaveBeenCalled();
+
+    expect(await Payment.countDocuments({ targetId: purchase._id })).toBe(1);
+    const updatedPurchase = await DigitalPurchase.findById(purchase._id);
+    expect(updatedPurchase?.status).toBe("pending");
+  });
+
+  it("reports the held state truthfully when resuming an on-hold purchase, instead of a false success — and never creates a second Payment", async () => {
+    jest.spyOn(stripeProvider, "retrieveIntent").mockResolvedValue({
+      status: "succeeded",
+      amount: 500,
+      currency: "USD",
+      feeAmount: 0,
+      raw: { client_secret: null },
+    });
+
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 500 });
+    const buyer = await createUser();
+    const purchase = await createDigitalPurchase({
+      product,
+      buyer,
+      creator: profile,
+      status: DIGITAL_PURCHASE_STATUS.PENDING,
+      files: [],
+    });
+
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
+      targetId: purchase._id,
+      user: buyer._id,
+      userEmail: buyer.email,
+      amount: 500,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "pi_held_purchase",
+      isOnHold: true,
+      holdReleaseAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(res.status).toBe(200);
+    expect(res.body.held).toBe(true);
+
+    expect(await Payment.countDocuments({ targetId: purchase._id })).toBe(1);
+    const updatedPurchase = await DigitalPurchase.findById(purchase._id);
+    expect(updatedPurchase?.status).toBe("pending");
   });
 });

@@ -31,6 +31,15 @@ export const notifyPaymentHoldUpdate = async (payment: IPayment, released: boole
     payment.user,
     NOTIFICATION_TYPE.PAYMENT_ON_HOLD,
     released ? "Your payment has cleared" : "Your payment is under review",
-    { paymentId: payment.id, amount: payment.amount, currency: payment.currency, released },
+    {
+      paymentId: payment.id,
+      amount: payment.amount,
+      currency: payment.currency,
+      released,
+      // So the bell can open the actual job/purchase/subscription this
+      // hold is about, not a generic "payments" page.
+      targetType: payment.targetType,
+      targetId: payment.targetId,
+    },
   );
 };

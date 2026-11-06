@@ -248,15 +248,37 @@ const resumeDigitalPurchaseIntent = async (
   }).sort({ createdAt: -1 });
 
   if (payment?.providerPaymentId) {
+    // Disputed — Stripe's own PaymentIntent still reads 'succeeded' (a
+    // dispute doesn't change that), but reconcilePaymentIntent now
+    // refuses to touch a DISPUTED payment at all (see its own comment),
+    // so checked here first to refuse outright rather than retrieve an
+    // intent only to then report a success that never happens. No
+    // DIGITAL_PURCHASE_STATUS terminal-failure state exists to flip the
+    // purchase itself to — this purchase is surfaced to admins via
+    // GET /api/payments?hasDispute=true instead.
+    if (payment.status === PAYMENT_STATUS.DISPUTED) {
+      res.status(400);
+      throw new Error("This purchase was disputed and can no longer be completed");
+    }
+
     const intent = await provider.retrieveIntent(payment.providerPaymentId);
 
     // The charge actually went through at Stripe but our own webhook
     // never caught up (the exact scenario POST /payments/:id/refresh
     // exists for) — reconcile it now rather than ever creating a second
-    // intent for a purchase that's already paid for.
+    // intent for a purchase that's already paid for. Reports the
+    // *payment's* resulting status, not Stripe's intent.status — a held
+    // payment reconciles to "success" at the Payment level (idempotency
+    // guard short-circuits) but the purchase itself is still pending, so
+    // this surfaces that rather than claiming the purchase is done.
     if (intent.status === "succeeded") {
-      await reconcilePaymentIntent(payment, payment.providerPaymentId, intent);
-      res.status(200).json({ status: "success", paymentId: payment.id, purchaseId: purchase.id });
+      const result = await reconcilePaymentIntent(payment, payment.providerPaymentId, intent);
+      res.status(200).json({
+        status: result.status,
+        held: payment.isOnHold,
+        paymentId: payment.id,
+        purchaseId: purchase.id,
+      });
       return;
     }
 
@@ -681,7 +703,7 @@ export const approveHeldPayment = asyncHandler(async (req: Request, res: Respons
 // @access  Private (Admin / Super Admin only)
 export const getPayments = asyncHandler(async (req: Request, res: Response) => {
   const { page, limit, skip } = paginationParams(req);
-  const { status, targetType, targetId, user, provider, hasDispute, pendingManualReview } = req.query as {
+  const { status, targetType, targetId, user, provider, hasDispute, pendingManualReview, isOnHold } = req.query as {
     status?: string;
     targetType?: string;
     targetId?: string;
@@ -689,6 +711,7 @@ export const getPayments = asyncHandler(async (req: Request, res: Response) => {
     provider?: string;
     hasDispute?: string;
     pendingManualReview?: string;
+    isOnHold?: string;
   };
 
   const filter: FilterQuery<IPayment> = {};
@@ -719,6 +742,15 @@ export const getPayments = asyncHandler(async (req: Request, res: Response) => {
   // dispute is already findable via status=disputed above.
   if (hasDispute === "true") {
     filter.disputedAt = { $exists: true };
+  }
+
+  // Every currently-held payment, regardless of amount — broader than
+  // pendingManualReview below (which only covers the ones above the
+  // review threshold, and with a threshold set higher than
+  // maxTransactionAmount, that can be none of them at all). Lets the
+  // admin ledger list routine 24h holds as a group too.
+  if (isOnHold === "true") {
+    filter.isOnHold = true;
   }
 
   // Resolved against the *current* setting value, not a stored flag —

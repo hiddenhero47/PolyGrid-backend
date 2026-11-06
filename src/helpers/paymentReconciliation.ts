@@ -29,6 +29,19 @@ export const reconcilePaymentIntent = async (
   intentId: string,
   intent: RetrievedIntent,
 ): Promise<ReconcileResult> => {
+  // Once disputed, never resurrected — handleChargeDispute (paymentController.ts)
+  // deliberately flips a still-held payment to DISPUTED precisely so
+  // nothing is ever credited/unlocked/activated on it. Stripe's own
+  // PaymentIntent stays 'succeeded' even after a dispute, so without this
+  // check a retry (resumeDigitalPurchaseIntent, a late webhook replay, the
+  // pending sweep) would see isSuccess/isAmount/isCurrency all pass below
+  // and overwrite payment.status back to SUCCESS — re-arming the hold for
+  // the next sweep to release value against a charge that's already been
+  // charged back.
+  if (payment.status === PAYMENT_STATUS.DISPUTED) {
+    return { status: "failed", payment };
+  }
+
   if (payment.status === PAYMENT_STATUS.SUCCESS && payment.providerPaymentId === intentId) {
     const subscription =
       payment.targetType === PAYMENT_TARGET_TYPE.SUBSCRIPTION
