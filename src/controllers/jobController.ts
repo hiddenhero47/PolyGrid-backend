@@ -269,17 +269,23 @@ const payoutAvailableAmount = (job: IJob): number =>
 
 // Creates the ledger record of money PolyGrid now actually owes someone,
 // the moment an admin approves a refund/payout request — see
-// systemPayoutModel.ts. Fails loudly (before the request is marked
-// approved) if the beneficiary has never set up a payout account: there's
-// nowhere to record this money going, so the approval can't proceed.
+// systemPayoutModel.ts.
 //
-// Also decides `settlementMethod` here, once, at creation — not
-// recomputed later at settle time — so a recipient's Connect status
-// changing between approval and settlement never silently changes which
-// rail a specific record uses: "stripe" for a payout when the recipient
-// already has a usable Connect account, or for a refund when there's a
-// real Stripe charge on this job to refund against; "manual" otherwise
+// Decides `settlementMethod` here, once, at creation — not recomputed
+// later at settle time — so a recipient's Connect status changing
+// between approval and settlement never silently changes which rail a
+// specific record uses: "stripe" for a payout when the recipient already
+// has a usable Connect account, or for a refund when there's a real
+// Stripe charge on this job to refund against; "manual" otherwise
 // (today's unchanged behavior).
+//
+// A payout account is only actually required when settlement will fall
+// back to "manual" — a Stripe-settled refund reverses the original
+// charge (refundAcrossJobPayments, systemPayoutController.ts) and a
+// Stripe-settled payout goes to the recipient's Connect account
+// (createTransfer); neither ever reads payoutAccount. Only "manual" has
+// nowhere else to send the money, so only it fails loudly here, before
+// the request is marked approved.
 const createSystemPayout = async ({
   requestType,
   job,
@@ -299,18 +305,10 @@ const createSystemPayout = async ({
     "payoutAccount stripeConnectedAccountId stripeConnectPayoutsEnabled",
   );
 
-  if (!beneficiary?.payoutAccount) {
-    const error: AppError = new Error(
-      "The recipient hasn't set up a payout account yet — this can't be approved until they do",
-    );
-    error.statusCode = 400;
-    throw error;
-  }
-
   let settlementMethod: SettlementMethod = SETTLEMENT_METHOD.MANUAL;
 
   if (requestType === SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT) {
-    if (beneficiary.stripeConnectedAccountId && beneficiary.stripeConnectPayoutsEnabled) {
+    if (beneficiary?.stripeConnectedAccountId && beneficiary.stripeConnectPayoutsEnabled) {
       settlementMethod = SETTLEMENT_METHOD.STRIPE;
     }
   } else {
@@ -324,6 +322,14 @@ const createSystemPayout = async ({
     if (hasRefundableStripePayment) settlementMethod = SETTLEMENT_METHOD.STRIPE;
   }
 
+  if (settlementMethod === SETTLEMENT_METHOD.MANUAL && !beneficiary?.payoutAccount) {
+    const error: AppError = new Error(
+      "The recipient hasn't set up a payout account yet — this can't be approved until they do",
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
   await SystemPayout.create({
     requestType,
     targetType: PAYMENT_TARGET_TYPE.JOB,
@@ -333,7 +339,7 @@ const createSystemPayout = async ({
     amount,
     currency: job.currency,
     settlementMethod,
-    payoutAccount: beneficiary.payoutAccount,
+    payoutAccount: beneficiary?.payoutAccount,
     createdBy,
   });
 };

@@ -86,7 +86,11 @@ export interface ISystemPayout extends Document {
   // Snapshotted off User.payoutAccount at approval time — never a live
   // reference, so a recipient changing their account afterward can't
   // silently redirect money already approved for a specific destination.
-  payoutAccount: IPayoutAccount;
+  // Absent when settlementMethod is "stripe": a Stripe-settled refund
+  // reverses the original charge and a Stripe-settled payout goes to the
+  // recipient's Connect account, neither needs a bank destination at all
+  // (see jobController.ts's createSystemPayout).
+  payoutAccount?: IPayoutAccount;
   isLocked: boolean;
   lockedAt?: Date;
   lockedBy?: Types.ObjectId;
@@ -149,7 +153,7 @@ const systemPayoutSchema = new Schema<ISystemPayout>(
       enum: Object.values(SETTLEMENT_METHOD),
       required: true,
     },
-    payoutAccount: { type: payoutAccountSnapshotSchema, required: true },
+    payoutAccount: { type: payoutAccountSnapshotSchema, required: false },
     isLocked: { type: Boolean, default: false },
     lockedAt: { type: Date },
     lockedBy: { type: Schema.Types.ObjectId, ref: "User" },

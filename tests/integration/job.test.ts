@@ -20,7 +20,8 @@ import {
 } from "../setup/fixtures";
 import { Contact } from "../../src/models/contactModel";
 import { Job } from "../../src/models/jobModel";
-import { Payment } from "../../src/models/paymentModel";
+import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../../src/models/paymentModel";
+import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE } from "../../src/models/systemPayoutModel";
 import { IUser } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
@@ -1173,6 +1174,56 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     expect(res.status).toBe(400);
   });
 
+  // The client paid by card and has no payout account on file — and
+  // never needs one here. The refund settles by reversing the original
+  // Stripe charge (refundAcrossJobPayments, systemPayoutController.ts),
+  // never by wiring money to a bank account, so createSystemPayout must
+  // not demand one just because this request type is "refund".
+  it("approves a refund with no payout account on file, when it will settle straight back to the original card", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const createdJob = await createActiveJob(clientUser, providerUser);
+    const adminToken = generateToken(admin);
+
+    const job = await Job.findById(createdJob._id);
+    if (!job) throw new Error("job not found");
+    job.amountPaid = 500;
+    await job.save();
+    await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: clientUser._id,
+      userEmail: clientUser.email,
+      amount: 500,
+      currency: job.currency,
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.SUCCESS,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "pi_real_card_charge",
+    });
+
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+
+    const systemPayout = await SystemPayout.findOne({ requestId: refundId });
+    expect(systemPayout?.settlementMethod).toBe("stripe");
+    expect(systemPayout?.payoutAccount).toBeUndefined();
+  });
+
   it("approving closes the job, moves totalRefunded, and records a SystemPayout; a later correction appends without re-closing", async () => {
     const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const providerUser = await createUser();
@@ -1224,7 +1275,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     expect(systemPayout?.user.toString()).toBe(clientUser.id);
     expect(systemPayout?.amount).toBe(500);
     expect(systemPayout?.status).toBe("pending");
-    expect(systemPayout?.payoutAccount.accountNumber).toBe(TEST_PAYOUT_ACCOUNT.accountNumber);
+    expect(systemPayout?.payoutAccount?.accountNumber).toBe(TEST_PAYOUT_ACCOUNT.accountNumber);
 
     // A second, corrective request on an already-closed job — approving
     // it should append, not fail or re-close/move closedAt.
@@ -1610,7 +1661,7 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
     expect(firstSystemPayout?.requestType).toBe(SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT);
     expect(firstSystemPayout?.user.toString()).toBe(providerUser.id);
     expect(firstSystemPayout?.amount).toBeCloseTo(380);
-    expect(firstSystemPayout?.payoutAccount.accountNumber).toBe(TEST_PAYOUT_ACCOUNT.accountNumber);
+    expect(firstSystemPayout?.payoutAccount?.accountNumber).toBe(TEST_PAYOUT_ACCOUNT.accountNumber);
 
     const nothingLeft = await request(app)
       .post(`/api/jobs/${job._id}/payout-requests`)
