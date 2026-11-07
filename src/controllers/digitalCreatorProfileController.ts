@@ -316,7 +316,16 @@ export const requestDigitalCreatorPayout = asyncHandler(async (req: Request, res
     "payoutAccount stripeConnectedAccountId stripeConnectPayoutsEnabled",
   );
 
-  if (!beneficiary?.payoutAccount) {
+  const settlementMethod: SettlementMethod =
+    beneficiary?.stripeConnectedAccountId && beneficiary.stripeConnectPayoutsEnabled
+      ? SETTLEMENT_METHOD.STRIPE
+      : SETTLEMENT_METHOD.MANUAL;
+
+  // A payout account is only actually needed when settlement will fall
+  // back to "manual" — same reasoning as jobController.ts's
+  // createSystemPayout: a Stripe-settled payout goes to the recipient's
+  // own Connect account and never reads this at all.
+  if (settlementMethod === SETTLEMENT_METHOD.MANUAL && !beneficiary?.payoutAccount) {
     res.status(400);
     throw new Error("Set up your payout account before requesting a payout");
   }
@@ -327,11 +336,6 @@ export const requestDigitalCreatorPayout = asyncHandler(async (req: Request, res
   );
   const currency = unpaidPurchases[0].currency;
 
-  const settlementMethod: SettlementMethod =
-    beneficiary.stripeConnectedAccountId && beneficiary.stripeConnectPayoutsEnabled
-      ? SETTLEMENT_METHOD.STRIPE
-      : SETTLEMENT_METHOD.MANUAL;
-
   const systemPayout = await SystemPayout.create({
     requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
     targetType: SYSTEM_PAYOUT_TARGET_TYPE.DIGITAL_CREATOR_PROFILE,
@@ -341,7 +345,7 @@ export const requestDigitalCreatorPayout = asyncHandler(async (req: Request, res
     amount,
     currency,
     settlementMethod,
-    payoutAccount: beneficiary.payoutAccount,
+    payoutAccount: beneficiary?.payoutAccount,
     createdBy: requester._id,
   });
 

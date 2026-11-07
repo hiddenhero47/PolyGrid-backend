@@ -18,16 +18,27 @@ import request from "supertest";
 import mongoose from "mongoose";
 import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
-import { createUser, createAdmin, createCustomerCare, createActiveJob, generateToken } from "../setup/fixtures";
+import {
+  createUser,
+  createAdmin,
+  createCustomerCare,
+  createActiveJob,
+  createDigitalCreatorProfile,
+  createDigitalProduct,
+  createDigitalPurchase,
+  generateToken,
+} from "../setup/fixtures";
 import {
   SystemPayout,
   SYSTEM_PAYOUT_REQUEST_TYPE,
   SYSTEM_PAYOUT_STATUS,
   SETTLEMENT_METHOD,
+  SYSTEM_PAYOUT_TARGET_TYPE,
 } from "../../src/models/systemPayoutModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../../src/models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
+import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
 
 const app = createApp();
 
@@ -447,5 +458,102 @@ describe("PATCH /api/system-payouts/:id/failed", () => {
         variables: expect.objectContaining({ paid: false, failureReason: "Account number rejected by the bank" }),
       }),
     );
+  });
+});
+
+// requestDigitalCreatorPayout bundles unpaid purchases into one
+// DIGITAL_CREATOR_PROFILE-targeted SystemPayout and flags each
+// "requested" (payoutRequestId pointing at it) — settling that payout one
+// way or the other must close the loop on those purchases too, or they
+// never leave "requested" (see settleDigitalCreatorPurchases,
+// systemPayoutController.ts).
+describe("settling a DIGITAL_CREATOR_PROFILE payout closes the loop on its DigitalPurchases", () => {
+  const setUpRequestedPurchases = async () => {
+    const admin = await createAdmin();
+    const creatorUser = await createUser();
+    const profile = await createDigitalCreatorProfile({ user: creatorUser });
+    const product = await createDigitalProduct({ creator: profile, price: 100 });
+    const buyer = await createUser();
+    const purchase = await createDigitalPurchase({
+      product,
+      buyer,
+      creator: profile,
+      status: DIGITAL_PURCHASE_STATUS.SUCCESS,
+      platformFeePercent: 10,
+    });
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
+      targetType: SYSTEM_PAYOUT_TARGET_TYPE.DIGITAL_CREATOR_PROFILE,
+      targetId: profile._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: creatorUser._id,
+      amount: 90,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.MANUAL,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    await DigitalPurchase.updateOne(
+      { _id: purchase._id },
+      { payoutStatus: "requested", payoutRequestId: payout._id },
+    );
+
+    return { admin, payout, purchase };
+  };
+
+  it("marks paid -> flips its DigitalPurchases to PAID", async () => {
+    const { admin, payout, purchase } = await setUpRequestedPurchases();
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    const updated = await DigitalPurchase.findById(purchase._id);
+    expect(updated?.payoutStatus).toBe("paid");
+  });
+
+  it("marks failed -> returns its DigitalPurchases to UNPAID and un-links payoutRequestId", async () => {
+    const { admin, payout, purchase } = await setUpRequestedPurchases();
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/failed`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ failureReason: "Account number rejected by the bank" });
+
+    expect(res.status).toBe(200);
+    const updated = await DigitalPurchase.findById(purchase._id);
+    expect(updated?.payoutStatus).toBe("unpaid");
+    expect(updated?.payoutRequestId).toBeUndefined();
+  });
+
+  it("never touches DigitalPurchase at all for a JOB-targeted payout", async () => {
+    const admin = await createAdmin();
+    const recipient = await createUser({ payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" } });
+    const clientUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: recipient });
+
+    const payout = await SystemPayout.create({
+      requestType: SYSTEM_PAYOUT_REQUEST_TYPE.PAYOUT,
+      targetType: SYSTEM_PAYOUT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      requestId: new mongoose.Types.ObjectId(),
+      user: recipient._id,
+      amount: 200,
+      currency: "USD",
+      settlementMethod: SETTLEMENT_METHOD.MANUAL,
+      payoutAccount: { accountName: "Test", accountNumber: "0123456789", bankName: "Test Bank", country: "NG" },
+      createdBy: admin._id,
+    });
+
+    const res = await request(app)
+      .patch(`/api/system-payouts/${payout.id}/paid`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({});
+
+    expect(res.status).toBe(200);
   });
 });

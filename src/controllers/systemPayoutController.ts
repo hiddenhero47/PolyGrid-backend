@@ -13,6 +13,7 @@ import {
 } from "../models/systemPayoutModel";
 import { Job } from "../models/jobModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
+import { DigitalPurchase, DIGITAL_PURCHASE_PAYOUT_STATUS } from "../models/digitalPurchaseModel";
 import { User, IUser } from "../models/userModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
@@ -148,6 +149,36 @@ const resolveTargetLabel = async (payout: ISystemPayout): Promise<string> => {
   return job?.jobTitle ?? "a job";
 };
 
+// requestDigitalCreatorPayout bundles every unpaid DigitalPurchase into
+// one SystemPayout and flags each REQUESTED, but nothing closed the loop
+// on the other end — settling (or failing) that SystemPayout never told
+// the purchases it actually covers. Left unfixed, a paid-out purchase
+// stays "requested" forever: getDigitalPurchaseExposure (paymentGuardrails.ts)
+// only excludes PAID, so it keeps counting toward maxOutstandingExposure
+// indefinitely, and a failed payout leaves its purchases stuck —
+// REQUESTED, never UNPAID again — so they can never be bundled into a
+// retry. Matched on payoutRequestId, the link requestDigitalCreatorPayout
+// itself set. Only ever relevant for a DIGITAL_CREATOR_PROFILE-targeted
+// payout — a JOB-targeted one has no DigitalPurchase rows to match at all.
+const settleDigitalCreatorPurchases = async (payout: ISystemPayout, paid: boolean): Promise<void> => {
+  if (payout.targetType !== SYSTEM_PAYOUT_TARGET_TYPE.DIGITAL_CREATOR_PROFILE) return;
+
+  if (paid) {
+    await DigitalPurchase.updateMany(
+      { payoutRequestId: payout._id },
+      { payoutStatus: DIGITAL_PURCHASE_PAYOUT_STATUS.PAID },
+    );
+  } else {
+    // Back to UNPAID and un-linked, so the next requestDigitalCreatorPayout
+    // call picks these up again instead of them sitting REQUESTED forever
+    // against a payout that's never going to settle.
+    await DigitalPurchase.updateMany(
+      { payoutRequestId: payout._id },
+      { payoutStatus: DIGITAL_PURCHASE_PAYOUT_STATUS.UNPAID, $unset: { payoutRequestId: "" } },
+    );
+  }
+};
+
 const loadPendingPayout = async (id: string): Promise<ISystemPayout> => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     const error: AppError = new Error("System payout not found");
@@ -269,6 +300,7 @@ export const markSystemPayoutPaid = asyncHandler(async (req: Request, res: Respo
   payout.settledAt = new Date();
 
   await payout.save();
+  await settleDigitalCreatorPurchases(payout, true);
 
   await notifySystemPayoutSettled(payout, await resolveTargetLabel(payout), true);
 
@@ -294,6 +326,7 @@ export const markSystemPayoutFailed = asyncHandler(async (req: Request, res: Res
   payout.failureReason = failureReason;
 
   await payout.save();
+  await settleDigitalCreatorPurchases(payout, false);
 
   await notifySystemPayoutSettled(payout, await resolveTargetLabel(payout), false);
 

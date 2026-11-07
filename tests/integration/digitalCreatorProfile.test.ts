@@ -235,6 +235,25 @@ describe("POST /api/digital-creator-profiles/me/request-payout", () => {
     expect(res.status).toBe(400);
   });
 
+  // Same reasoning as jobController.ts's createSystemPayout fix (dde4cfd):
+  // a payout account is only actually needed when settlement will fall
+  // back to "manual" — a Stripe-Connect-ready creator's payout goes to
+  // their own connected account and never reads payoutAccount at all.
+  it("succeeds without a payout account on file when the creator is Stripe Connect ready", async () => {
+    const creatorUser = await createUser({ stripeConnectedAccountId: "acct_123", stripeConnectPayoutsEnabled: true });
+    const profile = await createDigitalCreatorProfile({ user: creatorUser });
+    const product = await createDigitalProduct({ creator: profile, price: 100 });
+    const buyer = await createUser();
+    await createDigitalPurchase({ product, buyer, creator: profile });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+
+    expect(res.status).toBe(201);
+    expect(res.body.systemPayout.settlementMethod).toBe("stripe");
+  });
+
   it("bundles every unpaid purchase into one SystemPayout, net of the platform fee, and marks them requested", async () => {
     const creatorUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const profile = await createDigitalCreatorProfile({ user: creatorUser });
