@@ -36,7 +36,11 @@ const paginationParams = (req: Request) => {
 // "business_certificate") — VerificationTemplate is what tells the caller
 // (and the frontend, via GET /api/verification-templates/lookup) what
 // field names, how many, and in what formats are expected.
-const resolveAndSaveDocuments = async (
+// Exported for payoutKycController.ts's document track — same job
+// (save whichever of a fixed set of required files arrived, all-or-
+// nothing), just against 3 fixed slots instead of a template's dynamic
+// document array.
+export const resolveAndSaveDocuments = async (
   userId: string,
   required: ITemplateDocument[],
   files: Express.Multer.File[],

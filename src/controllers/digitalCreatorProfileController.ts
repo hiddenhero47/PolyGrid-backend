@@ -21,6 +21,7 @@ import {
 } from "../helpers/fileStorage";
 import { toPublicDigitalProduct } from "./digitalProductController";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS, DIGITAL_PURCHASE_PAYOUT_STATUS } from "../models/digitalPurchaseModel";
+import { PayoutKyc, PAYOUT_KYC_STATUS } from "../models/payoutKycModel";
 import { User } from "../models/userModel";
 import {
   SystemPayout,
@@ -328,6 +329,14 @@ export const requestDigitalCreatorPayout = asyncHandler(async (req: Request, res
   if (settlementMethod === SETTLEMENT_METHOD.MANUAL && !beneficiary?.payoutAccount) {
     res.status(400);
     throw new Error("Set up your payout account before requesting a payout");
+  }
+
+  // Independent of settlementMethod — see jobController.ts's
+  // createSystemPayout for the same gate and its own reasoning.
+  const payoutKyc = await PayoutKyc.findOne({ user: requester._id });
+  if (payoutKyc?.status !== PAYOUT_KYC_STATUS.VERIFIED) {
+    res.status(400);
+    throw new Error("Complete payout KYC before requesting a payout");
   }
 
   const amount = unpaidPurchases.reduce(

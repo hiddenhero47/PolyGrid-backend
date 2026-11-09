@@ -7,6 +7,7 @@ import {
   approveHeldPayment,
   stripeWebhook,
   stripeConnectWebhook,
+  paystackWebhook,
 } from "../controllers/paymentController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
@@ -29,5 +30,10 @@ router.post("/stripe/webhook", stripeWebhook);
 // separate Connect-specific endpoint with its own signing secret — see
 // helpers/stripeConnect.ts's constructConnectWebhookEvent.
 router.post("/stripe/connect-webhook", stripeConnectWebhook);
+// Same raw-body/no-`protect` reasoning as /stripe/webhook above, just
+// Paystack's own signing scheme (see paystackProvider.ts's
+// constructWebhookEvent) — its raw-body scoping is also registered in
+// app.ts.
+router.post("/paystack/webhook", paystackWebhook);
 
 export default router;

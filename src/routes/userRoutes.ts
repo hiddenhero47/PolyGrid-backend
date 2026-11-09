@@ -23,6 +23,7 @@ import {
   changeUserRole,
   setAccountStatus,
 } from "../controllers/userController";
+import { submitPayoutKyc, getMyPayoutKyc } from "../controllers/payoutKycController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { verifyIdentity } from "../middleware/verifyIdentityMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
@@ -70,6 +71,14 @@ router.put(
   updatePayoutAccount,
 );
 router.post("/me/connect/onboard", protect, startConnectOnboarding);
+// multipart/form-data when the caller's country falls back to the
+// document track (3 image fields, no other fields) — plain JSON
+// (idType/idNumber) for the automated track. No single static shape to
+// run validateBody against, so submitPayoutKyc validates inline, same
+// reasoning as submitVerification. verifyIdentity re-proof is required
+// either way, same sensitivity tier as /payout-account above.
+router.post("/me/payout-kyc", protect, verifyIdentity, submitPayoutKyc);
+router.get("/me/payout-kyc", protect, getMyPayoutKyc);
 
 router.post(
   "/2fa/setup",

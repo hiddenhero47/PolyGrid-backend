@@ -23,6 +23,7 @@ import {
 } from "../models/systemPayoutModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
+import { PayoutKyc, PAYOUT_KYC_STATUS } from "../models/payoutKycModel";
 import { resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
 import {
   uploadHandler,
@@ -325,6 +326,20 @@ const createSystemPayout = async ({
   if (settlementMethod === SETTLEMENT_METHOD.MANUAL && !beneficiary?.payoutAccount) {
     const error: AppError = new Error(
       "The recipient hasn't set up a payout account yet — this can't be approved until they do",
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Independent of settlementMethod — a brand-new compliance requirement,
+  // not a bank-destination concern (see payoutKycModel.ts): before any
+  // money leaves escrow for anyone, for any reason, PolyGrid needs its
+  // own verified identity on file for the recipient, separate from
+  // whatever KYC Stripe/Paystack do on their own account.
+  const payoutKyc = await PayoutKyc.findOne({ user: beneficiaryId });
+  if (payoutKyc?.status !== PAYOUT_KYC_STATUS.VERIFIED) {
+    const error: AppError = new Error(
+      "The recipient hasn't completed payout KYC yet — this can't be approved until they do",
     );
     error.statusCode = 400;
     throw error;

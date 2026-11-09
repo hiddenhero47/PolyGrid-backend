@@ -23,6 +23,7 @@ import { Job } from "../../src/models/jobModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../../src/models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE } from "../../src/models/systemPayoutModel";
+import { PayoutKyc } from "../../src/models/payoutKycModel";
 import { IUser } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 
@@ -56,6 +57,13 @@ const TEST_PAYOUT_ACCOUNT = {
   bankName: "Test Bank",
   country: "NG",
 };
+
+// createSystemPayout refuses to approve a refund/payout request unless
+// the beneficiary has a verified PayoutKyc record on file, independent of
+// payoutAccount/settlementMethod (see jobController.ts) — this is a
+// valid shape for any test that needs one set up to get past that check.
+const verifyPayoutKyc = (user: IUser) =>
+  PayoutKyc.create({ user: user._id, country: user.country ?? "NG", method: "automated", status: "verified" });
 
 // Creates + confirms a job in one go, returning it (status: active, one
 // implicit 100%-payment stage unless `stages` is passed).
@@ -1183,6 +1191,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     const clientUser = await createUser();
     const providerUser = await createUser();
     const admin = await createAdmin();
+    await verifyPayoutKyc(clientUser);
     const createdJob = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
 
@@ -1228,6 +1237,7 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
     const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const providerUser = await createUser();
     const admin = await createAdmin();
+    await verifyPayoutKyc(clientUser);
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
 
@@ -1437,6 +1447,7 @@ describe("refund counterparty approval (counterparty-approve/-reject, and approv
     const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const providerUser = await createUser();
     const admin = await createAdmin();
+    await verifyPayoutKyc(clientUser);
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
 
@@ -1607,6 +1618,7 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
     const clientUser = await createUser();
     const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
+    await verifyPayoutKyc(providerUser);
     const job = await createActiveJob(clientUser, providerUser, {
       totalAmount: 1000,
       stages: [{ details: ["a"], payment: 40 }, { details: ["b"], payment: 60 }],
@@ -1812,6 +1824,7 @@ describe("payout counterparty approval (counterparty-approve/-reject, and approv
     const clientUser = await createUser();
     const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
+    await verifyPayoutKyc(providerUser);
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
     const providerToken = generateToken(providerUser);

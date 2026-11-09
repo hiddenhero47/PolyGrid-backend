@@ -1,6 +1,7 @@
 import { Job } from "../models/jobModel";
 import { IUser } from "../models/userModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_RAIL, PaymentRail, PaymentTargetType } from "../models/paymentModel";
+import { PAYMENT_PROVIDER_NAME, PaymentProviderName } from "../models/paymentProviderModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS, DIGITAL_PURCHASE_PAYOUT_STATUS } from "../models/digitalPurchaseModel";
 import { SYSTEM_COUNTRY } from "./countryReference";
 import { getSystemSettings } from "./systemSettings";
@@ -19,6 +20,19 @@ const badRequest = (message: string): AppError => {
 // systemPayoutController.ts).
 export const resolveRail = (targetType: PaymentTargetType): PaymentRail =>
   targetType === PAYMENT_TARGET_TYPE.SUBSCRIPTION ? PAYMENT_RAIL.PLATFORM : PAYMENT_RAIL.MARKETPLACE;
+
+// Which gateway actually collects a charge, decided by the buyer's own
+// country — Stripe stays the global default (it's the more broadly
+// supported one), and SystemSettings.countryProviderOverrides is a sparse
+// map of just the countries that deviate (today, only
+// `{ NG: "paystack" }`, since Stripe can't pay out to a Nigerian bank
+// account at all — see docs/payments-plan.md). Called once per
+// intent-creation request, right alongside assertPaymentAllowed, at every
+// one of paymentController.ts's handle*PaymentIntent functions.
+export const resolveProviderForCountry = async (country: string): Promise<PaymentProviderName> => {
+  const settings = await getSystemSettings();
+  return settings.countryProviderOverrides[country] ?? PAYMENT_PROVIDER_NAME.STRIPE;
+};
 
 // `transactionCountryTo` is SYSTEM_COUNTRY on the platform rail (the money
 // stays with PolyGrid), or the provider/creator's own country on the

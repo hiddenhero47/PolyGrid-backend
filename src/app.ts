@@ -33,6 +33,7 @@ import deploymentRoutes from "./routes/deploymentRoutes";
 import statsRoutes from "./routes/statsRoutes";
 import notificationRoutes from "./routes/notificationRoutes";
 import systemSettingsRoutes from "./routes/systemSettingsRoutes";
+import payoutKycRoutes from "./routes/payoutKycRoutes";
 import { viewPrivateFile, downloadPrivateFile } from "./controllers/fileController";
 import { downloadDigitalStoreFile } from "./controllers/digitalStoreController";
 import { PUBLIC_DIR } from "./helpers/fileStorage";
@@ -53,6 +54,9 @@ const createApp = (): Express => {
   // backend uses for its own Stripe callback route.
   app.use("/api/payments/stripe/webhook", express.raw({ type: "application/json" }));
   app.use("/api/payments/stripe/connect-webhook", express.raw({ type: "application/json" }));
+  // Same reasoning, Paystack's own signing scheme — see
+  // paystackProvider.ts's constructWebhookEvent.
+  app.use("/api/payments/paystack/webhook", express.raw({ type: "application/json" }));
   app.use(express.json({ limit: "10mb" }));
   app.use(forms.any());
   app.use(express.urlencoded({ extended: false, limit: "10mb" }));
@@ -109,6 +113,7 @@ const createApp = (): Express => {
   app.use("/api/stats", statsRoutes);
   app.use("/api/notifications", notificationRoutes);
   app.use("/api/system-settings", systemSettingsRoutes);
+  app.use("/api/payout-kyc", payoutKycRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

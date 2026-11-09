@@ -8,6 +8,10 @@ import mongoose, { Document, Model, Schema } from "mongoose";
 // Subscription snapshots a Plan's fields rather than re-reading it live.
 export const PAYMENT_PROVIDER_NAME = {
   STRIPE: "stripe",
+  // Nigeria's collection rail — Stripe can't pay out to a Nigerian bank
+  // account at all (see docs/payments-plan.md), so NG routes to this
+  // provider instead via SystemSettings.countryProviderOverrides.
+  PAYSTACK: "paystack",
   // The interim "an admin recorded this happened" path — see
   // subscriptionController.grantSubscription and jobController.recordPayment.
   MANUAL: "manual",

@@ -40,7 +40,7 @@ import { Subscription, SUBSCRIPTION_STATUS } from "../../src/models/subscription
 import { User } from "../../src/models/userModel";
 import { PLAN_TIER } from "../../src/models/planModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
-import { sweepPendingStripePayments } from "../../src/helpers/paymentReconciliation";
+import { sweepPendingProviderPayments } from "../../src/helpers/paymentReconciliation";
 import { SystemSettings } from "../../src/models/systemSettingsModel";
 
 // Every buyer in this file needs a supported country for the new payment
@@ -1103,7 +1103,7 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
   });
 });
 
-describe("sweepPendingStripePayments (skipped unless a real STRIPE_SECRET_KEY is set)", () => {
+describe("sweepPendingProviderPayments (skipped unless a real STRIPE_SECRET_KEY is set)", () => {
   // Skipped: same reason as "funds a job's escrow end-to-end" above.
   it.skip("resolves a payment that succeeded at Stripe but never got its webhook", async () => {
     const clientUser = await createUser();
@@ -1127,7 +1127,7 @@ describe("sweepPendingStripePayments (skipped unless a real STRIPE_SECRET_KEY is
       { $set: { createdAt: new Date(Date.now() - 15 * 60 * 1000) } },
     );
 
-    const result = await sweepPendingStripePayments();
+    const result = await sweepPendingProviderPayments();
 
     expect(result.checked).toBeGreaterThanOrEqual(1);
     expect(result.resolved).toBeGreaterThanOrEqual(1);
@@ -1161,7 +1161,7 @@ describe("sweepPendingStripePayments (skipped unless a real STRIPE_SECRET_KEY is
       { $set: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) } },
     );
 
-    const result = await sweepPendingStripePayments();
+    const result = await sweepPendingProviderPayments();
 
     expect(result.abandoned).toBeGreaterThanOrEqual(1);
 
@@ -1189,7 +1189,7 @@ describe("sweepPendingStripePayments (skipped unless a real STRIPE_SECRET_KEY is
 
     // Freshly created — well inside the 10-minute cutoff, so the sweep
     // should skip it even though Stripe has already confirmed it.
-    await sweepPendingStripePayments();
+    await sweepPendingProviderPayments();
 
     const updatedPayment = await Payment.findById(payment!.id);
     expect(updatedPayment?.status).toBe("pending");

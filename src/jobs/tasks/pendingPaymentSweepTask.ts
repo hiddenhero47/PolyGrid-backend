@@ -1,10 +1,11 @@
 import cron from "node-cron";
 import { cronStatus } from "../status";
-import { sweepPendingStripePayments } from "../../helpers/paymentReconciliation";
+import { sweepPendingProviderPayments } from "../../helpers/paymentReconciliation";
 
 // Every 15 minutes — recovers a payment whose webhook never arrived
 // (misconfigured URL, an outage, a dev tunnel restarting mid-session) by
-// re-checking it directly against Stripe, and closes out ones old enough
+// re-checking it directly against whichever gateway actually created it,
+// and closes out ones old enough
 // that waiting on the customer to resume checkout is no longer realistic.
 // The actual sweep logic lives in helpers/paymentReconciliation.ts (pure,
 // directly unit-testable); this file is only the cron-scheduling +
@@ -25,7 +26,7 @@ export const pendingPaymentSweep = (): void => {
 
         console.log(`[CRON][PENDING_PAYMENT_SWEEP] Started at ${new Date().toISOString()}`);
 
-        const { checked, resolved, abandoned } = await sweepPendingStripePayments();
+        const { checked, resolved, abandoned } = await sweepPendingProviderPayments();
 
         console.log(
           `[CRON][PENDING_PAYMENT_SWEEP] Completed. Checked ${checked}, resolved ${resolved}, abandoned ${abandoned}.`,

@@ -1,4 +1,6 @@
 import { SystemSettings, ISystemSettings } from "../models/systemSettingsModel";
+import { PaymentProviderName } from "../models/paymentProviderModel";
+import { IdentityVerificationProviderName } from "../providers/identityVerificationProviders/types";
 
 // Conservative on purpose — before an admin has ever touched
 // PATCH /api/system-settings, nothing should be able to move real money:
@@ -12,6 +14,8 @@ const DEFAULTS = {
   fraudHoldThresholdAmount: 0,
   fraudHoldHours: 24,
   manualReviewThresholdAmount: 0,
+  countryProviderOverrides: {} as Record<string, PaymentProviderName>,
+  countryKycProviders: {} as Record<string, IdentityVerificationProviderName>,
 };
 
 // The one singleton — created on first read if it doesn't exist yet,

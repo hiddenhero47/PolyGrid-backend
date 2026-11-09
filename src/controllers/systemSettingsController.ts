@@ -29,6 +29,8 @@ export const updateSettings = asyncHandler(async (req: Request, res: Response) =
     fraudHoldThresholdAmount,
     fraudHoldHours,
     manualReviewThresholdAmount,
+    countryProviderOverrides,
+    countryKycProviders,
   } = req.body;
 
   const settings = await getSystemSettings();
@@ -39,6 +41,8 @@ export const updateSettings = asyncHandler(async (req: Request, res: Response) =
   if (fraudHoldThresholdAmount !== undefined) settings.fraudHoldThresholdAmount = fraudHoldThresholdAmount;
   if (fraudHoldHours !== undefined) settings.fraudHoldHours = fraudHoldHours;
   if (manualReviewThresholdAmount !== undefined) settings.manualReviewThresholdAmount = manualReviewThresholdAmount;
+  if (countryProviderOverrides !== undefined) settings.countryProviderOverrides = countryProviderOverrides;
+  if (countryKycProviders !== undefined) settings.countryKycProviders = countryKycProviders;
   settings.updatedBy = admin._id as typeof settings.updatedBy;
 
   await settings.save();

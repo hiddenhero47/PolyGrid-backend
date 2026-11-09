@@ -100,15 +100,17 @@ const REFRESH_AFTER_MS = 10 * 60 * 1000;
 // the payment out instead of leaving it 'pending' forever.
 const ABANDON_AFTER_MS = 24 * 60 * 60 * 1000;
 
-// @desc    Re-checks every still-PENDING Stripe payment old enough that its
-//          webhook should have already arrived, via the same
-//          reconcilePaymentIntent the webhook/refresh endpoint use. A
-//          payment that's actually succeeded at Stripe gets activated here
+// @desc    Re-checks every still-PENDING, provider-backed payment old
+//          enough that its webhook should have already arrived, via the
+//          same reconcilePaymentIntent the webhook/refresh endpoint use —
+//          whichever real gateway (Stripe, Paystack, …) actually created
+//          it. A payment that's actually succeeded gets activated here
 //          instead of staying stuck; one that's old enough and still
 //          unresolved gets marked 'failed' (and, if it was funding a
 //          subscription purchase, that subscription is canceled) rather
-//          than lingering indefinitely.
-export const sweepPendingStripePayments = async (): Promise<{
+//          than lingering indefinitely. Never matches 'manual' payments —
+//          those were never started with a real gateway to re-check.
+export const sweepPendingProviderPayments = async (): Promise<{
   checked: number;
   resolved: number;
   abandoned: number;
@@ -116,10 +118,8 @@ export const sweepPendingStripePayments = async (): Promise<{
   const refreshCutoff = new Date(Date.now() - REFRESH_AFTER_MS);
   const abandonCutoff = new Date(Date.now() - ABANDON_AFTER_MS);
 
-  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
-
   const pending = await Payment.find({
-    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    provider: { $ne: PAYMENT_PROVIDER_NAME.MANUAL },
     status: PAYMENT_STATUS.PENDING,
     createdAt: { $lte: refreshCutoff },
     providerPaymentId: { $exists: true, $ne: null },
@@ -130,6 +130,7 @@ export const sweepPendingStripePayments = async (): Promise<{
 
   for (const payment of pending) {
     try {
+      const provider = getPaymentProvider(payment.provider);
       const intent = await provider.retrieveIntent(payment.providerPaymentId as string);
       const result = await reconcilePaymentIntent(payment, payment.providerPaymentId as string, intent);
 

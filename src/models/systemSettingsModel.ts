@@ -1,4 +1,6 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { PaymentProviderName } from "./paymentProviderModel";
+import { IdentityVerificationProviderName } from "../providers/identityVerificationProviders/types";
 
 // A true singleton — exactly one document ever exists (see
 // helpers/systemSettings.ts's getSystemSettings, the only way this is ever
@@ -39,6 +41,19 @@ export interface ISystemSettings extends Document {
   fraudHoldThresholdAmount: number;
   fraudHoldHours: number;
   manualReviewThresholdAmount: number;
+  // Sparse — only countries that deviate from Stripe need an entry here
+  // (today just `{ NG: "paystack" }`, since Stripe can't pay out to a
+  // Nigerian bank account at all, see docs/payments-plan.md). A country
+  // with no entry falls back to Stripe, which stays the global default —
+  // see helpers/paymentGuardrails.ts's resolveProviderForCountry.
+  countryProviderOverrides: Record<string, PaymentProviderName>;
+  // Which countries get the automated payout-KYC track (a BVN/NIN number
+  // + name match against a real vendor) vs. the document track (3 fixed
+  // ID/face images, admin-reviewed) — see payoutKycModel.ts and
+  // payoutKycController.ts. Sparse, same reasoning as
+  // countryProviderOverrides: a country absent from this map always gets
+  // the document track, since BVN/NIN only exist for Nigeria.
+  countryKycProviders: Record<string, IdentityVerificationProviderName>;
   updatedBy?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -56,6 +71,14 @@ const systemSettingsSchema = new Schema<ISystemSettings>(
     fraudHoldThresholdAmount: { type: Number, default: 0, min: 0 },
     fraudHoldHours: { type: Number, default: 24, min: 0 },
     manualReviewThresholdAmount: { type: Number, default: 0, min: 0 },
+    countryProviderOverrides: {
+      type: Schema.Types.Mixed,
+      default: () => ({}),
+    },
+    countryKycProviders: {
+      type: Schema.Types.Mixed,
+      default: () => ({}),
+    },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true },

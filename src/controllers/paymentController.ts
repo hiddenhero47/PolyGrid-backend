@@ -20,7 +20,12 @@ import {
 } from "../helpers/profileSubscriptionSync";
 import { reconcilePaymentIntent } from "../helpers/paymentReconciliation";
 import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
-import { assertPaymentAllowed, resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
+import {
+  assertPaymentAllowed,
+  resolveRail,
+  buildTransactionCountries,
+  resolveProviderForCountry,
+} from "../helpers/paymentGuardrails";
 import { constructConnectWebhookEvent } from "../helpers/stripeConnect";
 import { completePaymentTarget } from "../helpers/paymentCompletion";
 import { notifyPaymentHoldUpdate } from "../helpers/paymentHoldNotify";
@@ -80,6 +85,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
 
   const providerUser = await User.findById(job.provider.userId).select("country");
   const rail = resolveRail(PAYMENT_TARGET_TYPE.JOB);
+  const providerName = await resolveProviderForCountry(requester.country as string);
 
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.JOB,
@@ -88,13 +94,13 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     userEmail: requester.email,
     amount,
     currency: job.currency,
-    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    provider: providerName,
     status: PAYMENT_STATUS.PENDING,
     rail,
     ...buildTransactionCountries(rail, requester.country, providerUser?.country),
   });
 
-  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+  const provider = getPaymentProvider(providerName);
   const { providerPaymentId, clientSecret } = await provider.createIntent({
     amount,
     currency: job.currency,
@@ -105,7 +111,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
   payment.providerPaymentId = providerPaymentId;
   await payment.save();
 
-  res.status(201).json({ clientSecret, paymentId: payment.id });
+  res.status(201).json({ clientSecret, paymentId: payment.id, provider: providerName });
 };
 
 // A free plan (price 0) has no real charge to make — Stripe's own
@@ -196,6 +202,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   });
 
   const rail = resolveRail(PAYMENT_TARGET_TYPE.SUBSCRIPTION);
+  const providerName = await resolveProviderForCountry(requester.country as string);
 
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
@@ -204,13 +211,13 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     userEmail: requester.email,
     amount: plan.price,
     currency: plan.currency,
-    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    provider: providerName,
     status: PAYMENT_STATUS.PENDING,
     rail,
     ...buildTransactionCountries(rail, requester.country),
   });
 
-  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+  const provider = getPaymentProvider(providerName);
   const { providerPaymentId, clientSecret } = await provider.createIntent({
     amount: plan.price,
     currency: plan.currency,
@@ -223,7 +230,13 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
 
   res
     .status(201)
-    .json({ requiresPayment: true, clientSecret, paymentId: payment.id, subscriptionId: subscription.id });
+    .json({
+      requiresPayment: true,
+      clientSecret,
+      paymentId: payment.id,
+      subscriptionId: subscription.id,
+      provider: providerName,
+    });
 };
 
 // Called when the buyer already has a PENDING DigitalPurchase for this
@@ -237,7 +250,6 @@ const resumeDigitalPurchaseIntent = async (
   purchase: IDigitalPurchase,
 ): Promise<void> => {
   const requester = req.user as IUser;
-  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
 
   // Most recent first — resumeDigitalPurchaseIntent's own fallback branch
   // below can leave more than one Payment against the same purchase (an
@@ -261,6 +273,11 @@ const resumeDigitalPurchaseIntent = async (
       throw new Error("This purchase was disputed and can no longer be completed");
     }
 
+    // Whichever gateway actually created this intent — not necessarily
+    // what the buyer's country resolves to right now (that's only
+    // consulted below, for a brand new intent); this one must match the
+    // intent it's retrieving.
+    const provider = getPaymentProvider(payment.provider);
     const intent = await provider.retrieveIntent(payment.providerPaymentId);
 
     // The charge actually went through at Stripe but our own webhook
@@ -303,14 +320,15 @@ const resumeDigitalPurchaseIntent = async (
     ? await User.findById(purchaseCreator.userId).select("country")
     : null;
   const rail = resolveRail(PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
+  const providerName = await resolveProviderForCountry(requester.country as string);
 
   // No provider intent at all (shouldn't happen in practice), or it's
   // genuinely dead (canceled) — a brand new Payment record, never the
   // old one. createIntent's idempotency key is derived from the Payment
   // id (see stripeProvider.ts), so reusing the old Payment's id here
   // would just hand back that same dead intent; a new Payment gives
-  // Stripe's idempotency layer a fresh identity to mint a real new one
-  // against.
+  // the provider's own idempotency layer a fresh identity to mint a real
+  // new one against.
   const freshPayment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
     targetId: purchase._id,
@@ -318,13 +336,13 @@ const resumeDigitalPurchaseIntent = async (
     userEmail: requester.email,
     amount: purchase.priceSnapshot,
     currency: purchase.currency,
-    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    provider: providerName,
     status: PAYMENT_STATUS.PENDING,
     rail,
     ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
 
-  const { providerPaymentId, clientSecret } = await provider.createIntent({
+  const { providerPaymentId, clientSecret } = await getPaymentProvider(providerName).createIntent({
     amount: purchase.priceSnapshot,
     currency: purchase.currency,
     receiptEmail: requester.email,
@@ -334,7 +352,9 @@ const resumeDigitalPurchaseIntent = async (
   freshPayment.providerPaymentId = providerPaymentId;
   await freshPayment.save();
 
-  res.status(201).json({ clientSecret, paymentId: freshPayment.id, purchaseId: purchase.id, resumed: true });
+  res
+    .status(201)
+    .json({ clientSecret, paymentId: freshPayment.id, purchaseId: purchase.id, resumed: true, provider: providerName });
 };
 
 // A digital product is bought directly, no Job/escrow involved at all —
@@ -444,6 +464,8 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     return;
   }
 
+  const providerName = await resolveProviderForCountry(requester.country as string);
+
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
     targetId: purchase._id,
@@ -451,13 +473,13 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     userEmail: requester.email,
     amount: product.price,
     currency: product.currency,
-    provider: PAYMENT_PROVIDER_NAME.STRIPE,
+    provider: providerName,
     status: PAYMENT_STATUS.PENDING,
     rail,
     ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
 
-  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+  const provider = getPaymentProvider(providerName);
   const { providerPaymentId, clientSecret } = await provider.createIntent({
     amount: product.price,
     currency: product.currency,
@@ -468,7 +490,7 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
   payment.providerPaymentId = providerPaymentId;
   await payment.save();
 
-  res.status(201).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id });
+  res.status(201).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id, provider: providerName });
 };
 
 // @desc    Create a Stripe PaymentIntent to fund a job's escrow, purchase a
@@ -541,6 +563,53 @@ export const stripeWebhook = asyncHandler(async (req: Request, res: Response) =>
   const intent = await provider.retrieveIntent(intentObject.id);
 
   await reconcilePaymentIntent(payment, intentObject.id, intent);
+});
+
+// @desc    Paystack webhook — on charge.success, marks the Payment
+//          successful and activates its target, same as stripeWebhook.
+//          Separate route/signing scheme from Stripe's own webhook (see
+//          paystackProvider.ts's constructWebhookEvent) — Paystack has no
+//          charge.dispute.created equivalent wired up here yet.
+// @route   POST /api/payments/paystack/webhook
+// @access  Public — authenticated by Paystack's signature, not a user
+//          token. Mounted on a raw body (see app.ts); never put `protect`
+//          here.
+export const paystackWebhook = asyncHandler(async (req: Request, res: Response) => {
+  const signature = req.headers["x-paystack-signature"];
+
+  if (typeof signature !== "string") {
+    res.status(400);
+    throw new Error("Missing Paystack signature");
+  }
+
+  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.PAYSTACK);
+
+  let event: { type: string; data: unknown };
+
+  try {
+    event = provider.constructWebhookEvent(req.body, signature);
+  } catch (err) {
+    res.status(400);
+    throw new Error(`Webhook signature verification failed: ${(err as Error).message}`);
+  }
+
+  // Same "ack immediately" reasoning as stripeWebhook.
+  res.sendStatus(200);
+
+  if (event.type !== "charge.success") return;
+
+  const chargeObject = event.data as { reference: string; metadata?: { paymentId?: string } };
+  const paymentId = chargeObject.metadata?.paymentId;
+
+  if (!paymentId || !mongoose.Types.ObjectId.isValid(paymentId)) return;
+
+  const payment = await Payment.findById(paymentId);
+  if (!payment) return;
+
+  // Never trust the webhook payload's own claims — always re-fetch.
+  const intent = await provider.retrieveIntent(chargeObject.reference);
+
+  await reconcilePaymentIntent(payment, chargeObject.reference, intent);
 });
 
 // This is what makes the fraud hold (helpers/paymentReconciliation.ts)
@@ -639,9 +708,9 @@ export const refreshPayment = asyncHandler(async (req: Request, res: Response) =
     throw new Error("You can't refresh someone else's payment");
   }
 
-  if (payment.provider !== PAYMENT_PROVIDER_NAME.STRIPE) {
+  if (payment.provider === PAYMENT_PROVIDER_NAME.MANUAL) {
     res.status(400);
-    throw new Error("Only Stripe payments can be refreshed this way");
+    throw new Error("Manually-recorded payments can't be refreshed this way");
   }
 
   if (!payment.providerPaymentId) {
@@ -649,7 +718,7 @@ export const refreshPayment = asyncHandler(async (req: Request, res: Response) =
     throw new Error("This payment was never started with the provider");
   }
 
-  const provider = getPaymentProvider(PAYMENT_PROVIDER_NAME.STRIPE);
+  const provider = getPaymentProvider(payment.provider);
   const intent = await provider.retrieveIntent(payment.providerPaymentId);
 
   const result = await reconcilePaymentIntent(payment, payment.providerPaymentId, intent);

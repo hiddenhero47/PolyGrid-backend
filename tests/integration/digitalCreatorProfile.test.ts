@@ -14,6 +14,8 @@ import { DigitalCreatorProfile } from "../../src/models/digitalCreatorProfileMod
 import { Subscription } from "../../src/models/subscriptionModel";
 import { DigitalPurchase } from "../../src/models/digitalPurchaseModel";
 import { SystemPayout } from "../../src/models/systemPayoutModel";
+import { PayoutKyc } from "../../src/models/payoutKycModel";
+import { IUser } from "../../src/models/userModel";
 
 const TEST_PAYOUT_ACCOUNT = {
   accountName: "Test Recipient",
@@ -21,6 +23,12 @@ const TEST_PAYOUT_ACCOUNT = {
   bankName: "Test Bank",
   country: "NG",
 };
+
+// requestDigitalCreatorPayout refuses to approve unless the beneficiary
+// has a verified PayoutKyc record on file, independent of
+// payoutAccount/settlementMethod — see digitalCreatorProfileController.ts.
+const verifyPayoutKyc = (user: IUser) =>
+  PayoutKyc.create({ user: user._id, country: user.country ?? "NG", method: "automated", status: "verified" });
 
 const app = createApp();
 
@@ -241,6 +249,7 @@ describe("POST /api/digital-creator-profiles/me/request-payout", () => {
   // their own connected account and never reads payoutAccount at all.
   it("succeeds without a payout account on file when the creator is Stripe Connect ready", async () => {
     const creatorUser = await createUser({ stripeConnectedAccountId: "acct_123", stripeConnectPayoutsEnabled: true });
+    await verifyPayoutKyc(creatorUser);
     const profile = await createDigitalCreatorProfile({ user: creatorUser });
     const product = await createDigitalProduct({ creator: profile, price: 100 });
     const buyer = await createUser();
@@ -256,6 +265,7 @@ describe("POST /api/digital-creator-profiles/me/request-payout", () => {
 
   it("bundles every unpaid purchase into one SystemPayout, net of the platform fee, and marks them requested", async () => {
     const creatorUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    await verifyPayoutKyc(creatorUser);
     const profile = await createDigitalCreatorProfile({ user: creatorUser });
     const product = await createDigitalProduct({ creator: profile, price: 100 });
     const buyerA = await createUser();
@@ -304,6 +314,7 @@ describe("POST /api/digital-creator-profiles/me/request-payout", () => {
       stripeConnectedAccountId: "acct_123",
       stripeConnectPayoutsEnabled: true,
     });
+    await verifyPayoutKyc(creatorUser);
     const profile = await createDigitalCreatorProfile({ user: creatorUser });
     const product = await createDigitalProduct({ creator: profile, price: 50 });
     const buyer = await createUser();
