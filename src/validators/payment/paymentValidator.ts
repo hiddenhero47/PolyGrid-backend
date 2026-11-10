@@ -34,5 +34,11 @@ export const createPaymentIntentSchema = yup
     // decides that at request time, not here.
     currentPassword: yup.string().notRequired(),
     otpToken: yup.string().notRequired(),
+    // Only meaningful for a Paystack-routed intent (paystackProvider.ts
+    // passes it as callback_url) — Stripe's own adapter ignores it
+    // entirely, since Stripe.js owns the return flow instead. The
+    // frontend controls its own domain/routes, so this is always
+    // supplied by the caller, never guessed/hardcoded server-side.
+    callbackUrl: yup.string().url("callbackUrl must be a valid URL").notRequired(),
   })
   .noUnknown(true);

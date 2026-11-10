@@ -68,6 +68,8 @@ describe("runDeploymentSetup", () => {
     const settings = await SystemSettings.findOne();
     expect(settings?.supportedCountries).toEqual(["NG"]);
     expect(settings?.maxTransactionAmount).toBeGreaterThan(0);
+    expect(settings?.countryProviderOverrides).toEqual({ NG: "paystack" });
+    expect(settings?.countryKycProviders).toEqual({ NG: "dojah" });
   });
 
   it("never overwrites SystemSettings an admin has already configured", async () => {

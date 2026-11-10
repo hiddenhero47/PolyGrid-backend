@@ -9,6 +9,12 @@ export interface CreateIntentParams {
   currency: string;
   metadata: Record<string, string>;
   receiptEmail?: string;
+  // Where to send the buyer's browser back after a redirect-based
+  // checkout (Paystack) — stripeProvider.ts ignores this entirely,
+  // Stripe.js owns the return flow for a client-secret-based checkout
+  // instead. Caller-supplied (the frontend controls its own routes),
+  // never guessed server-side.
+  callbackUrl?: string;
 }
 
 export interface CreateIntentResult {

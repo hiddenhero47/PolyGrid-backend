@@ -26,28 +26,34 @@ export const updateSystemSettingsSchema = yup
     fraudHoldThresholdAmount: yup.number().min(0).notRequired(),
     fraudHoldHours: yup.number().min(0).notRequired(),
     manualReviewThresholdAmount: yup.number().min(0).notRequired(),
+    // yup.mixed(), not yup.object() — a bare object() field has no shape
+    // of its own, so stripUnknown (validateBody) silently strips every
+    // key inside it down to {} even though .test() itself passed. Same
+    // gotcha validate.ts's own comment warns about; mixed() has nothing
+    // to strip against, so the value passes through untouched. (Caught
+    // live: PATCH was 200ing and then silently discarding this field.)
     countryProviderOverrides: yup
-      .object()
+      .mixed()
       .test(
         "valid-country-provider-map",
         "countryProviderOverrides must map ISO country codes to a routable provider (stripe or paystack)",
         (value) => {
           if (!value) return true;
-          return Object.entries(value).every(
-            ([country, provider]) => isValidCountryCode(country) && ROUTABLE_PROVIDERS.includes(provider as string),
+          return Object.entries(value as Record<string, string>).every(
+            ([country, provider]) => isValidCountryCode(country) && ROUTABLE_PROVIDERS.includes(provider),
           );
         },
       )
       .notRequired(),
     countryKycProviders: yup
-      .object()
+      .mixed()
       .test(
         "valid-country-kyc-map",
         "countryKycProviders must map ISO country codes to a registered identity-verification provider",
         (value) => {
           if (!value) return true;
-          return Object.entries(value).every(
-            ([country, provider]) => isValidCountryCode(country) && KYC_PROVIDERS.includes(provider as string),
+          return Object.entries(value as Record<string, string>).every(
+            ([country, provider]) => isValidCountryCode(country) && KYC_PROVIDERS.includes(provider),
           );
         },
       )

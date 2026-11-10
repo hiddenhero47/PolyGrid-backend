@@ -243,6 +243,21 @@ describe("POST /api/digital-creator-profiles/me/request-payout", () => {
     expect(res.status).toBe(400);
   });
 
+  it("400s with a stable PAYOUT_KYC_REQUIRED code when the creator hasn't completed payout KYC", async () => {
+    const creatorUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const profile = await createDigitalCreatorProfile({ user: creatorUser });
+    const product = await createDigitalProduct({ creator: profile, price: 100 });
+    const buyer = await createUser();
+    await createDigitalPurchase({ product, buyer, creator: profile });
+
+    const res = await request(app)
+      .post("/api/digital-creator-profiles/me/request-payout")
+      .set("Authorization", `Bearer ${generateToken(creatorUser)}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_REQUIRED");
+  });
+
   // Same reasoning as jobController.ts's createSystemPayout fix (dde4cfd):
   // a payout account is only actually needed when settlement will fall
   // back to "manual" — a Stripe-Connect-ready creator's payout goes to

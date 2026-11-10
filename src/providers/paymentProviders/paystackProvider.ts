@@ -19,7 +19,13 @@ const mapStatus = (paystackStatus: string): string => {
 };
 
 export const paystackProvider: PaymentProviderAdapter = {
-  async createIntent({ amount, currency, metadata, receiptEmail }: CreateIntentParams): Promise<CreateIntentResult> {
+  async createIntent({
+    amount,
+    currency,
+    metadata,
+    receiptEmail,
+    callbackUrl,
+  }: CreateIntentParams): Promise<CreateIntentResult> {
     if (!receiptEmail) {
       throw new Error("Paystack requires a receiptEmail to initialize a transaction");
     }
@@ -36,6 +42,10 @@ export const paystackProvider: PaymentProviderAdapter = {
       // Stripe's idempotencyKey behavior — worth knowing, not a bug).
       reference: `polygrid_payment_${metadata.paymentId}`,
       metadata,
+      // Omitted entirely when the caller doesn't supply one — Paystack
+      // then falls back to whatever's configured as the dashboard's own
+      // default Callback URL, not an error.
+      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
     });
 
     return {

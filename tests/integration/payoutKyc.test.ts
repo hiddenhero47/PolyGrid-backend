@@ -191,6 +191,55 @@ describe("POST /api/users/me/payout-kyc — document track (country not in count
   });
 });
 
+describe("GET /api/users/me/payout-kyc", () => {
+  it("tells the caller which track they'd get before they've ever submitted anything", async () => {
+    await SystemSettings.create({
+      maxOutstandingExposure: 0,
+      maxTransactionAmount: 0,
+      supportedCountries: [],
+      countryKycProviders: { NG: "dojah" },
+    });
+    const ngUser = await createUser({ country: "NG" });
+    const usUser = await createUser({ country: "US" });
+
+    const ngRes = await request(app)
+      .get("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(ngUser)}`);
+    expect(ngRes.status).toBe(200);
+    expect(ngRes.body.track).toBe("automated");
+    expect(ngRes.body.record).toBeNull();
+
+    const usRes = await request(app)
+      .get("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(usUser)}`);
+    expect(usRes.body.track).toBe("document");
+    expect(usRes.body.record).toBeNull();
+  });
+
+  it("includes the existing record once one has been submitted", async () => {
+    await SystemSettings.create({
+      maxOutstandingExposure: 0,
+      maxTransactionAmount: 0,
+      supportedCountries: [],
+      countryKycProviders: { NG: "dojah" },
+    });
+    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    mockVerifyMatch.mockResolvedValue({ matched: true, reference: "dojah_ref_1", raw: {} });
+
+    await request(app)
+      .post("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ idType: "bvn", idNumber: "12345678901", currentPassword: "password123" });
+
+    const res = await request(app)
+      .get("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+
+    expect(res.body.track).toBe("automated");
+    expect(res.body.record.status).toBe("verified");
+  });
+});
+
 describe("payout-kyc admin review (document track)", () => {
   const submitDocumentKyc = async (user: Awaited<ReturnType<typeof createUser>>) =>
     request(app)
@@ -211,7 +260,7 @@ describe("payout-kyc admin review (document track)", () => {
 
   it("lists a pending document-track submission for REVIEW_ROLES, and approves it", async () => {
     await SystemSettings.create({ maxOutstandingExposure: 0, maxTransactionAmount: 0, supportedCountries: [] });
-    const user = await createUser({ country: "US" });
+    const user = await createUser({ country: "US", fullName: "Jamie Rivera" });
     const submitted = await submitDocumentKyc(user);
     const recordId = submitted.body._id;
 
@@ -221,6 +270,11 @@ describe("payout-kyc admin review (document track)", () => {
       .set("Authorization", `Bearer ${generateToken(customerCare)}`);
     expect(listRes.status).toBe(200);
     expect(listRes.body.data).toHaveLength(1);
+    // Populated, not a bare ObjectId — the admin queue needs this to show
+    // who it's actually reviewing without a second round trip.
+    expect(listRes.body.data[0].user.fullName).toBe("Jamie Rivera");
+    expect(listRes.body.data[0].user.email).toBe(user.email);
+    expect(listRes.body.data[0].user.country).toBe("US");
 
     const admin = await createAdmin();
     const approveRes = await request(app)

@@ -45,6 +45,43 @@ describe("paystackProvider.createIntent", () => {
     });
   });
 
+  it("passes callback_url through when the caller supplies one", async () => {
+    mockPost.mockResolvedValue({
+      data: { data: { reference: "polygrid_payment_payment_1", authorization_url: "https://paystack.test/checkout/abc" } },
+    });
+
+    await paystackProvider.createIntent({
+      amount: 100,
+      currency: "NGN",
+      metadata: { paymentId: "payment_1" },
+      receiptEmail: "buyer@example.com",
+      callbackUrl: "https://frontend.example.com/payments/return?paymentId=payment_1",
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      "/transaction/initialize",
+      expect.objectContaining({
+        callback_url: "https://frontend.example.com/payments/return?paymentId=payment_1",
+      }),
+    );
+  });
+
+  it("omits callback_url entirely when the caller doesn't supply one", async () => {
+    mockPost.mockResolvedValue({
+      data: { data: { reference: "polygrid_payment_payment_1", authorization_url: "https://paystack.test/checkout/abc" } },
+    });
+
+    await paystackProvider.createIntent({
+      amount: 100,
+      currency: "NGN",
+      metadata: { paymentId: "payment_1" },
+      receiptEmail: "buyer@example.com",
+    });
+
+    const [, body] = mockPost.mock.calls[0];
+    expect(body).not.toHaveProperty("callback_url");
+  });
+
   it("refuses to initialize without a receiptEmail — Paystack requires one", async () => {
     await expect(
       paystackProvider.createIntent({ amount: 100, currency: "NGN", metadata: { paymentId: "payment_1" } }),

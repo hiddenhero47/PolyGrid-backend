@@ -112,4 +112,54 @@ describe("PATCH /api/system-settings", () => {
     expect(res.body.maxOutstandingExposure).toBe(10000);
     expect(res.body.supportedCountries).toEqual(["NG"]);
   });
+
+  // Regression: countryProviderOverrides/countryKycProviders were
+  // originally yup.object().test(...) — validateBody's stripUnknown
+  // silently collapsed them to {} on every PATCH, even though the
+  // request itself came back 200 (the .test() ran against the
+  // pre-strip value, so validation passed; only the cast/returned value
+  // was empty). Caught live by the frontend session, not by a test —
+  // round-tripping a non-empty map here so it can't regress silently
+  // again. See validators/admin/systemSettingsValidator.ts and
+  // validate.ts's own comment on this exact gotcha.
+  it("round-trips a non-empty countryProviderOverrides and countryKycProviders", async () => {
+    const superAdmin = await createSuperAdmin();
+    const res = await request(app)
+      .patch("/api/system-settings")
+      .set("Authorization", `Bearer ${generateToken(superAdmin)}`)
+      .send({
+        countryProviderOverrides: { NG: "paystack" },
+        countryKycProviders: { NG: "dojah" },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.countryProviderOverrides).toEqual({ NG: "paystack" });
+    expect(res.body.countryKycProviders).toEqual({ NG: "dojah" });
+
+    const fetched = await request(app)
+      .get("/api/system-settings")
+      .set("Authorization", `Bearer ${generateToken(superAdmin)}`);
+    expect(fetched.body.countryProviderOverrides).toEqual({ NG: "paystack" });
+    expect(fetched.body.countryKycProviders).toEqual({ NG: "dojah" });
+  });
+
+  it("rejects a countryProviderOverrides entry pointing at an unroutable provider", async () => {
+    const superAdmin = await createSuperAdmin();
+    const res = await request(app)
+      .patch("/api/system-settings")
+      .set("Authorization", `Bearer ${generateToken(superAdmin)}`)
+      .send({ countryProviderOverrides: { NG: "manual" } });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a countryKycProviders entry with an unregistered vendor", async () => {
+    const superAdmin = await createSuperAdmin();
+    const res = await request(app)
+      .patch("/api/system-settings")
+      .set("Authorization", `Bearer ${generateToken(superAdmin)}`)
+      .send({ countryKycProviders: { NG: "some-unregistered-vendor" } });
+
+    expect(res.status).toBe(400);
+  });
 });

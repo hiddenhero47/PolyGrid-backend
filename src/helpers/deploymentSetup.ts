@@ -181,6 +181,15 @@ const INITIAL_SYSTEM_SETTINGS = {
   fraudHoldThresholdAmount: 746, // ~1,000,000 NGN
   fraudHoldHours: 24,
   manualReviewThresholdAmount: 74627, // ~100,000,000 NGN
+  // Stripe stays the global default (absent from this map); Nigeria
+  // routes to Paystack instead, since Stripe can't pay out to a
+  // Nigerian bank account at all — see docs/payments-plan.md.
+  countryProviderOverrides: { NG: "paystack" },
+  // Nigeria gets the automated BVN/NIN track via Dojah; every other
+  // country has no entry here, so it falls back to the document track
+  // automatically (BVN/NIN only exist for Nigeria) — see
+  // payoutKycController.ts.
+  countryKycProviders: { NG: "dojah" },
 };
 
 export const ensureSystemSettingsSeeded = async (): Promise<SetupTaskResult> => {

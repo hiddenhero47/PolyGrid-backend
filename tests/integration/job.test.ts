@@ -1150,12 +1150,67 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
       expect(res.body.data).toHaveLength(1);
       expect(res.body.data[0].jobId).toBe(job._id);
       expect(res.body.data[0].refund.status).toBe("pending");
+      // No PayoutKyc record exists for this client yet — null, not an
+      // error, so the admin can see "not done" before trying to approve.
+      expect(res.body.data[0].beneficiaryKycStatus).toBeNull();
     }
 
     const blocked = await request(app)
       .get("/api/jobs/refund-requests")
       .set("Authorization", `Bearer ${generateToken(clientUser)}`);
     expect(blocked.status).toBe(401);
+  });
+
+  it("surfaces the beneficiary's real payout-KYC status in the pending list", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    await verifyPayoutKyc(clientUser);
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`)
+      .send({ amount: 500 });
+    await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+
+    const res = await request(app)
+      .get("/api/jobs/refund-requests")
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    expect(res.body.data[0].beneficiaryKycStatus).toBe("verified");
+  });
+
+  it("refuses to approve — with a stable PAYOUT_KYC_REQUIRED code — when the beneficiary hasn't completed payout KYC", async () => {
+    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createUser();
+    const admin = await createAdmin();
+    const adminToken = generateToken(admin);
+    const job = await createActiveJob(clientUser, providerUser);
+
+    await request(app)
+      .post(`/api/jobs/${job._id}/payments`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 500 });
+    const requested = await request(app)
+      .post(`/api/jobs/${job._id}/refund-requests`)
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ reason: "client cancelled" });
+    const refundId = requested.body.refunds[0]._id;
+
+    await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/counterparty-approve`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+
+    const res = await request(app)
+      .patch(`/api/jobs/${job._id}/refund-requests/${refundId}/approve`)
+      .set("Authorization", `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_REQUIRED");
   });
 
   it("refuses to approve when the client has no payout account on file", async () => {
@@ -1645,6 +1700,7 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
       .get("/api/jobs/payout-requests")
       .set("Authorization", `Bearer ${adminToken}`);
     expect(queue.body.data).toHaveLength(1);
+    expect(queue.body.data[0].beneficiaryKycStatus).toBe("verified");
     const firstPayoutId = queue.body.data[0].payout._id;
 
     // The client must sign off before an admin can finalize this.

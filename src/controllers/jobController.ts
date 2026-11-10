@@ -342,6 +342,10 @@ const createSystemPayout = async ({
       "The recipient hasn't completed payout KYC yet — this can't be approved until they do",
     );
     error.statusCode = 400;
+    // Stable, message-independent signal — same reasoning as
+    // IDENTITY_REQUIRED (verifyIdentityMiddleware.ts): the admin UI needs
+    // to tell this apart from every other reason an approval can 400.
+    error.code = "PAYOUT_KYC_REQUIRED";
     throw error;
   }
 
@@ -1281,6 +1285,19 @@ export const getPendingRefundRequests = asyncHandler(async (req: Request, res: R
     Job.countDocuments(filter),
   ]);
 
+  // A refund's beneficiary is the client — batched here rather than
+  // per-row, same reasoning client.userId/provider.userId are already
+  // populated in bulk above rather than one at a time. Lets an admin see
+  // a refund will 400 on approval (createSystemPayout's payout-KYC gate)
+  // before they try it, not after.
+  const beneficiaryIds = jobs.map((job) => (job.client.userId as unknown as IUser)._id);
+  const kycByUser = new Map(
+    (await PayoutKyc.find({ user: { $in: beneficiaryIds } }).select("user status")).map((record) => [
+      record.user.toString(),
+      record.status,
+    ]),
+  );
+
   const data = jobs.map((job) => ({
     jobId: job._id,
     jobTitle: job.jobTitle,
@@ -1290,6 +1307,7 @@ export const getPendingRefundRequests = asyncHandler(async (req: Request, res: R
     // `available` — it may have shrunk since this was requested.
     refundable: refundableAmount(job),
     refund: job.refunds.find((r) => r.status === PAYMENT_REQUEST_STATUS.PENDING),
+    beneficiaryKycStatus: kycByUser.get((job.client.userId as unknown as IUser)._id.toString()) ?? null,
   }));
 
   res.status(200).json({ data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });
@@ -1605,6 +1623,16 @@ export const getPendingPayoutRequests = asyncHandler(async (req: Request, res: R
     Job.countDocuments(filter),
   ]);
 
+  // A payout's beneficiary is the provider — same batched-lookup
+  // reasoning as getPendingRefundRequests above.
+  const beneficiaryIds = jobs.map((job) => (job.provider.userId as unknown as IUser)._id);
+  const kycByUser = new Map(
+    (await PayoutKyc.find({ user: { $in: beneficiaryIds } }).select("user status")).map((record) => [
+      record.user.toString(),
+      record.status,
+    ]),
+  );
+
   const data = jobs.map((job) => ({
     jobId: job._id,
     jobTitle: job.jobTitle,
@@ -1615,6 +1643,7 @@ export const getPendingPayoutRequests = asyncHandler(async (req: Request, res: R
     // was requested.
     available: payoutAvailableAmount(job),
     payout: job.payouts.find((p) => p.status === PAYMENT_REQUEST_STATUS.PENDING),
+    beneficiaryKycStatus: kycByUser.get((job.provider.userId as unknown as IUser)._id.toString()) ?? null,
   }));
 
   res.status(200).json({ data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });

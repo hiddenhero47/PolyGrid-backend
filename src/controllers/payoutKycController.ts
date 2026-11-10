@@ -152,13 +152,24 @@ export const submitPayoutKyc = asyncHandler(async (req: Request, res: Response) 
   res.status(201).json({ ...record.toObject(), warnings });
 });
 
-// @desc    My own current payout-KYC status.
+// @desc    My own current payout-KYC status, plus which track I'd get if
+//          I haven't submitted yet (or submit again) — the frontend needs
+//          this to know whether to render the BVN/NIN form or the 3-image
+//          upload form before the user ever submits anything.
 // @route   GET /api/users/me/payout-kyc
 // @access  Private
 export const getMyPayoutKyc = asyncHandler(async (req: Request, res: Response) => {
   const requester = req.user as IUser;
-  const record = await PayoutKyc.findOne({ user: requester._id });
-  res.status(200).json(record);
+  const [record, settings] = await Promise.all([
+    PayoutKyc.findOne({ user: requester._id }),
+    getSystemSettings(),
+  ]);
+
+  const track = requester.country && settings.countryKycProviders[requester.country]
+    ? PAYOUT_KYC_METHOD.AUTOMATED
+    : PAYOUT_KYC_METHOD.DOCUMENT;
+
+  res.status(200).json({ record, track });
 });
 
 const paginationParams = (req: Request) => {
@@ -182,7 +193,11 @@ export const getPayoutKycRecords = asyncHandler(async (req: Request, res: Respon
   }
 
   const [data, total] = await Promise.all([
-    PayoutKyc.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    PayoutKyc.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("user", "fullName email country"),
     PayoutKyc.countDocuments(filter),
   ]);
 

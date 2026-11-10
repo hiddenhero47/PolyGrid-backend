@@ -62,7 +62,7 @@ export const getMyPayments = asyncHandler(async (req: Request, res: Response) =>
 
 const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { targetId, amount, currentPassword, otpToken } = req.body;
+  const { targetId, amount, currentPassword, otpToken, callbackUrl } = req.body;
 
   const job = await Job.findById(targetId);
 
@@ -106,6 +106,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     currency: job.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
+    callbackUrl,
   });
 
   payment.providerPaymentId = providerPaymentId;
@@ -167,7 +168,7 @@ const activateFreeSubscription = async (
 
 const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { planTier, autoRenew, currentPassword, otpToken } = req.body;
+  const { planTier, autoRenew, currentPassword, otpToken, callbackUrl } = req.body;
 
   const plan = await Plan.findOne({ planTier, isActive: true });
 
@@ -223,6 +224,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     currency: plan.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
+    callbackUrl,
   });
 
   payment.providerPaymentId = providerPaymentId;
@@ -347,6 +349,7 @@ const resumeDigitalPurchaseIntent = async (
     currency: purchase.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (freshPayment._id as mongoose.Types.ObjectId).toString() },
+    callbackUrl: req.body?.callbackUrl,
   });
 
   freshPayment.providerPaymentId = providerPaymentId;
@@ -368,7 +371,7 @@ const resumeDigitalPurchaseIntent = async (
 // its creator's page in the first place.
 const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { targetId, currentPassword, otpToken } = req.body;
+  const { targetId, currentPassword, otpToken, callbackUrl } = req.body;
 
   const product = await DigitalProduct.findById(targetId);
   if (!product || !product.isActive) {
@@ -485,6 +488,7 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     currency: product.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
+    callbackUrl,
   });
 
   payment.providerPaymentId = providerPaymentId;
