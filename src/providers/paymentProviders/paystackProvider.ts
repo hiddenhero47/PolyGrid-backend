@@ -94,9 +94,24 @@ export const paystackProvider: PaymentProviderAdapter = {
       const { data } = await getPaystackClient().get(`/transaction/verify/${providerPaymentId}`);
       const transaction = data.data;
 
+      // transaction.amount is the TOTAL actually charged to the card,
+      // which includes Paystack's own fee when this account has "fees to
+      // customer" enabled (confirmed live: a 30000 NGN charge came back
+      // as amount 30558.38, fees 558.38) — reconcilePaymentIntent
+      // compares this against Payment.providerChargedAmount (what WE
+      // told Paystack to charge, i.e. the base amount), so comparing
+      // against the fee-inclusive total would make every fees-to-customer
+      // charge look like a perpetual mismatch and never leave "pending".
+      // requested_amount is what was actually requested at initialize
+      // time — exactly the figure that matches. Falls back to amount for
+      // any transaction shape that lacks it (fees absorbed by the
+      // merchant instead of passed to the customer, older transactions,
+      // ...), where the two are the same figure anyway.
+      const chargedAmount = transaction.requested_amount ?? transaction.amount;
+
       return {
         status: mapStatus(transaction.status),
-        amount: transaction.amount / 100,
+        amount: chargedAmount / 100,
         currency: (transaction.currency as string).toUpperCase(),
         feeAmount: transaction.fees ? transaction.fees / 100 : 0,
         raw: transaction,

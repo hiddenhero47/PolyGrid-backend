@@ -213,6 +213,32 @@ describe("paystackProvider.retrieveIntent", () => {
     expect(result.feeAmount).toBe(0);
   });
 
+  // Regression — confirmed live: this Paystack account passes its own
+  // fee to the customer, so a 30000 NGN charge actually debited the card
+  // 30558.38 NGN (fees 558.38). transaction.amount reports that
+  // fee-inclusive total; comparing it against providerChargedAmount (the
+  // 30000 we actually requested) left every real, successful payment
+  // stuck "pending" forever. requested_amount is the figure that
+  // actually matches.
+  it("compares against requested_amount, not the fee-inclusive amount, when Paystack passes its fee to the customer", async () => {
+    mockGet.mockResolvedValue(
+      verifyResponse("success", { amount: 3055838, requested_amount: 3000000, fees: 55838 }),
+    );
+
+    const result = await paystackProvider.retrieveIntent("polygrid_payment_real");
+
+    expect(result.amount).toBe(30000);
+    expect(result.feeAmount).toBeCloseTo(558.38);
+  });
+
+  it("falls back to amount when requested_amount is absent (fees absorbed by the merchant, or an older transaction)", async () => {
+    mockGet.mockResolvedValue(verifyResponse("success"));
+
+    const result = await paystackProvider.retrieveIntent("ref");
+
+    expect(result.amount).toBe(100);
+  });
+
   it("wraps a failed verify call as a readable 502 too", async () => {
     mockGet.mockRejectedValue({
       isAxiosError: true,
