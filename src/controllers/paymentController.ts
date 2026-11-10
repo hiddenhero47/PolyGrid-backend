@@ -11,6 +11,7 @@ import { DigitalProduct } from "../models/digitalProductModel";
 import { DigitalCreatorProfile } from "../models/digitalCreatorProfileModel";
 import { DigitalPurchase, IDigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../models/digitalPurchaseModel";
 import { getPaymentProvider } from "../providers/paymentProviders";
+import { PaymentProviderAdapter, CreateIntentParams, CreateIntentResult } from "../providers/paymentProviders/types";
 import { getPlatformFeePercent } from "./jobController";
 import {
   syncProfilesSubscription,
@@ -36,6 +37,42 @@ const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   return { page, limit, skip: (page - 1) * limit };
+};
+
+// The one place every handle*PaymentIntent function (plus
+// resumeDigitalPurchaseIntent's fresh-payment branch) actually calls a
+// gateway to create an intent — centralized specifically so a failed
+// call (Paystack rejecting a bad email, an unsupported currency, a
+// network blip, ...) can't leave `payment` stuck PENDING forever with no
+// providerPaymentId. Without this, such a payment is invisible even to
+// sweepPendingProviderPayments — its own query requires providerPaymentId
+// to exist, so there'd be no automatic recovery at all, not even an
+// eventual one. Marks the payment FAILED with the gateway's own error
+// message and re-throws unchanged, so the caller's response (and its
+// now-clean 502/PAYMENT_PROVIDER_ERROR shape — see providerError.ts) is
+// completely unaffected.
+const createProviderIntentOrFail = async (
+  payment: IPayment,
+  provider: PaymentProviderAdapter,
+  params: CreateIntentParams,
+): Promise<CreateIntentResult> => {
+  let result: CreateIntentResult;
+
+  try {
+    result = await provider.createIntent(params);
+  } catch (err) {
+    payment.status = PAYMENT_STATUS.FAILED;
+    payment.failureReason = (err as Error).message;
+    await payment.save();
+    throw err;
+  }
+
+  payment.providerPaymentId = result.providerPaymentId;
+  payment.providerChargedAmount = result.chargedAmount;
+  payment.providerChargedCurrency = result.chargedCurrency;
+  await payment.save();
+
+  return result;
 };
 
 // @desc    Get the logged-in user's own payment history, newest first
@@ -102,7 +139,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
   });
 
   const provider = getPaymentProvider(providerName);
-  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await provider.createIntent({
+  const { clientSecret } = await createProviderIntentOrFail(payment, provider, {
     amount,
     currency: job.currency,
     receiptEmail: requester.email,
@@ -110,11 +147,6 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     callbackUrl: buildCallbackUrl(callbackPath),
     usdToNgnRate,
   });
-
-  payment.providerPaymentId = providerPaymentId;
-  payment.providerChargedAmount = chargedAmount;
-  payment.providerChargedCurrency = chargedCurrency;
-  await payment.save();
 
   res.status(201).json({ clientSecret, paymentId: payment.id, provider: providerName });
 };
@@ -223,7 +255,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   });
 
   const provider = getPaymentProvider(providerName);
-  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await provider.createIntent({
+  const { clientSecret } = await createProviderIntentOrFail(payment, provider, {
     amount: plan.price,
     currency: plan.currency,
     receiptEmail: requester.email,
@@ -231,11 +263,6 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     callbackUrl: buildCallbackUrl(callbackPath),
     usdToNgnRate,
   });
-
-  payment.providerPaymentId = providerPaymentId;
-  payment.providerChargedAmount = chargedAmount;
-  payment.providerChargedCurrency = chargedCurrency;
-  await payment.save();
 
   res
     .status(201)
@@ -358,7 +385,7 @@ const resumeDigitalPurchaseIntent = async (
     ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
 
-  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await getPaymentProvider(providerName).createIntent({
+  const { clientSecret } = await createProviderIntentOrFail(freshPayment, getPaymentProvider(providerName), {
     amount: purchase.priceSnapshot,
     currency: purchase.currency,
     receiptEmail: requester.email,
@@ -366,11 +393,6 @@ const resumeDigitalPurchaseIntent = async (
     callbackUrl: buildCallbackUrl(req.body?.callbackPath),
     usdToNgnRate,
   });
-
-  freshPayment.providerPaymentId = providerPaymentId;
-  freshPayment.providerChargedAmount = chargedAmount;
-  freshPayment.providerChargedCurrency = chargedCurrency;
-  await freshPayment.save();
 
   res
     .status(201)
@@ -500,7 +522,7 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
   });
 
   const provider = getPaymentProvider(providerName);
-  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await provider.createIntent({
+  const { clientSecret } = await createProviderIntentOrFail(payment, provider, {
     amount: product.price,
     currency: product.currency,
     receiptEmail: requester.email,
@@ -508,11 +530,6 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     callbackUrl: buildCallbackUrl(callbackPath),
     usdToNgnRate,
   });
-
-  payment.providerPaymentId = providerPaymentId;
-  payment.providerChargedAmount = chargedAmount;
-  payment.providerChargedCurrency = chargedCurrency;
-  await payment.save();
 
   res.status(201).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id, provider: providerName });
 };

@@ -99,6 +99,15 @@ export interface IPayment extends Document {
   rawProviderPayload?: Record<string, unknown>;
   // Set only when provider === 'manual' — which admin recorded this.
   recordedBy?: Types.ObjectId;
+  // Set when the gateway refused to even create an intent (e.g. Paystack
+  // rejecting a bad email, an unsupported currency, ...) — see
+  // paymentController.ts's createProviderIntentOrFail. Distinct from
+  // disputedAt/the sweep's own "abandoned" case: this payment never got
+  // a providerPaymentId at all, so sweepPendingProviderPayments (whose
+  // query requires providerPaymentId to exist) would otherwise never see
+  // it — left PENDING forever instead of FAILED. Only ever set alongside
+  // status: FAILED.
+  failureReason?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -141,6 +150,7 @@ const paymentSchema = new Schema<IPayment>(
     disputedAt: { type: Date },
     rawProviderPayload: { type: Object },
     recordedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    failureReason: { type: String },
   },
   { timestamps: true },
 );

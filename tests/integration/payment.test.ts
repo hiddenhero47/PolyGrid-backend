@@ -43,6 +43,7 @@ import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digit
 import { sweepPendingProviderPayments } from "../../src/helpers/paymentReconciliation";
 import { SystemSettings } from "../../src/models/systemSettingsModel";
 import { paystackProvider } from "../../src/providers/paymentProviders/paystackProvider";
+import { providerCallFailed } from "../../src/providers/paymentProviders/providerError";
 
 // Every buyer in this file needs a supported country for the new payment
 // guardrails (helpers/paymentGuardrails.ts) to let a payment-intent
@@ -1085,6 +1086,65 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     const payment = await Payment.findById(res.body.paymentId);
     expect(payment?.providerChargedAmount).toBe(24000);
     expect(payment?.providerChargedCurrency).toBe("NGN");
+  });
+
+  // Regression: a Payment row used to stay PENDING forever with no
+  // providerPaymentId when createIntent itself failed (e.g. Paystack
+  // rejecting a bad email) — invisible even to sweepPendingProviderPayments,
+  // whose own query requires providerPaymentId to exist. Now it's marked
+  // FAILED immediately, with the gateway's own reason recorded — see
+  // paymentController.ts's createProviderIntentOrFail.
+  it("marks the Payment FAILED (with a reason) when the gateway refuses to create the intent, instead of leaving it stuck PENDING forever", async () => {
+    await SystemSettings.updateOne({}, { countryProviderOverrides: { NG: "paystack" } });
+
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    jest
+      .spyOn(paystackProvider, "createIntent")
+      .mockRejectedValueOnce(providerCallFailed("Paystack", "email must be a valid email"));
+
+    const failedAttempt = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(failedAttempt.status).toBe(502);
+    expect(failedAttempt.body.code).toBe("PAYMENT_PROVIDER_ERROR");
+
+    const failedPayment = await Payment.findOne({ targetId: (await DigitalPurchase.findOne({ product: product._id, buyer: buyer._id }))!._id });
+    expect(failedPayment?.status).toBe("failed");
+    expect(failedPayment?.failureReason).toContain("email must be a valid email");
+    expect(failedPayment?.providerPaymentId).toBeUndefined();
+    // Never swept — this confirms the row isn't relying on the sweep to
+    // notice it; it's not even eligible (no providerPaymentId), so this
+    // state had to be set directly, at the point of failure.
+    expect(
+      (await sweepPendingProviderPayments()).checked,
+    ).toBe(0);
+
+    // The buyer retries — must get a fresh checkout, never get stuck
+    // behind the dead failed row.
+    jest.spyOn(paystackProvider, "createIntent").mockResolvedValueOnce({
+      providerPaymentId: "polygrid_payment_retry",
+      clientSecret: "https://paystack.test/checkout/retry",
+      chargedAmount: 15,
+      chargedCurrency: "USD",
+    });
+
+    const retry = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(retry.status).toBe(201);
+    expect(retry.body.paymentId).not.toBe(failedPayment?.id);
   });
 
   // Skipped: same reason as "funds a job's escrow end-to-end" above —
