@@ -1,6 +1,8 @@
 import crypto from "crypto";
+import axios from "axios";
 import getPaystackClient from "../../config/paystack";
 import { PaymentProviderAdapter, CreateIntentParams, CreateIntentResult } from "./types";
+import { providerCallFailed } from "./providerError";
 
 const toMinorUnits = (amount: number): number => Math.round(amount * 100);
 
@@ -25,51 +27,86 @@ export const paystackProvider: PaymentProviderAdapter = {
     metadata,
     receiptEmail,
     callbackUrl,
+    usdToNgnRate,
   }: CreateIntentParams): Promise<CreateIntentResult> {
     if (!receiptEmail) {
       throw new Error("Paystack requires a receiptEmail to initialize a transaction");
     }
 
-    const { data } = await getPaystackClient().post("/transaction/initialize", {
-      amount: toMinorUnits(amount),
-      currency: currency.toUpperCase(),
-      email: receiptEmail,
-      // Same idempotency reasoning as stripeProvider's idempotencyKey —
-      // one Payment document only ever calls this once in the normal
-      // flow, so collisions should only ever happen on a genuine retry,
-      // which Paystack correctly refuses as a duplicate reference rather
-      // than silently returning the original (a real difference from
-      // Stripe's idempotencyKey behavior — worth knowing, not a bug).
-      reference: `polygrid_payment_${metadata.paymentId}`,
-      metadata,
-      // Omitted entirely when the caller doesn't supply one — Paystack
-      // then falls back to whatever's configured as the dashboard's own
-      // default Callback URL, not an error.
-      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
-    });
+    // This Paystack integration has no USD support (confirmed directly
+    // against the live API: "Currency not supported by merchant" — NGN
+    // only, until Paystack approves an international-payments request).
+    // usdToNgnRate (resolved from SystemSettings by the caller — see
+    // types.ts's own comment on why it's passed in, not fetched here) is
+    // the interim opt-in stopgap: 0/undefined means every currency is
+    // sent through unchanged, so a USD charge still fails exactly as it
+    // does today; a real rate converts USD to NGN right here, at
+    // send-time, and nowhere else. Never applies to anything already NGN
+    // (or any other non-USD currency) — only this one specific gap.
+    let chargeAmount = amount;
+    let chargeCurrency = currency.toUpperCase();
 
-    return {
-      providerPaymentId: data.data.reference,
-      // Repurposed: Paystack's flow is redirect-based, not a
-      // client-secret/JS-SDK-confirm flow like Stripe's — this carries
-      // the checkout URL the frontend should send the buyer to instead.
-      // See docs/payments-plan.md for why createPaymentIntent's response
-      // grew a `provider` field alongside this.
-      clientSecret: data.data.authorization_url,
-    };
+    if (chargeCurrency === "USD" && usdToNgnRate) {
+      chargeAmount = amount * usdToNgnRate;
+      chargeCurrency = "NGN";
+    }
+
+    try {
+      const { data } = await getPaystackClient().post("/transaction/initialize", {
+        amount: toMinorUnits(chargeAmount),
+        currency: chargeCurrency,
+        email: receiptEmail,
+        // Same idempotency reasoning as stripeProvider's idempotencyKey —
+        // one Payment document only ever calls this once in the normal
+        // flow, so collisions should only ever happen on a genuine retry,
+        // which Paystack correctly refuses as a duplicate reference rather
+        // than silently returning the original (a real difference from
+        // Stripe's idempotencyKey behavior — worth knowing, not a bug).
+        reference: `polygrid_payment_${metadata.paymentId}`,
+        metadata,
+        // Omitted entirely when the caller doesn't supply one — Paystack
+        // then falls back to whatever's configured as the dashboard's own
+        // default Callback URL, not an error.
+        ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+      });
+
+      return {
+        providerPaymentId: data.data.reference,
+        // Repurposed: Paystack's flow is redirect-based, not a
+        // client-secret/JS-SDK-confirm flow like Stripe's — this carries
+        // the checkout URL the frontend should send the buyer to instead.
+        // See docs/payments-plan.md for why createPaymentIntent's response
+        // grew a `provider` field alongside this.
+        clientSecret: data.data.authorization_url,
+        chargedAmount: chargeAmount,
+        chargedCurrency: chargeCurrency,
+      };
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        throw providerCallFailed("Paystack", err.response?.data?.message ?? err.message);
+      }
+      throw err;
+    }
   },
 
   async retrieveIntent(providerPaymentId: string) {
-    const { data } = await getPaystackClient().get(`/transaction/verify/${providerPaymentId}`);
-    const transaction = data.data;
+    try {
+      const { data } = await getPaystackClient().get(`/transaction/verify/${providerPaymentId}`);
+      const transaction = data.data;
 
-    return {
-      status: mapStatus(transaction.status),
-      amount: transaction.amount / 100,
-      currency: (transaction.currency as string).toUpperCase(),
-      feeAmount: transaction.fees ? transaction.fees / 100 : 0,
-      raw: transaction,
-    };
+      return {
+        status: mapStatus(transaction.status),
+        amount: transaction.amount / 100,
+        currency: (transaction.currency as string).toUpperCase(),
+        feeAmount: transaction.fees ? transaction.fees / 100 : 0,
+        raw: transaction,
+      };
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        throw providerCallFailed("Paystack", err.response?.data?.message ?? err.message);
+      }
+      throw err;
+    }
   },
 
   constructWebhookEvent(rawBody: Buffer, signature: string) {

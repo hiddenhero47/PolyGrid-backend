@@ -29,10 +29,31 @@ export const resolveRail = (targetType: PaymentTargetType): PaymentRail =>
 // account at all — see docs/payments-plan.md). Called once per
 // intent-creation request, right alongside assertPaymentAllowed, at every
 // one of paymentController.ts's handle*PaymentIntent functions.
-export const resolveProviderForCountry = async (country: string): Promise<PaymentProviderName> => {
+//
+// Also returns usdToNgnRate here rather than making paystackProvider.ts
+// fetch SystemSettings itself — provider adapters talk to their gateway
+// only, never the database directly (keeps them trivially unit-testable
+// with no DB connection, same as stripeProvider.ts today); the one
+// extra, cheap findOne is consistent with assertPaymentAllowed and this
+// function already each reading SystemSettings fresh, every request.
+export const resolveProviderForCountry = async (
+  country: string,
+): Promise<{ provider: PaymentProviderName; usdToNgnRate: number }> => {
   const settings = await getSystemSettings();
-  return settings.countryProviderOverrides[country] ?? PAYMENT_PROVIDER_NAME.STRIPE;
+  return {
+    provider: settings.countryProviderOverrides[country] ?? PAYMENT_PROVIDER_NAME.STRIPE,
+    usdToNgnRate: settings.usdToNgnRate,
+  };
 };
+
+// Builds the real callback URL from the server's own FRONTEND_URL plus a
+// caller-supplied path — never the other way around. See
+// paymentValidator.ts's own comment on createPaymentIntentSchema's
+// callbackPath for why a caller-supplied full URL would be an open
+// redirect; this is the one place that assembly happens, so there's only
+// one spot to get it right.
+export const buildCallbackUrl = (callbackPath?: string): string | undefined =>
+  callbackPath ? `${process.env.FRONTEND_URL}${callbackPath}` : undefined;
 
 // `transactionCountryTo` is SYSTEM_COUNTRY on the platform rail (the money
 // stays with PolyGrid), or the provider/creator's own country on the

@@ -69,6 +69,19 @@ export interface IPayment extends Document {
   provider: PaymentProviderName;
   // e.g. a Stripe PaymentIntent id — absent for a manual entry.
   providerPaymentId?: string;
+  // What was actually sent to the gateway for this charge — normally
+  // identical to amount/currency above (every provider but one echoes
+  // them straight through, see providers/paymentProviders/types.ts's
+  // CreateIntentResult), except a Paystack charge converted from USD to
+  // NGN at send-time (SystemSettings.usdToNgnRate — this Paystack
+  // integration has no USD support). reconcilePaymentIntent compares the
+  // gateway's response against THESE, not amount/currency directly, so a
+  // converted charge is never flagged as an amount/currency mismatch.
+  // Optional/unset on a payment created before this field existed, or
+  // any 'manual' entry — reconcilePaymentIntent falls back to
+  // amount/currency when absent.
+  providerChargedAmount?: number;
+  providerChargedCurrency?: string;
   status: PaymentStatus;
   // Card-fraud mitigation (see helpers/paymentReconciliation.ts,
   // helpers/paymentHoldRelease.ts) — a successful charge over
@@ -116,6 +129,8 @@ const paymentSchema = new Schema<IPayment>(
       enum: Object.values(PAYMENT_PROVIDER_NAME),
     },
     providerPaymentId: { type: String },
+    providerChargedAmount: { type: Number, min: 0 },
+    providerChargedCurrency: { type: String, uppercase: true, trim: true },
     status: {
       type: String,
       enum: Object.values(PAYMENT_STATUS),

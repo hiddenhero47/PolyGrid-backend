@@ -31,6 +31,7 @@ export const updateSettings = asyncHandler(async (req: Request, res: Response) =
     manualReviewThresholdAmount,
     countryProviderOverrides,
     countryKycProviders,
+    usdToNgnRate,
   } = req.body;
 
   const settings = await getSystemSettings();
@@ -43,6 +44,7 @@ export const updateSettings = asyncHandler(async (req: Request, res: Response) =
   if (manualReviewThresholdAmount !== undefined) settings.manualReviewThresholdAmount = manualReviewThresholdAmount;
   if (countryProviderOverrides !== undefined) settings.countryProviderOverrides = countryProviderOverrides;
   if (countryKycProviders !== undefined) settings.countryKycProviders = countryKycProviders;
+  if (usdToNgnRate !== undefined) settings.usdToNgnRate = usdToNgnRate;
   settings.updatedBy = admin._id as typeof settings.updatedBy;
 
   await settings.save();

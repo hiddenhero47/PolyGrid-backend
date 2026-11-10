@@ -42,6 +42,7 @@ import { PLAN_TIER } from "../../src/models/planModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS } from "../../src/models/digitalPurchaseModel";
 import { sweepPendingProviderPayments } from "../../src/helpers/paymentReconciliation";
 import { SystemSettings } from "../../src/models/systemSettingsModel";
+import { paystackProvider } from "../../src/providers/paymentProviders/paystackProvider";
 
 // Every buyer in this file needs a supported country for the new payment
 // guardrails (helpers/paymentGuardrails.ts) to let a payment-intent
@@ -100,6 +101,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await clearTestDB();
+  jest.restoreAllMocks();
 });
 
 afterAll(async () => {
@@ -951,6 +953,138 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     expect(secondAttempt.body.clientSecret).toBe(firstIntent.body.clientSecret);
 
     expect(await Payment.countDocuments({ targetId: firstIntent.body.purchaseId })).toBe(1);
+  });
+
+  // Not maybeIt — fully mocked, no real Stripe/Paystack key needed.
+  // Paystack has no Stripe-style reusable clientSecret: its
+  // authorization_url is only ever handed back once, at initialize time
+  // (retrieveIntent/verify never returns it again), so a still-pending
+  // Paystack attempt must always fall through to a fresh checkout — see
+  // paymentController.ts's resumeDigitalPurchaseIntent.
+  it("always starts a fresh checkout for a still-pending Paystack purchase, never reuses the dead one", async () => {
+    await SystemSettings.updateOne({}, { countryProviderOverrides: { NG: "paystack" } });
+
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    jest.spyOn(paystackProvider, "createIntent").mockResolvedValueOnce({
+      providerPaymentId: "polygrid_payment_first",
+      clientSecret: "https://paystack.test/checkout/first",
+      chargedAmount: 15,
+      chargedCurrency: "USD",
+    });
+
+    const firstIntent = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+    expect(firstIntent.status).toBe(201);
+    expect(firstIntent.body.provider).toBe("paystack");
+
+    // Still pending at Paystack — the buyer never finished the checkout.
+    jest.spyOn(paystackProvider, "retrieveIntent").mockResolvedValueOnce({
+      status: "pending",
+      amount: 15,
+      currency: "USD",
+      feeAmount: 0,
+      raw: {},
+    });
+    jest.spyOn(paystackProvider, "createIntent").mockResolvedValueOnce({
+      providerPaymentId: "polygrid_payment_second",
+      clientSecret: "https://paystack.test/checkout/second",
+      chargedAmount: 15,
+      chargedCurrency: "USD",
+    });
+
+    const secondAttempt = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(secondAttempt.status).toBe(201);
+    expect(secondAttempt.body.resumed).toBe(true);
+    expect(secondAttempt.body.provider).toBe("paystack");
+    // A brand new payment/checkout, not the dead one reused.
+    expect(secondAttempt.body.paymentId).not.toBe(firstIntent.body.paymentId);
+    expect(secondAttempt.body.clientSecret).toBe("https://paystack.test/checkout/second");
+    expect(await Payment.countDocuments({ targetId: firstIntent.body.purchaseId })).toBe(2);
+  });
+
+  it("builds callback_url from FRONTEND_URL + the caller's callbackPath, never the caller's own full URL", async () => {
+    await SystemSettings.updateOne({}, { countryProviderOverrides: { NG: "paystack" } });
+
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    const createIntentSpy = jest.spyOn(paystackProvider, "createIntent").mockResolvedValue({
+      providerPaymentId: "polygrid_payment_cb",
+      clientSecret: "https://paystack.test/checkout/cb",
+      chargedAmount: 15,
+      chargedCurrency: "USD",
+    });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({
+        targetType: "DigitalPurchase",
+        targetId: product.id,
+        callbackPath: "/dashboard/payments/return/purchase/abc",
+      });
+
+    expect(res.status).toBe(201);
+    expect(createIntentSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callbackUrl: `${process.env.FRONTEND_URL}/dashboard/payments/return/purchase/abc`,
+      }),
+    );
+  });
+
+  it("forwards SystemSettings.usdToNgnRate through to the Paystack adapter", async () => {
+    await SystemSettings.updateOne(
+      {},
+      { countryProviderOverrides: { NG: "paystack" }, usdToNgnRate: 1600 },
+    );
+
+    const creatorUser = await createUserWithActiveSubscription();
+    const profile = await createDigitalCreatorProfile({
+      user: creatorUser,
+      currentSubscription: creatorUser.currentSubscription,
+      isVerified: true,
+    });
+    const product = await createDigitalProduct({ creator: profile, price: 15 });
+    const buyer = await createUser();
+
+    const createIntentSpy = jest.spyOn(paystackProvider, "createIntent").mockResolvedValue({
+      providerPaymentId: "polygrid_payment_rate",
+      clientSecret: "https://paystack.test/checkout/rate",
+      chargedAmount: 24000,
+      chargedCurrency: "NGN",
+    });
+
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({ targetType: "DigitalPurchase", targetId: product.id });
+
+    expect(res.status).toBe(201);
+    expect(createIntentSpy).toHaveBeenCalledWith(expect.objectContaining({ usdToNgnRate: 1600 }));
+
+    const payment = await Payment.findById(res.body.paymentId);
+    expect(payment?.providerChargedAmount).toBe(24000);
+    expect(payment?.providerChargedCurrency).toBe("NGN");
   });
 
   // Skipped: same reason as "funds a job's escrow end-to-end" above —

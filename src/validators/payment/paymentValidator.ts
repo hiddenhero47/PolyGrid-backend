@@ -34,11 +34,31 @@ export const createPaymentIntentSchema = yup
     // decides that at request time, not here.
     currentPassword: yup.string().notRequired(),
     otpToken: yup.string().notRequired(),
-    // Only meaningful for a Paystack-routed intent (paystackProvider.ts
-    // passes it as callback_url) — Stripe's own adapter ignores it
-    // entirely, since Stripe.js owns the return flow instead. The
-    // frontend controls its own domain/routes, so this is always
-    // supplied by the caller, never guessed/hardcoded server-side.
-    callbackUrl: yup.string().url("callbackUrl must be a valid URL").notRequired(),
+    // Only meaningful for a Paystack-routed intent (paymentController.ts
+    // builds the real callback_url by appending this to process.env.
+    // FRONTEND_URL, same pattern userController.ts already uses for
+    // verify-email/reset-password/Connect return links) — Stripe's own
+    // adapter ignores it entirely, since Stripe.js owns the return flow
+    // instead.
+    //
+    // Deliberately a PATH, never a full URL: a caller-supplied
+    // callback_url would be a straight-up open redirect (Paystack sends
+    // the buyer's browser there right after a real payment — exactly
+    // where a phishing redirect would do the most damage), and
+    // yup.string().url() also rejects bare "localhost" URLs outright, so
+    // every dev-mode intent would 400. Building the origin server-side
+    // from FRONTEND_URL and only accepting the path from the caller
+    // closes both problems at once. Must start with exactly one "/" —
+    // "//evil.com/x" (protocol-relative) and anything containing "://"
+    // are refused, so this can never resolve to a different host no
+    // matter what FRONTEND_URL is.
+    callbackPath: yup
+      .string()
+      .test(
+        "safe-relative-path",
+        "callbackPath must be a relative path starting with '/' (e.g. /dashboard/payments/return/job/123), not a full URL",
+        (value) => !value || (value.startsWith("/") && !value.startsWith("//") && !value.includes("://")),
+      )
+      .notRequired(),
   })
   .noUnknown(true);

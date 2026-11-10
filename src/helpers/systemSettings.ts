@@ -16,6 +16,7 @@ const DEFAULTS = {
   manualReviewThresholdAmount: 0,
   countryProviderOverrides: {} as Record<string, PaymentProviderName>,
   countryKycProviders: {} as Record<string, IdentityVerificationProviderName>,
+  usdToNgnRate: 0,
 };
 
 // The one singleton — created on first read if it doesn't exist yet,

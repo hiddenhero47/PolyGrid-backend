@@ -5,6 +5,7 @@ jest.mock("../../src/config/stripe", () => ({
   default: () => ({ paymentIntents: { create: mockCreate } }),
 }));
 
+import Stripe from "stripe";
 import { stripeProvider } from "../../src/providers/paymentProviders/stripeProvider";
 
 afterEach(() => {
@@ -25,5 +26,26 @@ describe("stripeProvider.createIntent", () => {
       }),
       expect.anything(),
     );
+  });
+
+  it("wraps a failed Stripe call as a readable 502, never Stripe's own statusCode", async () => {
+    // Stripe's own errors already have a readable .message, but also a
+    // .statusCode of their own (400 here) that would otherwise leak
+    // straight into errorMiddleware.ts's generic handler — same
+    // reasoning as paystackProvider.test.ts's equivalent case.
+    mockCreate.mockRejectedValueOnce(
+      new Stripe.errors.StripeInvalidRequestError({
+        message: "Invalid currency: zzz",
+        type: "invalid_request_error",
+      } as never),
+    );
+
+    await expect(
+      stripeProvider.createIntent({ amount: 100, currency: "zzz", metadata: { paymentId: "payment_1" } }),
+    ).rejects.toMatchObject({
+      statusCode: 502,
+      code: "PAYMENT_PROVIDER_ERROR",
+      message: expect.stringContaining("Invalid currency: zzz"),
+    });
   });
 });

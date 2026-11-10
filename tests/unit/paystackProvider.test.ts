@@ -42,6 +42,8 @@ describe("paystackProvider.createIntent", () => {
     expect(result).toEqual({
       providerPaymentId: "polygrid_payment_payment_1",
       clientSecret: "https://paystack.test/checkout/abc",
+      chargedAmount: 100,
+      chargedCurrency: "NGN",
     });
   });
 
@@ -82,12 +84,88 @@ describe("paystackProvider.createIntent", () => {
     expect(body).not.toHaveProperty("callback_url");
   });
 
+  it("converts USD to NGN at send-time when usdToNgnRate is configured", async () => {
+    mockPost.mockResolvedValue({
+      data: { data: { reference: "polygrid_payment_payment_1", authorization_url: "https://paystack.test/checkout/abc" } },
+    });
+
+    const result = await paystackProvider.createIntent({
+      amount: 10,
+      currency: "USD",
+      metadata: { paymentId: "payment_1" },
+      receiptEmail: "buyer@example.com",
+      usdToNgnRate: 1600,
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      "/transaction/initialize",
+      expect.objectContaining({ amount: 1_600_000, currency: "NGN" }),
+    );
+    expect(result).toMatchObject({ chargedAmount: 16000, chargedCurrency: "NGN" });
+  });
+
+  it("sends USD through unchanged when no usdToNgnRate is configured — still fails at Paystack, as today", async () => {
+    mockPost.mockResolvedValue({
+      data: { data: { reference: "polygrid_payment_payment_1", authorization_url: "https://paystack.test/checkout/abc" } },
+    });
+
+    const result = await paystackProvider.createIntent({
+      amount: 10,
+      currency: "USD",
+      metadata: { paymentId: "payment_1" },
+      receiptEmail: "buyer@example.com",
+    });
+
+    expect(mockPost).toHaveBeenCalledWith("/transaction/initialize", expect.objectContaining({ currency: "USD" }));
+    expect(result).toMatchObject({ chargedAmount: 10, chargedCurrency: "USD" });
+  });
+
+  it("never converts a currency that's already non-USD, even with a rate configured", async () => {
+    mockPost.mockResolvedValue({
+      data: { data: { reference: "polygrid_payment_payment_1", authorization_url: "https://paystack.test/checkout/abc" } },
+    });
+
+    const result = await paystackProvider.createIntent({
+      amount: 10,
+      currency: "NGN",
+      metadata: { paymentId: "payment_1" },
+      receiptEmail: "buyer@example.com",
+      usdToNgnRate: 1600,
+    });
+
+    expect(result).toMatchObject({ chargedAmount: 10, chargedCurrency: "NGN" });
+  });
+
   it("refuses to initialize without a receiptEmail — Paystack requires one", async () => {
     await expect(
       paystackProvider.createIntent({ amount: 100, currency: "NGN", metadata: { paymentId: "payment_1" } }),
     ).rejects.toThrow("Paystack requires a receiptEmail");
 
     expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it("wraps a failed Paystack call as a readable 502, never the raw axios status/message", async () => {
+    mockPost.mockRejectedValue({
+      isAxiosError: true,
+      message: "Request failed with status code 403",
+      response: { status: 403, data: { message: "Currency not supported by merchant" } },
+    });
+
+    try {
+      await paystackProvider.createIntent({
+        amount: 100,
+        currency: "USD",
+        metadata: { paymentId: "payment_1" },
+        receiptEmail: "buyer@example.com",
+      });
+      throw new Error("expected createIntent to reject");
+    } catch (err) {
+      const error = err as { statusCode?: number; code?: string; message: string };
+      expect(error.statusCode).toBe(502);
+      expect(error.code).toBe("PAYMENT_PROVIDER_ERROR");
+      expect(error.message).toContain("Currency not supported by merchant");
+      expect(error.message).not.toContain("403");
+    }
   });
 });
 
@@ -133,6 +211,19 @@ describe("paystackProvider.retrieveIntent", () => {
     const result = await paystackProvider.retrieveIntent("ref");
 
     expect(result.feeAmount).toBe(0);
+  });
+
+  it("wraps a failed verify call as a readable 502 too", async () => {
+    mockGet.mockRejectedValue({
+      isAxiosError: true,
+      message: "Request failed with status code 404",
+      response: { status: 404, data: { message: "Transaction reference not found" } },
+    });
+
+    await expect(paystackProvider.retrieveIntent("unknown_ref")).rejects.toMatchObject({
+      statusCode: 502,
+      code: "PAYMENT_PROVIDER_ERROR",
+    });
   });
 });
 

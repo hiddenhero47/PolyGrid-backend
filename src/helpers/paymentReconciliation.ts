@@ -50,9 +50,16 @@ export const reconcilePaymentIntent = async (
     return { status: "success", payment, subscription: subscription ?? undefined };
   }
 
+  // What was actually charged — identical to amount/currency for every
+  // payment except a currency-converted Paystack one (see
+  // Payment.providerChargedAmount's own comment); falls back to
+  // amount/currency for a payment created before that field existed.
+  const expectedAmount = payment.providerChargedAmount ?? payment.amount;
+  const expectedCurrency = payment.providerChargedCurrency ?? payment.currency;
+
   const isSuccess = intent.status === "succeeded";
-  const isAmount = Math.round(intent.amount * 100) === Math.round(payment.amount * 100);
-  const isCurrency = intent.currency.toUpperCase() === payment.currency.toUpperCase();
+  const isAmount = Math.round(intent.amount * 100) === Math.round(expectedAmount * 100);
+  const isCurrency = intent.currency.toUpperCase() === expectedCurrency.toUpperCase();
 
   if (!isSuccess || !isAmount || !isCurrency) {
     // Stripe has no single "this failed" PaymentIntent status — most

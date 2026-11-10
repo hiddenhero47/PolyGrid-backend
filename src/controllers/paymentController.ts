@@ -25,6 +25,7 @@ import {
   resolveRail,
   buildTransactionCountries,
   resolveProviderForCountry,
+  buildCallbackUrl,
 } from "../helpers/paymentGuardrails";
 import { constructConnectWebhookEvent } from "../helpers/stripeConnect";
 import { completePaymentTarget } from "../helpers/paymentCompletion";
@@ -62,7 +63,7 @@ export const getMyPayments = asyncHandler(async (req: Request, res: Response) =>
 
 const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { targetId, amount, currentPassword, otpToken, callbackUrl } = req.body;
+  const { targetId, amount, currentPassword, otpToken, callbackPath } = req.body;
 
   const job = await Job.findById(targetId);
 
@@ -85,7 +86,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
 
   const providerUser = await User.findById(job.provider.userId).select("country");
   const rail = resolveRail(PAYMENT_TARGET_TYPE.JOB);
-  const providerName = await resolveProviderForCountry(requester.country as string);
+  const { provider: providerName, usdToNgnRate } = await resolveProviderForCountry(requester.country as string);
 
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.JOB,
@@ -101,15 +102,18 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
   });
 
   const provider = getPaymentProvider(providerName);
-  const { providerPaymentId, clientSecret } = await provider.createIntent({
+  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await provider.createIntent({
     amount,
     currency: job.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
-    callbackUrl,
+    callbackUrl: buildCallbackUrl(callbackPath),
+    usdToNgnRate,
   });
 
   payment.providerPaymentId = providerPaymentId;
+  payment.providerChargedAmount = chargedAmount;
+  payment.providerChargedCurrency = chargedCurrency;
   await payment.save();
 
   res.status(201).json({ clientSecret, paymentId: payment.id, provider: providerName });
@@ -168,7 +172,7 @@ const activateFreeSubscription = async (
 
 const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { planTier, autoRenew, currentPassword, otpToken, callbackUrl } = req.body;
+  const { planTier, autoRenew, currentPassword, otpToken, callbackPath } = req.body;
 
   const plan = await Plan.findOne({ planTier, isActive: true });
 
@@ -203,7 +207,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   });
 
   const rail = resolveRail(PAYMENT_TARGET_TYPE.SUBSCRIPTION);
-  const providerName = await resolveProviderForCountry(requester.country as string);
+  const { provider: providerName, usdToNgnRate } = await resolveProviderForCountry(requester.country as string);
 
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
@@ -219,15 +223,18 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
   });
 
   const provider = getPaymentProvider(providerName);
-  const { providerPaymentId, clientSecret } = await provider.createIntent({
+  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await provider.createIntent({
     amount: plan.price,
     currency: plan.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
-    callbackUrl,
+    callbackUrl: buildCallbackUrl(callbackPath),
+    usdToNgnRate,
   });
 
   payment.providerPaymentId = providerPaymentId;
+  payment.providerChargedAmount = chargedAmount;
+  payment.providerChargedCurrency = chargedCurrency;
   await payment.save();
 
   res
@@ -303,11 +310,18 @@ const resumeDigitalPurchaseIntent = async (
 
     // Still live (requires_payment_method/confirmation/action,
     // processing) — this is the common case (a declined card, or the
-    // buyer just closing the form). The clientSecret their card form
-    // already had still works; no new intent needed.
-    if (intent.status !== "canceled") {
+    // buyer just closing the form). Stripe-only: its clientSecret can be
+    // reused to retry confirmation from exactly where the buyer left
+    // off, no new intent needed. Paystack has no equivalent — its
+    // authorization_url is only ever returned once, at initialize time
+    // (never again from retrieveIntent/verify), and nothing persists it
+    // — so a still-pending Paystack attempt always falls through to a
+    // fresh checkout below, same as a genuinely dead one.
+    if (payment.provider === PAYMENT_PROVIDER_NAME.STRIPE && intent.status !== "canceled") {
       const clientSecret = (intent.raw as { client_secret: string | null } | null)?.client_secret ?? null;
-      res.status(200).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id, resumed: true });
+      res
+        .status(200)
+        .json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id, resumed: true, provider: payment.provider });
       return;
     }
   }
@@ -322,7 +336,7 @@ const resumeDigitalPurchaseIntent = async (
     ? await User.findById(purchaseCreator.userId).select("country")
     : null;
   const rail = resolveRail(PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE);
-  const providerName = await resolveProviderForCountry(requester.country as string);
+  const { provider: providerName, usdToNgnRate } = await resolveProviderForCountry(requester.country as string);
 
   // No provider intent at all (shouldn't happen in practice), or it's
   // genuinely dead (canceled) — a brand new Payment record, never the
@@ -344,15 +358,18 @@ const resumeDigitalPurchaseIntent = async (
     ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
 
-  const { providerPaymentId, clientSecret } = await getPaymentProvider(providerName).createIntent({
+  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await getPaymentProvider(providerName).createIntent({
     amount: purchase.priceSnapshot,
     currency: purchase.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (freshPayment._id as mongoose.Types.ObjectId).toString() },
-    callbackUrl: req.body?.callbackUrl,
+    callbackUrl: buildCallbackUrl(req.body?.callbackPath),
+    usdToNgnRate,
   });
 
   freshPayment.providerPaymentId = providerPaymentId;
+  freshPayment.providerChargedAmount = chargedAmount;
+  freshPayment.providerChargedCurrency = chargedCurrency;
   await freshPayment.save();
 
   res
@@ -371,7 +388,7 @@ const resumeDigitalPurchaseIntent = async (
 // its creator's page in the first place.
 const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): Promise<void> => {
   const requester = req.user as IUser;
-  const { targetId, currentPassword, otpToken, callbackUrl } = req.body;
+  const { targetId, currentPassword, otpToken, callbackPath } = req.body;
 
   const product = await DigitalProduct.findById(targetId);
   if (!product || !product.isActive) {
@@ -467,7 +484,7 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     return;
   }
 
-  const providerName = await resolveProviderForCountry(requester.country as string);
+  const { provider: providerName, usdToNgnRate } = await resolveProviderForCountry(requester.country as string);
 
   const payment = await Payment.create({
     targetType: PAYMENT_TARGET_TYPE.DIGITAL_PURCHASE,
@@ -483,15 +500,18 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
   });
 
   const provider = getPaymentProvider(providerName);
-  const { providerPaymentId, clientSecret } = await provider.createIntent({
+  const { providerPaymentId, clientSecret, chargedAmount, chargedCurrency } = await provider.createIntent({
     amount: product.price,
     currency: product.currency,
     receiptEmail: requester.email,
     metadata: { paymentId: (payment._id as mongoose.Types.ObjectId).toString() },
-    callbackUrl,
+    callbackUrl: buildCallbackUrl(callbackPath),
+    usdToNgnRate,
   });
 
   payment.providerPaymentId = providerPaymentId;
+  payment.providerChargedAmount = chargedAmount;
+  payment.providerChargedCurrency = chargedCurrency;
   await payment.save();
 
   res.status(201).json({ clientSecret, paymentId: payment.id, purchaseId: purchase.id, provider: providerName });

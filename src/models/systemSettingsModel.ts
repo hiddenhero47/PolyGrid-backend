@@ -54,6 +54,16 @@ export interface ISystemSettings extends Document {
   // countryProviderOverrides: a country absent from this map always gets
   // the document track, since BVN/NIN only exist for Nigeria.
   countryKycProviders: Record<string, IdentityVerificationProviderName>;
+  // Interim stopgap for Paystack accounts that don't have USD enabled on
+  // their integration yet (ours doesn't — confirmed directly against the
+  // live API: "Currency not supported by merchant", NGN-only until
+  // Paystack approves an international-payments request). 0 (default) =
+  // disabled — a USD-denominated charge is sent to Paystack as USD and
+  // fails outright, same as today. Set to a real rate (NGN per 1 USD) to
+  // have paystackProvider.ts convert at send-time instead — see its own
+  // comment. Deliberately never guessed/hardcoded in code: an admin sets
+  // this, same closed-by-default posture as every other knob here.
+  usdToNgnRate: number;
   updatedBy?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -79,6 +89,7 @@ const systemSettingsSchema = new Schema<ISystemSettings>(
       type: Schema.Types.Mixed,
       default: () => ({}),
     },
+    usdToNgnRate: { type: Number, default: 0, min: 0 },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true },

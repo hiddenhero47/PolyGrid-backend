@@ -15,11 +15,30 @@ export interface CreateIntentParams {
   // instead. Caller-supplied (the frontend controls its own routes),
   // never guessed server-side.
   callbackUrl?: string;
+  // SystemSettings.usdToNgnRate, resolved by the caller
+  // (resolveProviderForCountry) and passed in rather than fetched here —
+  // provider adapters never touch the database directly, only their own
+  // gateway, so they stay trivially unit-testable with no DB connection.
+  // stripeProvider.ts ignores this entirely; paystackProvider.ts converts
+  // a USD charge to NGN with it when > 0 (this integration has no USD
+  // support — see its own comment).
+  usdToNgnRate?: number;
 }
 
 export interface CreateIntentResult {
   providerPaymentId: string;
   clientSecret: string | null;
+  // What the adapter actually told the gateway to charge — usually just
+  // an echo of CreateIntentParams.amount/currency (Stripe always), but
+  // paystackProvider.ts may convert USD to NGN at send-time when
+  // SystemSettings.usdToNgnRate is configured (this Paystack integration
+  // has no USD support — see its own comment). paymentController.ts
+  // snapshots these onto Payment.providerChargedAmount/
+  // providerChargedCurrency so reconcilePaymentIntent compares a
+  // provider's real response against what was really sent, not always
+  // the canonical USD amount/currency.
+  chargedAmount: number;
+  chargedCurrency: string;
 }
 
 export interface PaymentProviderAdapter {

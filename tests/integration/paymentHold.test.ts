@@ -81,6 +81,77 @@ const succeededIntent = (amount: number, currency = "USD") => ({
   raw: {},
 });
 
+describe("reconcilePaymentIntent compares against what was actually charged, not always the canonical USD amount", () => {
+  it("reconciles a Paystack payment charged in NGN by comparing against providerChargedAmount/Currency, not amount/currency", async () => {
+    await SystemSettings.create({
+      maxOutstandingExposure: 1_000_000,
+      maxTransactionAmount: 1_000_000,
+      supportedCountries: [],
+      fraudHoldThresholdAmount: 1_000_000,
+    });
+
+    const buyer = await createUser();
+    const plan = await createPlan({ price: 15 });
+    const subscription = await createSubscription({ user: buyer, plan, status: SUBSCRIPTION_STATUS.PENDING });
+
+    const payment = await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
+      targetId: subscription._id,
+      user: buyer._id,
+      userEmail: buyer.email,
+      amount: 15,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.PAYSTACK,
+      status: PAYMENT_STATUS.PENDING,
+      rail: PAYMENT_RAIL.PLATFORM,
+      providerPaymentId: "polygrid_payment_ngn",
+      providerChargedAmount: 24000,
+      providerChargedCurrency: "NGN",
+    });
+
+    // Paystack's own verify response reports what it actually charged
+    // (NGN) — would fail the old amount/currency check (15 USD !== 24000
+    // NGN) if providerChargedAmount/Currency weren't consulted instead.
+    const result = await reconcilePaymentIntent(payment, "polygrid_payment_ngn", succeededIntent(24000, "NGN"));
+
+    expect(result.status).toBe("success");
+    expect(payment.status).toBe("success");
+
+    const updatedSubscription = await Subscription.findById(subscription._id);
+    expect(updatedSubscription?.status).toBe("active");
+  });
+
+  it("still works for a payment with no providerChargedAmount set (created before the field existed)", async () => {
+    await SystemSettings.create({
+      maxOutstandingExposure: 1_000_000,
+      maxTransactionAmount: 1_000_000,
+      supportedCountries: [],
+      fraudHoldThresholdAmount: 1_000_000,
+    });
+
+    const buyer = await createUser();
+    const plan = await createPlan({ price: 15 });
+    const subscription = await createSubscription({ user: buyer, plan, status: SUBSCRIPTION_STATUS.PENDING });
+
+    const payment = await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.SUBSCRIPTION,
+      targetId: subscription._id,
+      user: buyer._id,
+      userEmail: buyer.email,
+      amount: 15,
+      currency: "USD",
+      provider: PAYMENT_PROVIDER_NAME.STRIPE,
+      status: PAYMENT_STATUS.PENDING,
+      rail: PAYMENT_RAIL.PLATFORM,
+      providerPaymentId: "pi_no_charged_amount",
+    });
+
+    const result = await reconcilePaymentIntent(payment, "pi_no_charged_amount", succeededIntent(15, "USD"));
+
+    expect(result.status).toBe("success");
+  });
+});
+
 describe("reconcilePaymentIntent — fraud hold (helpers/paymentReconciliation.ts)", () => {
   it("holds a Job payment over the threshold instead of crediting escrow immediately", async () => {
     await SystemSettings.create({

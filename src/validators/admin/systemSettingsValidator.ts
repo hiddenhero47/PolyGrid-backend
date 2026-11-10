@@ -58,5 +58,6 @@ export const updateSystemSettingsSchema = yup
         },
       )
       .notRequired(),
+    usdToNgnRate: yup.number().min(0).notRequired(),
   })
   .noUnknown(true);
