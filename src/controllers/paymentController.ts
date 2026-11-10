@@ -19,7 +19,7 @@ import {
   getCarryoverDays,
   DAY_MS,
 } from "../helpers/profileSubscriptionSync";
-import { reconcilePaymentIntent } from "../helpers/paymentReconciliation";
+import { reconcilePaymentIntent, PAYMENT_EXPIRY_MS } from "../helpers/paymentReconciliation";
 import { copyPurchaseFiles } from "../helpers/digitalPurchaseFiles";
 import {
   assertPaymentAllowed,
@@ -134,6 +134,7 @@ const handleJobPaymentIntent = async (req: Request, res: Response): Promise<void
     currency: job.currency,
     provider: providerName,
     status: PAYMENT_STATUS.PENDING,
+    expiresAt: new Date(Date.now() + PAYMENT_EXPIRY_MS),
     rail,
     ...buildTransactionCountries(rail, requester.country, providerUser?.country),
   });
@@ -250,6 +251,7 @@ const handleSubscriptionPaymentIntent = async (req: Request, res: Response): Pro
     currency: plan.currency,
     provider: providerName,
     status: PAYMENT_STATUS.PENDING,
+    expiresAt: new Date(Date.now() + PAYMENT_EXPIRY_MS),
     rail,
     ...buildTransactionCountries(rail, requester.country),
   });
@@ -381,6 +383,7 @@ const resumeDigitalPurchaseIntent = async (
     currency: purchase.currency,
     provider: providerName,
     status: PAYMENT_STATUS.PENDING,
+    expiresAt: new Date(Date.now() + PAYMENT_EXPIRY_MS),
     rail,
     ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });
@@ -517,6 +520,7 @@ const handleDigitalPurchasePaymentIntent = async (req: Request, res: Response): 
     currency: product.currency,
     provider: providerName,
     status: PAYMENT_STATUS.PENDING,
+    expiresAt: new Date(Date.now() + PAYMENT_EXPIRY_MS),
     rail,
     ...buildTransactionCountries(rail, requester.country, creatorUser?.country),
   });

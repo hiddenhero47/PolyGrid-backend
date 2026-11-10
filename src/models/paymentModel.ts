@@ -83,6 +83,18 @@ export interface IPayment extends Document {
   providerChargedAmount?: number;
   providerChargedCurrency?: string;
   status: PaymentStatus;
+  // Set at creation time, not derived later — same "every record carries
+  // its own deadline from birth" instinct as HM. Only ever set on a
+  // payment that actually goes through a real provider checkout (the
+  // four handle*PaymentIntent paths + resumeDigitalPurchaseIntent's
+  // fresh-payment branch); absent on a 'manual' entry or a free
+  // plan/product (those are created already SUCCESS, with nothing to
+  // expire). sweepPendingProviderPayments (paymentReconciliation.ts)
+  // reads this directly to decide when to give up on an abandoned
+  // checkout, instead of re-deriving the same cutoff from createdAt on
+  // every run. Falls back to createdAt + PAYMENT_EXPIRY_MS for a payment
+  // created before this field existed.
+  expiresAt?: Date;
   // Card-fraud mitigation (see helpers/paymentReconciliation.ts,
   // helpers/paymentHoldRelease.ts) — a successful charge over
   // SystemSettings.fraudHoldThresholdAmount sets isOnHold + holdReleaseAt
@@ -145,6 +157,7 @@ const paymentSchema = new Schema<IPayment>(
       enum: Object.values(PAYMENT_STATUS),
       default: PAYMENT_STATUS.PENDING,
     },
+    expiresAt: { type: Date },
     isOnHold: { type: Boolean, default: false },
     holdReleaseAt: { type: Date },
     disputedAt: { type: Date },

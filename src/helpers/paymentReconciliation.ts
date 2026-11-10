@@ -104,8 +104,13 @@ const REFRESH_AFTER_MS = 10 * 60 * 1000;
 
 // 24 hours with no successful webhook/refresh — waiting on the customer to
 // come back and finish an abandoned checkout is no longer realistic; close
-// the payment out instead of leaving it 'pending' forever.
-const ABANDON_AFTER_MS = 24 * 60 * 60 * 1000;
+// the payment out instead of leaving it 'pending' forever. Exported so
+// paymentController.ts can set Payment.expiresAt = createdAt + this at the
+// moment a payment is created (same "every record carries its own deadline
+// from birth" instinct as HM) — the sweep below then just compares
+// expiresAt directly, instead of re-deriving the same cutoff from
+// createdAt every run.
+export const PAYMENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 // @desc    Re-checks every still-PENDING, provider-backed payment old
 //          enough that its webhook should have already arrived, via the
@@ -123,7 +128,7 @@ export const sweepPendingProviderPayments = async (): Promise<{
   abandoned: number;
 }> => {
   const refreshCutoff = new Date(Date.now() - REFRESH_AFTER_MS);
-  const abandonCutoff = new Date(Date.now() - ABANDON_AFTER_MS);
+  const now = new Date();
 
   const pending = await Payment.find({
     provider: { $ne: PAYMENT_PROVIDER_NAME.MANUAL },
@@ -146,7 +151,12 @@ export const sweepPendingProviderPayments = async (): Promise<{
         continue;
       }
 
-      if (payment.createdAt <= abandonCutoff) {
+      // Falls back to the createdAt-derived cutoff for a payment created
+      // before expiresAt existed (never backfilled — see its own comment
+      // on paymentModel.ts).
+      const expiresAt = payment.expiresAt ?? new Date(payment.createdAt.getTime() + PAYMENT_EXPIRY_MS);
+
+      if (expiresAt <= now) {
         payment.status = PAYMENT_STATUS.FAILED;
         await payment.save();
         abandoned += 1;

@@ -1147,6 +1147,69 @@ describe("Live Stripe round trip (skipped unless a real STRIPE_SECRET_KEY is set
     expect(retry.body.paymentId).not.toBe(failedPayment?.id);
   });
 
+  // Every provider-routed payment carries its own deadline from the
+  // moment it's created, not derived later from createdAt at sweep time
+  // — same instinct as HM. See Payment.expiresAt's own comment.
+  it("sets expiresAt ~24h out at creation, on every provider-routed payment", async () => {
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: providerUser });
+
+    const before = Date.now();
+    const res = await request(app)
+      .post("/api/payments/intent")
+      .set("Authorization", `Bearer ${generateToken(clientUser)}`)
+      .send({ targetType: "Job", targetId: job.id, amount: 60 });
+    const after = Date.now();
+
+    const payment = await Payment.findById(res.body.paymentId);
+    expect(payment?.expiresAt).toBeTruthy();
+    const expiresAtMs = payment!.expiresAt!.getTime();
+    expect(expiresAtMs).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000 - 1000);
+    expect(expiresAtMs).toBeLessThanOrEqual(after + 24 * 60 * 60 * 1000 + 1000);
+  });
+
+  it("falls back to createdAt + PAYMENT_EXPIRY_MS when expiresAt is unset, for a payment created before the field existed", async () => {
+    await SystemSettings.updateOne({}, { countryProviderOverrides: { NG: "paystack" } });
+
+    const clientUser = await createUser();
+    const providerUser = await createUser();
+    const job = await createActiveJob({ client: clientUser, provider: providerUser });
+
+    const payment = await Payment.create({
+      targetType: PAYMENT_TARGET_TYPE.JOB,
+      targetId: job._id,
+      user: clientUser._id,
+      userEmail: clientUser.email,
+      amount: 60,
+      currency: job.currency,
+      provider: PAYMENT_PROVIDER_NAME.PAYSTACK,
+      status: PAYMENT_STATUS.PENDING,
+      rail: PAYMENT_RAIL.MARKETPLACE,
+      providerPaymentId: "polygrid_payment_legacy",
+      // expiresAt deliberately omitted — simulates a row from before the
+      // field existed.
+    });
+    await Payment.collection.updateOne(
+      { _id: payment._id },
+      { $set: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) } },
+    );
+
+    jest.spyOn(paystackProvider, "retrieveIntent").mockResolvedValueOnce({
+      status: "pending",
+      amount: 60,
+      currency: "USD",
+      feeAmount: 0,
+      raw: {},
+    });
+
+    const result = await sweepPendingProviderPayments();
+
+    expect(result.abandoned).toBeGreaterThanOrEqual(1);
+    const updatedPayment = await Payment.findById(payment.id);
+    expect(updatedPayment?.status).toBe("failed");
+  });
+
   // Skipped: same reason as "funds a job's escrow end-to-end" above —
   // this test's own setup needs the first intent to actually reach
   // `succeeded` via a direct confirm(), which 3DS now blocks headlessly.
@@ -1349,10 +1412,16 @@ describe("sweepPendingProviderPayments (skipped unless a real STRIPE_SECRET_KEY 
 
     // Deliberately never confirmed at Stripe — the intent sits at
     // requires_payment_method forever, same as a customer who closed the
-    // tab mid-checkout.
+    // tab mid-checkout. Rewinds expiresAt too, not just createdAt — it's
+    // the one the sweep actually reads now (set once, at creation).
     await Payment.collection.updateOne(
       { _id: payment!._id },
-      { $set: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) } },
+      {
+        $set: {
+          createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+          expiresAt: new Date(Date.now() - 60 * 60 * 1000),
+        },
+      },
     );
 
     const result = await sweepPendingProviderPayments();
