@@ -4,6 +4,7 @@ import crypto from "crypto";
 import axios from "axios";
 import { Request } from "express";
 import { detectFileSignature } from "./fileSignature";
+import { assertPublicHttpUrl } from "./ssrfGuard";
 
 export const FILE_VISIBILITY = {
   PUBLIC: "public",
@@ -315,6 +316,7 @@ export const uploadHandler = async ({
 
     for (const url of urls) {
       try {
+        await assertPublicHttpUrl(url);
         const response = await axios.get<ArrayBuffer>(url, {
           responseType: "arraybuffer",
           maxContentLength: MAX_FILE_SIZE_BYTES,
