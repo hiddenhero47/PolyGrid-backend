@@ -17,11 +17,27 @@ import { TENDER_CATEGORY, MAX_PROJECT_FILES } from "../../src/models/tenderProje
 import { ContractorProfile } from "../../src/models/contractorProfileModel";
 import { Bid } from "../../src/models/bidModel";
 import { Job } from "../../src/models/jobModel";
+import { PayoutKyc, PAYOUT_KYC_METHOD, PAYOUT_KYC_STATUS } from "../../src/models/payoutKycModel";
+import { SystemSettings } from "../../src/models/systemSettingsModel";
 
 const app = createApp();
 
 beforeAll(async () => {
   await connectTestDB();
+});
+
+// clearTestDB wipes SystemSettings between tests, and its own defaults
+// are deliberately restrictive (nothing supported) — awarding a bid now
+// requires the poster's own country to be supported (see
+// helpers/paymentGuardrails.ts's assertEscrowEligible), so every test
+// here needs NG permitted, same pattern as payment.test.ts's own
+// beforeEach.
+beforeEach(async () => {
+  await SystemSettings.create({
+    supportedCountries: ["NG"],
+    maxOutstandingExposure: 1_000_000,
+    maxTransactionAmount: 1_000_000,
+  });
 });
 
 afterEach(async () => {
@@ -44,10 +60,19 @@ const createEligibleContractor = async () => {
 };
 
 // A poster eligible to post a project: a verified, subscribed
-// ClientProfile (see clientProfileModel.ts).
+// ClientProfile (see clientProfileModel.ts). awardBid auto-confirms the
+// poster's own side of the new Job immediately, so they must also
+// already be escrow-eligible (verified payout KYC, supported country) —
+// see helpers/paymentGuardrails.ts's assertEscrowEligible.
 const createEligiblePoster = async () => {
-  const user = await createUserWithActiveSubscription();
+  const user = await createUserWithActiveSubscription({ country: "NG" });
   await createClientProfile({ user, currentSubscription: user.currentSubscription, isVerified: true });
+  await PayoutKyc.create({
+    user: user._id,
+    country: "NG",
+    method: PAYOUT_KYC_METHOD.AUTOMATED,
+    status: PAYOUT_KYC_STATUS.VERIFIED,
+  });
   return user;
 };
 
@@ -535,7 +560,7 @@ describe("POST /api/tender-projects/:id/bids — sealed bidding", () => {
     // The bidder's name is fine for the poster to review by, but their
     // email stays hidden until a real Contact connection exists — which
     // only happens at awardBid, not just by listing pending bids.
-    expect(visibleForPoster.body[0].bidder.fullName).toEqual(expect.any(String));
+    expect(visibleForPoster.body[0].bidder.userName).toEqual(expect.any(String));
     expect(visibleForPoster.body[0].bidder.email).toBeUndefined();
   });
 });
@@ -589,7 +614,7 @@ describe("PATCH /api/tender-projects/:id/bids/mine and .../withdraw", () => {
 
 describe("PATCH /api/tender-projects/:id/award", () => {
   it("accepts the chosen bid, rejects every other pending bid, and spins up a Job", async () => {
-    const poster = await createUserWithActiveSubscription();
+    const poster = await createEligiblePoster();
     const project = await createTenderProject({ postedBy: poster });
     const { user: winnerUser, profile: winnerProfile } = await createEligibleContractor();
     const { user: loserUser, profile: loserProfile } = await createEligibleContractor();
@@ -624,6 +649,22 @@ describe("PATCH /api/tender-projects/:id/award", () => {
       .set("Authorization", `Bearer ${generateToken(winnerUser)}`);
     expect(winnerNotifications.body.data).toHaveLength(1);
     expect(winnerNotifications.body.data[0].type).toBe("tender_bid_awarded");
+  });
+
+  it("blocks awarding without the poster's own verified payout KYC", async () => {
+    const poster = await createEligiblePoster();
+    await PayoutKyc.deleteOne({ user: poster._id });
+    const project = await createTenderProject({ postedBy: poster });
+    const { user: winnerUser, profile: winnerProfile } = await createEligibleContractor();
+    const winningBid = await createBid({ project, contractor: winnerProfile, bidder: winnerUser, amount: 6000 });
+
+    const res = await request(app)
+      .patch(`/api/tender-projects/${project.id}/award`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`)
+      .send({ bidId: winningBid.id });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_REQUIRED");
   });
 
   it("blocks awarding on a non-open project", async () => {

@@ -93,8 +93,8 @@ describe("POST /api/contacts", () => {
 describe("GET /api/contacts", () => {
   it("lists my contacts, newest first, with each contact's name and avatar", async () => {
     const me = await createUser();
-    const a = await createUser({ fullName: "Amaka Obi" });
-    const b = await createUser({ fullName: "Bello Hassan" });
+    const a = await createUser({ fullName: { firstName: "Amaka", lastName: "Obi" }, userName: "Amaka Obi" });
+    const b = await createUser({ fullName: { firstName: "Bello", lastName: "Hassan" }, userName: "Bello Hassan" });
     const token = generateToken(me);
 
     await request(app).post("/api/contacts").set("Authorization", `Bearer ${token}`).send({ userId: a.id });
@@ -105,16 +105,16 @@ describe("GET /api/contacts", () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(2);
     expect(res.body.data[0].user).toBe(b.id); // most recently connected first
-    expect(res.body.data[0].fullName).toBe("Bello Hassan");
+    expect(res.body.data[0].userName).toBe("Bello Hassan");
     expect(res.body.data[0].avatar).toBeUndefined();
-    expect(res.body.data[1].fullName).toBe("Amaka Obi");
+    expect(res.body.data[1].userName).toBe("Amaka Obi");
     expect(res.body.pagination.total).toBe(2);
   });
 
   it("filters by name or email via ?q=", async () => {
     const me = await createUser();
-    const amaka = await createUser({ fullName: "Amaka Obi", email: "amaka.obi@example.com" });
-    const bello = await createUser({ fullName: "Bello Hassan", email: "bello@example.com" });
+    const amaka = await createUser({ fullName: { firstName: "Amaka", lastName: "Obi" }, userName: "Amaka Obi", email: "amaka.obi@example.com" });
+    const bello = await createUser({ fullName: { firstName: "Bello", lastName: "Hassan" }, userName: "Bello Hassan", email: "bello@example.com" });
     const token = generateToken(me);
 
     await request(app).post("/api/contacts").set("Authorization", `Bearer ${token}`).send({ userId: amaka.id });

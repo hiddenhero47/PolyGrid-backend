@@ -40,7 +40,7 @@ const notifySystemPayoutSettled = async (
   jobTitle: string,
   paid: boolean,
 ): Promise<void> => {
-  const recipient = await User.findById(payout.user).select("email fullName");
+  const recipient = await User.findById(payout.user).select("email userName");
   if (!recipient) return;
 
   await sendTemplatedEmail({
@@ -48,7 +48,7 @@ const notifySystemPayoutSettled = async (
     subject: `Your ${payout.requestType} transfer ${paid ? "was sent" : "failed"}`,
     template: "systemPayoutSettled",
     variables: {
-      name: recipient.fullName,
+      name: recipient.userName,
       jobTitle,
       requestType: payout.requestType,
       amount: payout.amount,
@@ -106,7 +106,7 @@ export const getSystemPayouts = asyncHandler(async (req: Request, res: Response)
   const [jobs, creatorProfiles, users] = await Promise.all([
     Job.find({ _id: { $in: payouts.map((p) => p.targetId) } }).select("jobTitle"),
     DigitalCreatorProfile.find({ _id: { $in: payouts.map((p) => p.targetId) } }).select("displayName"),
-    User.find({ _id: { $in: payouts.map((p) => p.user) } }).select("fullName email"),
+    User.find({ _id: { $in: payouts.map((p) => p.user) } }).select("userName email"),
   ]);
   const jobById = new Map(jobs.map((job) => [job.id, job]));
   const creatorProfileById = new Map(creatorProfiles.map((profile) => [profile.id, profile]));
@@ -128,7 +128,7 @@ export const getSystemPayouts = asyncHandler(async (req: Request, res: Response)
       isLocked: payout.isLocked,
       recipient: (() => {
         const user = userById.get(payout.user.toString()) as IUser | undefined;
-        return user ? { id: user.id, fullName: user.fullName, email: user.email } : null;
+        return user ? { id: user.id, userName: user.userName, email: user.email } : null;
       })(),
       transferReference: payout.transferReference,
       failureReason: payout.failureReason,

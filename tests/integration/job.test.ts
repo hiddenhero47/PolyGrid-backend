@@ -11,6 +11,7 @@ import createApp from "../../src/app";
 import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import {
   createUser,
+  createEscrowEligibleUser,
   createAdmin,
   createCustomerCare,
   generateToken,
@@ -24,6 +25,7 @@ import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS, PAYMENT_RAIL } from "../.
 import { PAYMENT_PROVIDER_NAME } from "../../src/models/paymentProviderModel";
 import { SystemPayout, SYSTEM_PAYOUT_REQUEST_TYPE } from "../../src/models/systemPayoutModel";
 import { PayoutKyc } from "../../src/models/payoutKycModel";
+import { SystemSettings } from "../../src/models/systemSettingsModel";
 import { IUser } from "../../src/models/userModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 
@@ -31,6 +33,20 @@ const app = createApp();
 
 beforeAll(async () => {
   await connectTestDB();
+});
+
+// clearTestDB wipes SystemSettings between tests, and its own defaults
+// are deliberately restrictive (nothing supported) — Job
+// creation/acceptance now requires the acting party's own country to be
+// supported (see helpers/paymentGuardrails.ts's assertEscrowEligible),
+// so every test here needs NG permitted, same pattern as
+// payment.test.ts's own beforeEach.
+beforeEach(async () => {
+  await SystemSettings.create({
+    supportedCountries: ["NG"],
+    maxOutstandingExposure: 1_000_000,
+    maxTransactionAmount: 1_000_000,
+  });
 });
 
 afterEach(async () => {
@@ -57,13 +73,6 @@ const TEST_PAYOUT_ACCOUNT = {
   bankName: "Test Bank",
   country: "NG",
 };
-
-// createSystemPayout refuses to approve a refund/payout request unless
-// the beneficiary has a verified PayoutKyc record on file, independent of
-// payoutAccount/settlementMethod (see jobController.ts) — this is a
-// valid shape for any test that needs one set up to get past that check.
-const verifyPayoutKyc = (user: IUser) =>
-  PayoutKyc.create({ user: user._id, country: user.country ?? "NG", method: "automated", status: "verified" });
 
 // Creates + confirms a job in one go, returning it (status: active, one
 // implicit 100%-payment stage unless `stages` is passed).
@@ -98,8 +107,8 @@ describe("POST /api/jobs", () => {
   });
 
   it("creates a job, auto-confirming the creator's own side, and connects the two as contacts", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const res = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -123,8 +132,8 @@ describe("POST /api/jobs", () => {
   });
 
   it("rejects a currency that isn't a real ISO 4217 code, as a clean 400 not a 500", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const res = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -139,8 +148,8 @@ describe("POST /api/jobs", () => {
   });
 
   it("lets the creator be the provider instead", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const res = await createJobAs(generateToken(providerUser), {
       counterpartyUserId: clientUser.id,
@@ -157,8 +166,8 @@ describe("POST /api/jobs", () => {
   });
 
   it("rejects custom stages whose payments sum over 100", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const res = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -173,7 +182,7 @@ describe("POST /api/jobs", () => {
   });
 
   it("rejects creating a job with yourself", async () => {
-    const clientUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
 
     const res = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: clientUser.id,
@@ -185,12 +194,44 @@ describe("POST /api/jobs", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("blocks creating a job from an unsupported country", async () => {
+    const clientUser = await createEscrowEligibleUser({ country: "US" });
+    const providerUser = await createEscrowEligibleUser();
+
+    const res = await createJobAs(generateToken(clientUser), {
+      counterpartyUserId: providerUser.id,
+      myRole: "client",
+      jobTitle: "t",
+      jobDescription: "d",
+      totalAmount: 1000,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("COUNTRY_NOT_SUPPORTED");
+  });
+
+  it("blocks creating a job without verified payout KYC", async () => {
+    const clientUser = await createUser({ country: "NG" });
+    const providerUser = await createEscrowEligibleUser();
+
+    const res = await createJobAs(generateToken(clientUser), {
+      counterpartyUserId: providerUser.id,
+      myRole: "client",
+      jobTitle: "t",
+      jobDescription: "d",
+      totalAmount: 1000,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_REQUIRED");
+  });
 });
 
 describe("PATCH /api/jobs/:id/confirm", () => {
   it("activates the job once the other party confirms", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const created = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -210,8 +251,8 @@ describe("PATCH /api/jobs/:id/confirm", () => {
   });
 
   it("blocks a non-party from confirming", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const stranger = await createUser();
 
     const created = await createJobAs(generateToken(clientUser), {
@@ -229,9 +270,29 @@ describe("PATCH /api/jobs/:id/confirm", () => {
     expect(res.status).toBe(403);
   });
 
+  it("blocks the counterparty from confirming without verified payout KYC", async () => {
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createUser({ country: "NG" });
+
+    const created = await createJobAs(generateToken(clientUser), {
+      counterpartyUserId: providerUser.id,
+      myRole: "client",
+      jobTitle: "t",
+      jobDescription: "d",
+      totalAmount: 1000,
+    });
+
+    const res = await request(app)
+      .patch(`/api/jobs/${created.body._id}/confirm`)
+      .set("Authorization", `Bearer ${generateToken(providerUser)}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_REQUIRED");
+  });
+
   it("rejects confirming twice", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const created = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -253,8 +314,8 @@ describe("PATCH /api/jobs/:id/confirm", () => {
 
 describe("PATCH /api/jobs/:id", () => {
   it("lets the creator edit while pending confirmation", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const created = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -278,8 +339,8 @@ describe("PATCH /api/jobs/:id", () => {
   });
 
   it("does not record a price-history entry when totalAmount doesn't actually change", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const created = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -298,8 +359,8 @@ describe("PATCH /api/jobs/:id", () => {
   });
 
   it("blocks the non-creator from editing", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const created = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -318,8 +379,8 @@ describe("PATCH /api/jobs/:id", () => {
   });
 
   it("blocks editing once active", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -333,8 +394,8 @@ describe("PATCH /api/jobs/:id", () => {
 
 describe("GET /api/jobs/:id and /api/jobs/mine", () => {
   it("lets client, provider, admin, and customer_care view; blocks a stranger", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const customerCare = await createCustomerCare();
     const stranger = await createUser();
@@ -354,8 +415,8 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
   });
 
   it("still blocks customer_care from the write-guarded actions on the same job", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const customerCare = await createCustomerCare();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -373,8 +434,8 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
   });
 
   it("getJob returns full detail with no contract files when none uploaded yet", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -388,8 +449,8 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
   });
 
   it("getJob includes each party's public user summary (name + avatar), never losing the raw userId", async () => {
-    const clientUser = await createUser({ fullName: "Chidi Okonkwo" });
-    const providerUser = await createUser({ fullName: "Ada Eze" });
+    const clientUser = await createEscrowEligibleUser({ fullName: { firstName: "Chidi", lastName: "Okonkwo" }, userName: "Chidi Okonkwo" });
+    const providerUser = await createEscrowEligibleUser({ fullName: { firstName: "Ada", lastName: "Eze" }, userName: "Ada Eze" });
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -398,14 +459,14 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.client.userId).toBe(clientUser.id);
-    expect(res.body.client.user).toEqual({ id: clientUser.id, fullName: "Chidi Okonkwo", avatar: undefined });
+    expect(res.body.client.user).toEqual({ id: clientUser.id, userName: "Chidi Okonkwo", avatar: undefined });
     expect(res.body.provider.userId).toBe(providerUser.id);
-    expect(res.body.provider.user).toEqual({ id: providerUser.id, fullName: "Ada Eze", avatar: undefined });
+    expect(res.body.provider.user).toEqual({ id: providerUser.id, userName: "Ada Eze", avatar: undefined });
   });
 
   it("lists jobs for both the client and the provider, filterable by status — as a trimmed summary, not the full job", async () => {
-    const clientUser = await createUser({ fullName: "Chidi Okonkwo" });
-    const providerUser = await createUser({ fullName: "Ada Eze" });
+    const clientUser = await createEscrowEligibleUser({ fullName: { firstName: "Chidi", lastName: "Okonkwo" }, userName: "Chidi Okonkwo" });
+    const providerUser = await createEscrowEligibleUser({ fullName: { firstName: "Ada", lastName: "Eze" }, userName: "Ada Eze" });
     const job = await createActiveJob(clientUser, providerUser, { totalAmount: 1200 });
     // amountPaid is only ever set by the payment flow, not something a
     // client can pass at creation — set directly for this assertion.
@@ -425,9 +486,9 @@ describe("GET /api/jobs/:id and /api/jobs/mine", () => {
     expect(summary.jobTitle).toEqual(expect.any(String));
     expect(summary.status).toBe("active");
     expect(summary.client.userId).toBe(clientUser.id);
-    expect(summary.client.user).toEqual({ id: clientUser.id, fullName: "Chidi Okonkwo", avatar: undefined });
+    expect(summary.client.user).toEqual({ id: clientUser.id, userName: "Chidi Okonkwo", avatar: undefined });
     expect(summary.provider.isConfirmed).toBe(true);
-    expect(summary.provider.user).toEqual({ id: providerUser.id, fullName: "Ada Eze", avatar: undefined });
+    expect(summary.provider.user).toEqual({ id: providerUser.id, userName: "Ada Eze", avatar: undefined });
     // Cheap progress fields a job card needs without opening the job —
     // the rest of the full detail stays left out of the summary.
     expect(summary.amountPaid).toBe(400);
@@ -450,8 +511,8 @@ describe("GET /api/jobs (admin search)", () => {
 
   it("matches the job title", async () => {
     const admin = await createAdmin();
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     await createActiveJob(clientUser, providerUser, { jobTitle: "Repaint the back fence" });
     await createActiveJob(clientUser, providerUser, { jobTitle: "Unrelated roofing job" });
 
@@ -466,10 +527,10 @@ describe("GET /api/jobs (admin search)", () => {
 
   it("matches either party's name or email, and includes party names on each row", async () => {
     const admin = await createAdmin();
-    const clientUser = await createUser({ fullName: "Chidi Okonkwo", email: "chidi.okonkwo@example.com" });
-    const providerUser = await createUser({ fullName: "Ada Eze" });
+    const clientUser = await createEscrowEligibleUser({ fullName: { firstName: "Chidi", lastName: "Okonkwo" }, userName: "Chidi Okonkwo", email: "chidi.okonkwo@example.com" });
+    const providerUser = await createEscrowEligibleUser({ fullName: { firstName: "Ada", lastName: "Eze" }, userName: "Ada Eze" });
     const job = await createActiveJob(clientUser, providerUser, { jobTitle: "Totally unrelated title" });
-    const other = await createUser();
+    const other = await createEscrowEligibleUser();
     const otherJob = await createActiveJob(other, providerUser, { jobTitle: "Another job" });
 
     const byName = await request(app)
@@ -477,7 +538,7 @@ describe("GET /api/jobs (admin search)", () => {
       .set("Authorization", `Bearer ${generateToken(admin)}`);
     expect(byName.body.data).toHaveLength(1);
     expect(byName.body.data[0].id).toBe(job._id);
-    expect(byName.body.data[0].client.user.fullName).toBe("Chidi Okonkwo");
+    expect(byName.body.data[0].client.user.userName).toBe("Chidi Okonkwo");
 
     const byEmail = await request(app)
       .get("/api/jobs?q=chidi.okonkwo@example.com")
@@ -496,10 +557,10 @@ describe("GET /api/jobs (admin search)", () => {
 
   it("filters by userId (every job that user is a party to) and by status", async () => {
     const admin = await createAdmin();
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const active = await createActiveJob(clientUser, providerUser);
-    const other = await createActiveJob(clientUser, await createUser());
+    const other = await createActiveJob(clientUser, await createEscrowEligibleUser());
     await Job.updateOne({ _id: other._id }, { status: "completed" });
 
     const byUser = await request(app)
@@ -518,8 +579,8 @@ describe("GET /api/jobs (admin search)", () => {
 
 describe("stage proposal flow", () => {
   it("lets either party propose, and only the other party accept", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const proposed = await request(app)
@@ -544,8 +605,8 @@ describe("stage proposal flow", () => {
   });
 
   it("lets the other party reject a proposal", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     await request(app)
@@ -565,8 +626,8 @@ describe("stage proposal flow", () => {
 
 describe("stage done/verify and payment math", () => {
   it("requires isDone before isVerified, releases payment on verify, and completes the job on the last stage", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser, {
       totalAmount: 1000,
       stages: [{ details: ["a"], payment: 40 }, { details: ["b"], payment: 60 }],
@@ -619,8 +680,8 @@ describe("stage done/verify and payment math", () => {
   });
 
   it("refuses to verify a stage that isn't funded yet, rather than releasing money that was never paid in", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser, {
       totalAmount: 1200,
       stages: [{ details: ["a"], payment: 40 }],
@@ -660,8 +721,8 @@ describe("stage done/verify and payment math", () => {
 
 describe("POST /api/jobs/:id/contract", () => {
   it("uploads a private contract file — no FileGrant involved, getJob mints both parties' links directly", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -695,8 +756,8 @@ describe("POST /api/jobs/:id/contract", () => {
   });
 
   it("accepts a .docx contract too", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -711,8 +772,8 @@ describe("POST /api/jobs/:id/contract", () => {
   });
 
   it("rejects a contract that isn't a pdf or docx", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -724,8 +785,8 @@ describe("POST /api/jobs/:id/contract", () => {
   });
 
   it("rejects more than one attached file, saving none of them", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -741,8 +802,8 @@ describe("POST /api/jobs/:id/contract", () => {
   });
 
   it("blocks a non-party from uploading a contract", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const stranger = await createUser();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -757,8 +818,8 @@ describe("POST /api/jobs/:id/contract", () => {
 
 describe("dispute flow", () => {
   it("lets a party raise a dispute and an admin resolve it", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -796,8 +857,8 @@ describe("dispute flow", () => {
   });
 
   it("requires a resolution note", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -815,8 +876,8 @@ describe("dispute flow", () => {
   });
 
   it("blocks a non-admin from resolving", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     await request(app)
@@ -834,8 +895,8 @@ describe("dispute flow", () => {
 
 describe("GET /api/jobs/disputes", () => {
   it("lists only disputed jobs, with party emails populated, for an admin", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const disputedJob = await createActiveJob(clientUser, providerUser);
     await createActiveJob(clientUser, providerUser); // not disputed — shouldn't show up
@@ -857,7 +918,7 @@ describe("GET /api/jobs/disputes", () => {
   });
 
   it("blocks a non-admin", async () => {
-    const clientUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
 
     const res = await request(app)
       .get("/api/jobs/disputes")
@@ -867,8 +928,8 @@ describe("GET /api/jobs/disputes", () => {
   });
 
   it("lets customer_care view the queue but not resolve a dispute", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const customerCare = await createCustomerCare();
     const disputedJob = await createActiveJob(clientUser, providerUser);
 
@@ -893,8 +954,8 @@ describe("GET /api/jobs/disputes", () => {
 
 describe("PATCH /api/jobs/:id/cancel", () => {
   it("lets the creator cancel while pending confirmation", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
 
     const created = await createJobAs(generateToken(clientUser), {
       counterpartyUserId: providerUser.id,
@@ -913,8 +974,8 @@ describe("PATCH /api/jobs/:id/cancel", () => {
   });
 
   it("blocks cancelling an already-active job", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -927,8 +988,8 @@ describe("PATCH /api/jobs/:id/cancel", () => {
 
 describe("GET /api/jobs/:id/payments", () => {
   it("lists every payment made toward the job, for admin and customer_care", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const customerCare = await createCustomerCare();
     const job = await createActiveJob(clientUser, providerUser);
@@ -954,8 +1015,8 @@ describe("GET /api/jobs/:id/payments", () => {
   });
 
   it("blocks a non-admin, non-customer_care caller", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -978,8 +1039,8 @@ describe("GET /api/jobs/:id/payments", () => {
 
 describe("POST /api/jobs/:id/refund-requests", () => {
   it("blocks anyone other than the job's client", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const stranger = await createUser();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -997,8 +1058,8 @@ describe("POST /api/jobs/:id/refund-requests", () => {
   });
 
   it("requires a reason", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -1014,8 +1075,8 @@ describe("POST /api/jobs/:id/refund-requests", () => {
   // disbursed to the provider (and the fee collected on it), never a
   // caller-supplied number.
   it("computes the refundable amount itself, excluding anything already disbursed to the provider", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser, {
       totalAmount: 1000,
@@ -1048,8 +1109,8 @@ describe("POST /api/jobs/:id/refund-requests", () => {
   });
 
   it("rejects when there's nothing left to refund (everything already disbursed)", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser, { totalAmount: 1000 });
     const stageId = job.stages[0]._id;
@@ -1075,8 +1136,8 @@ describe("POST /api/jobs/:id/refund-requests", () => {
   });
 
   it("blocks a second pending request while one is already pending", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const clientToken = generateToken(clientUser);
@@ -1100,8 +1161,8 @@ describe("POST /api/jobs/:id/refund-requests", () => {
   });
 
   it("doesn't touch the job's balance or status until approved", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -1127,11 +1188,18 @@ describe("POST /api/jobs/:id/refund-requests", () => {
 
 describe("GET /api/jobs/refund-requests + approve/decline", () => {
   it("lists pending refund requests for admin/customer_care, blocks everyone else", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const customerCare = await createCustomerCare();
     const job = await createActiveJob(clientUser, providerUser);
+
+    // createActiveJob needed clientUser to already be escrow-eligible
+    // (verified KYC) just to create/confirm the job at all — simulate
+    // them having since revoked it (e.g. via DELETE /me/payout-kyc), so
+    // there's genuinely no record on file by the time a refund is
+    // requested, same as before this user had to be KYC'd up front.
+    await PayoutKyc.deleteOne({ user: clientUser._id });
 
     await request(app)
       .post(`/api/jobs/${job._id}/payments`)
@@ -1150,8 +1218,8 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
       expect(res.body.data).toHaveLength(1);
       expect(res.body.data[0].jobId).toBe(job._id);
       expect(res.body.data[0].refund.status).toBe("pending");
-      // No PayoutKyc record exists for this client yet — null, not an
-      // error, so the admin can see "not done" before trying to approve.
+      // No PayoutKyc record exists for this client anymore — null, not
+      // an error, so the admin can see "not done" before trying to approve.
       expect(res.body.data[0].beneficiaryKycStatus).toBeNull();
     }
 
@@ -1162,10 +1230,9 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
   });
 
   it("surfaces the beneficiary's real payout-KYC status in the pending list", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
-    await verifyPayoutKyc(clientUser);
     const job = await createActiveJob(clientUser, providerUser);
 
     await request(app)
@@ -1185,11 +1252,16 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
   });
 
   it("refuses to approve — with a stable PAYOUT_KYC_REQUIRED code — when the beneficiary hasn't completed payout KYC", async () => {
-    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const adminToken = generateToken(admin);
     const job = await createActiveJob(clientUser, providerUser);
+
+    // See the "lists pending refund requests" test above — clientUser
+    // needed verified KYC to create the job, so revoke it here to get
+    // back to "the beneficiary hasn't completed payout KYC."
+    await PayoutKyc.deleteOne({ user: clientUser._id });
 
     await request(app)
       .post(`/api/jobs/${job._id}/payments`)
@@ -1214,8 +1286,8 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
   });
 
   it("refuses to approve when the client has no payout account on file", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
@@ -1243,10 +1315,9 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
   // never by wiring money to a bank account, so createSystemPayout must
   // not demand one just because this request type is "refund".
   it("approves a refund with no payout account on file, when it will settle straight back to the original card", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
-    await verifyPayoutKyc(clientUser);
     const createdJob = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
 
@@ -1289,10 +1360,9 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
   });
 
   it("approving closes the job, moves totalRefunded, and records a SystemPayout; a later correction appends without re-closing", async () => {
-    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
-    await verifyPayoutKyc(clientUser);
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
 
@@ -1371,8 +1441,8 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
   });
 
   it("declining requires a reason and leaves the job untouched", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
@@ -1421,8 +1491,8 @@ describe("GET /api/jobs/refund-requests + approve/decline", () => {
 
 describe("refund counterparty approval (counterparty-approve/-reject, and approveRefundRequest's bypassReason)", () => {
   it("blocks the admin from finalizing a refund with no counterparty approval and no bypassReason", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
@@ -1446,8 +1516,8 @@ describe("refund counterparty approval (counterparty-approve/-reject, and approv
   });
 
   it("blocks the client from counterparty-approving their own refund request — only the provider can", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     await request(app)
@@ -1468,8 +1538,8 @@ describe("refund counterparty approval (counterparty-approve/-reject, and approv
   });
 
   it("lets the provider reject a refund request with a reason, and a second attempt to decide it again is rejected", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -1499,10 +1569,9 @@ describe("refund counterparty approval (counterparty-approve/-reject, and approv
   });
 
   it("lets an admin finalize a refund the provider rejected, via an explicit bypassReason — logged honestly, not faked as consent", async () => {
-    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
-    await verifyPayoutKyc(clientUser);
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
 
@@ -1536,8 +1605,8 @@ describe("refund counterparty approval (counterparty-approve/-reject, and approv
   });
 
   it("lets an admin counterparty-approve on the provider's behalf (the existing assertParty-style bypass)", async () => {
-    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
@@ -1564,8 +1633,8 @@ describe("refund counterparty approval (counterparty-approve/-reject, and approv
 
 describe("POST /api/jobs/:id/payout-requests", () => {
   it("blocks anyone other than the job's provider", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -1576,8 +1645,8 @@ describe("POST /api/jobs/:id/payout-requests", () => {
   });
 
   it("blocks a request when nothing has been released from escrow yet", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)
@@ -1588,8 +1657,8 @@ describe("POST /api/jobs/:id/payout-requests", () => {
   });
 
   it("blocks a second pending request while one is already pending", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const clientToken = generateToken(clientUser);
@@ -1614,8 +1683,8 @@ describe("POST /api/jobs/:id/payout-requests", () => {
   });
 
   it("blocks a request on a disputed, cancelled, or closed job", async () => {
-    const clientUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -1670,10 +1739,9 @@ describe("POST /api/jobs/:id/payout-requests", () => {
 
 describe("GET /api/jobs/payout-requests + approve/decline", () => {
   it("approving pays out exactly what's available (capped by whichever of amountPaid/amountDisbursed is smaller), across multiple stages, and records a SystemPayout each time", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
-    await verifyPayoutKyc(providerUser);
     const job = await createActiveJob(clientUser, providerUser, {
       totalAmount: 1000,
       stages: [{ details: ["a"], payment: 40 }, { details: ["b"], payment: 60 }],
@@ -1762,8 +1830,8 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
   });
 
   it("declining requires a reason and leaves amountPaidOut untouched", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
@@ -1815,8 +1883,8 @@ describe("GET /api/jobs/payout-requests + approve/decline", () => {
 
 describe("payout counterparty approval (counterparty-approve/-reject, and approvePayoutRequest's bypassReason)", () => {
   it("blocks the admin from finalizing a payout with no counterparty approval and no bypassReason", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
@@ -1847,8 +1915,8 @@ describe("payout counterparty approval (counterparty-approve/-reject, and approv
   });
 
   it("blocks the provider from counterparty-approving their own payout request — only the client can", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
     const providerToken = generateToken(providerUser);
@@ -1877,10 +1945,9 @@ describe("payout counterparty approval (counterparty-approve/-reject, and approv
   });
 
   it("lets an admin finalize a payout the client rejected, via an explicit bypassReason", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser({ payoutAccount: TEST_PAYOUT_ACCOUNT });
     const admin = await createAdmin();
-    await verifyPayoutKyc(providerUser);
     const job = await createActiveJob(clientUser, providerUser);
     const adminToken = generateToken(admin);
     const providerToken = generateToken(providerUser);
@@ -1923,8 +1990,8 @@ describe("payout counterparty approval (counterparty-approve/-reject, and approv
 
 describe("POST /api/jobs/:id/payments", () => {
   it("lets an admin record a payment", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const admin = await createAdmin();
     const job = await createActiveJob(clientUser, providerUser);
 
@@ -1945,8 +2012,8 @@ describe("POST /api/jobs/:id/payments", () => {
   });
 
   it("blocks a non-admin", async () => {
-    const clientUser = await createUser();
-    const providerUser = await createUser();
+    const clientUser = await createEscrowEligibleUser();
+    const providerUser = await createEscrowEligibleUser();
     const job = await createActiveJob(clientUser, providerUser);
 
     const res = await request(app)

@@ -66,7 +66,11 @@ const createSystemPayoutRecord = async (overrides: Record<string, unknown> = {})
   const clientUser = await createUser();
   const providerUser = await createUser();
   const job = await createActiveJob({ client: clientUser, provider: providerUser });
-  const recipient = await createUser({ fullName: "Recipient Name", payoutAccount: TEST_PAYOUT_ACCOUNT });
+  const recipient = await createUser({
+    fullName: { firstName: "Recipient", lastName: "Name" },
+    userName: "Recipient Name",
+    payoutAccount: TEST_PAYOUT_ACCOUNT,
+  });
   const createdBy = await createAdmin();
 
   return SystemPayout.create({
@@ -108,7 +112,7 @@ describe("GET /api/system-payouts", () => {
     const row = res.body.data[0];
     expect(row.id).toBe(payout.id);
     expect(row.jobTitle).toBe(job.jobTitle);
-    expect(row.recipient).toEqual({ id: recipient.id, fullName: "Recipient Name", email: recipient.email });
+    expect(row.recipient).toEqual({ id: recipient.id, userName: "Recipient Name", email: recipient.email });
     expect(row.amount).toBe(342);
     expect(row.status).toBe("pending");
   });

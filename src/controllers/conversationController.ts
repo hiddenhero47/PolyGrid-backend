@@ -43,7 +43,7 @@ const otherParticipantId = (conversation: IConversation, requesterId: string): s
 
 interface PopulatedParticipant {
   _id: mongoose.Types.ObjectId;
-  fullName: string;
+  userName: string;
   avatar?: { url?: string };
 }
 
@@ -76,7 +76,7 @@ const toConversationSummary = async (
 
   return {
     id: conversation.id,
-    otherParticipant: { id: other._id, fullName: other.fullName, avatar: other.avatar?.url },
+    otherParticipant: { id: other._id, userName: other.userName, avatar: other.avatar?.url },
     lastMessageAt: conversation.lastMessageAt,
     lastMessagePreview: conversation.lastMessagePreview,
     unreadCount,
@@ -121,13 +121,13 @@ export const startOrGetConversation = asyncHandler(async (req: Request, res: Res
       { pairKey },
       { $setOnInsert: { participants, pairKey } },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
-    ).populate<{ participants: PopulatedParticipant[] }>("participants", "fullName avatar");
+    ).populate<{ participants: PopulatedParticipant[] }>("participants", "userName avatar");
   } catch (err) {
     if ((err as { code?: number }).code !== 11000) throw err;
 
     conversation = await Conversation.findOne({ pairKey }).populate<{
       participants: PopulatedParticipant[];
-    }>("participants", "fullName avatar");
+    }>("participants", "userName avatar");
 
     if (!conversation) throw err;
   }
@@ -149,7 +149,7 @@ export const listConversations = asyncHandler(async (req: Request, res: Response
       .sort({ lastMessageAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate<{ participants: PopulatedParticipant[] }>("participants", "fullName avatar"),
+      .populate<{ participants: PopulatedParticipant[] }>("participants", "userName avatar"),
     Conversation.countDocuments(filter),
   ]);
 
@@ -272,7 +272,7 @@ export const reportMessage = asyncHandler(async (req: Request, res: Response) =>
 
 interface PopulatedReportParty {
   _id: mongoose.Types.ObjectId;
-  fullName: string;
+  userName: string;
   email?: string;
 }
 
@@ -281,7 +281,7 @@ type PopulatedReportedMessage = IMessage & { sender: PopulatedReportParty };
 // @desc    List reported messages, newest first, optionally filtered by
 //          ?status=pending|resolved. Populates the reported message's
 //          own sender (so a moderator knows who wrote it — previously
-//          just a bare messageId) and resolvedBy's fullName, and attaches
+//          just a bare messageId) and resolvedBy's userName, and attaches
 //          up to 3 messages immediately before/after it from the same
 //          conversation, so the reported line can be judged in context
 //          instead of in isolation.
@@ -303,11 +303,11 @@ export const getMessageReports = asyncHandler(async (req: Request, res: Response
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("reportedBy", "fullName email")
-      .populate("resolvedBy", "fullName")
+      .populate("reportedBy", "userName email")
+      .populate("resolvedBy", "userName")
       .populate<{ messageId: PopulatedReportedMessage | null }>({
         path: "messageId",
-        populate: { path: "sender", select: "fullName email" },
+        populate: { path: "sender", select: "userName email" },
       }),
     MessageReport.countDocuments(filter),
   ]);

@@ -35,7 +35,7 @@ describe("POST /api/contractor-profiles", () => {
   });
 
   it("creates a profile with a unique slug, filtering invalid specialties", async () => {
-    const user = await createUser({ fullName: "Femi Adeyemi" });
+    const user = await createUser({ fullName: { firstName: "Femi", lastName: "Adeyemi" }, userName: "Femi Adeyemi" });
 
     const res = await request(app)
       .post("/api/contractor-profiles")

@@ -11,6 +11,7 @@ import { connectTestDB, disconnectTestDB, clearTestDB } from "../setup/db";
 import { createUser, createAdmin, createCustomerCare, generateToken, TEST_PNG_BUFFER } from "../setup/fixtures";
 import { SystemSettings } from "../../src/models/systemSettingsModel";
 import { PayoutKyc } from "../../src/models/payoutKycModel";
+import { PayoutKycHistory } from "../../src/models/payoutKycHistoryModel";
 
 const app = createApp();
 
@@ -40,7 +41,7 @@ describe("POST /api/users/me/payout-kyc — automated track (country in countryK
       supportedCountries: [],
       countryKycProviders: { NG: "dojah" },
     });
-    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
 
     const res = await request(app)
       .post("/api/users/me/payout-kyc")
@@ -58,7 +59,7 @@ describe("POST /api/users/me/payout-kyc — automated track (country in countryK
       supportedCountries: [],
       countryKycProviders: { NG: "dojah" },
     });
-    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
     mockVerifyMatch.mockResolvedValue({ matched: true, reference: "dojah_ref_1", raw: {} });
 
     const res = await request(app)
@@ -88,7 +89,7 @@ describe("POST /api/users/me/payout-kyc — automated track (country in countryK
       supportedCountries: [],
       countryKycProviders: { NG: "dojah" },
     });
-    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
     mockVerifyMatch.mockResolvedValue({ matched: false, reference: "dojah_ref_2", raw: {} });
 
     const res = await request(app)
@@ -99,6 +100,45 @@ describe("POST /api/users/me/payout-kyc — automated track (country in countryK
     expect(res.status).toBe(201);
     expect(res.body.status).toBe("failed");
     expect(res.body.failureReason).toBeTruthy();
+    // A failed attempt is never worth bookkeeping — only a real
+    // verification writes a PayoutKycHistory entry.
+    expect(await PayoutKycHistory.countDocuments({ user: user._id })).toBe(0);
+  });
+
+  it("writes a permanent PayoutKycHistory entry on a successful match, snapshotting the name/country at that moment", async () => {
+    await SystemSettings.create({
+      maxOutstandingExposure: 0,
+      maxTransactionAmount: 0,
+      supportedCountries: [],
+      countryKycProviders: { NG: "dojah" },
+    });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
+    mockVerifyMatch.mockResolvedValue({ matched: true, reference: "dojah_ref_history_1", raw: {} });
+
+    const res = await request(app)
+      .post("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ idType: "bvn", idNumber: "12345678901", currentPassword: "password123" });
+
+    expect(res.status).toBe(201);
+
+    const history = await PayoutKycHistory.findOne({ user: user._id });
+    expect(history).toBeTruthy();
+    expect(history?.method).toBe("automated");
+    expect(history?.fullName).toEqual({ firstName: "Ada", lastName: "Okafor" });
+    expect(history?.country).toBe("NG");
+    expect(history?.providerReference).toBe("dojah_ref_history_1");
+    expect(history?.verifiedAt).toBeTruthy();
+
+    // Revoking clears the live PayoutKyc record but never this history —
+    // it's a permanent bookkeeping log, not live state.
+    await request(app)
+      .delete("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ currentPassword: "password123" });
+
+    expect(await PayoutKyc.findOne({ user: user._id })).toBeNull();
+    expect(await PayoutKycHistory.countDocuments({ user: user._id })).toBe(1);
   });
 
   it("rejects an idNumber that isn't 11 digits", async () => {
@@ -126,7 +166,7 @@ describe("POST /api/users/me/payout-kyc — automated track (country in countryK
       supportedCountries: [],
       countryKycProviders: { NG: "dojah" },
     });
-    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
     mockVerifyMatch.mockResolvedValueOnce({ matched: false, reference: "dojah_ref_3", raw: {} });
     mockVerifyMatch.mockResolvedValueOnce({ matched: true, reference: "dojah_ref_4", raw: {} });
 
@@ -223,7 +263,7 @@ describe("GET /api/users/me/payout-kyc", () => {
       supportedCountries: [],
       countryKycProviders: { NG: "dojah" },
     });
-    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
     mockVerifyMatch.mockResolvedValue({ matched: true, reference: "dojah_ref_1", raw: {} });
 
     await request(app)
@@ -260,7 +300,7 @@ describe("payout-kyc admin review (document track)", () => {
 
   it("lists a pending document-track submission for REVIEW_ROLES, and approves it", async () => {
     await SystemSettings.create({ maxOutstandingExposure: 0, maxTransactionAmount: 0, supportedCountries: [] });
-    const user = await createUser({ country: "US", fullName: "Jamie Rivera" });
+    const user = await createUser({ country: "US", fullName: { firstName: "Jamie", lastName: "Rivera" } });
     const submitted = await submitDocumentKyc(user);
     const recordId = submitted.body._id;
 
@@ -272,7 +312,7 @@ describe("payout-kyc admin review (document track)", () => {
     expect(listRes.body.data).toHaveLength(1);
     // Populated, not a bare ObjectId — the admin queue needs this to show
     // who it's actually reviewing without a second round trip.
-    expect(listRes.body.data[0].user.fullName).toBe("Jamie Rivera");
+    expect(listRes.body.data[0].user.fullName).toEqual({ firstName: "Jamie", lastName: "Rivera" });
     expect(listRes.body.data[0].user.email).toBe(user.email);
     expect(listRes.body.data[0].user.country).toBe("US");
 
@@ -284,6 +324,37 @@ describe("payout-kyc admin review (document track)", () => {
     expect(approveRes.status).toBe(200);
     expect(approveRes.body.status).toBe("verified");
     expect(approveRes.body.verifiedAt).toBeTruthy();
+
+    const history = await PayoutKycHistory.findOne({ user: user._id });
+    expect(history).toBeTruthy();
+    expect(history?.method).toBe("document");
+    expect(history?.fullName).toEqual({ firstName: "Jamie", lastName: "Rivera" });
+    expect(history?.reviewedBy?.toString()).toBe(admin.id);
+  });
+
+  it("GET /api/payout-kyc/history lists verifications for REVIEW_ROLES, and never for the submitting user", async () => {
+    await SystemSettings.create({ maxOutstandingExposure: 0, maxTransactionAmount: 0, supportedCountries: [] });
+    const user = await createUser({ country: "US", fullName: { firstName: "Jamie", lastName: "Rivera" } });
+    const submitted = await submitDocumentKyc(user);
+    const admin = await createAdmin();
+    await request(app)
+      .patch(`/api/payout-kyc/${submitted.body._id}/approve`)
+      .set("Authorization", `Bearer ${generateToken(admin)}`);
+
+    const asUser = await request(app)
+      .get("/api/payout-kyc/history")
+      .set("Authorization", `Bearer ${generateToken(user)}`);
+    expect(asUser.status).toBe(401);
+
+    const customerCare = await createCustomerCare();
+    const asReviewer = await request(app)
+      .get(`/api/payout-kyc/history?userId=${user.id}`)
+      .set("Authorization", `Bearer ${generateToken(customerCare)}`);
+
+    expect(asReviewer.status).toBe(200);
+    expect(asReviewer.body.data).toHaveLength(1);
+    expect(asReviewer.body.data[0].fullName).toEqual({ firstName: "Jamie", lastName: "Rivera" });
+    expect(asReviewer.body.data[0].user.email).toBe(user.email);
   });
 
   it("rejects with a reason, and refuses an approve/reject on an already-decided record", async () => {
@@ -319,7 +390,7 @@ describe("payout-kyc admin review (document track)", () => {
       supportedCountries: [],
       countryKycProviders: { NG: "dojah" },
     });
-    const user = await createUser({ country: "NG", fullName: "Ada Okafor" });
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
     mockVerifyMatch.mockResolvedValue({ matched: true, reference: "dojah_ref_5", raw: {} });
 
     const submitted = await request(app)

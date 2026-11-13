@@ -21,7 +21,17 @@ const phoneNumberPassthrough = yup
 
 export const registerUserSchema = yup
   .object({
-    fullName: yup.string().trim().required("fullName is required"),
+    // Flat on the wire, nested once stored (User.fullName.firstName/
+    // lastName) — see userModel.ts's own comment on why fullName became
+    // a sub-document. Neither is required at signup — registerUser
+    // defaults omitted ones to a placeholder ("John"/"Doe") so creating
+    // an account stays frictionless; a real name only matters once you
+    // go to verify payout KYC. userName defaults to
+    // `${firstName} ${lastName}` in the controller when omitted, not
+    // here — it's a display-only field, never required at signup.
+    firstName: yup.string().trim().notRequired(),
+    lastName: yup.string().trim().notRequired(),
+    userName: yup.string().trim().notRequired(),
     email: yup.string().trim().lowercase().email("A valid email is required").required("email is required"),
     password: yup.string().required("password is required"),
     phoneNumber: phoneNumberPassthrough,
@@ -63,7 +73,14 @@ export const appleLoginSchema = yup
 // with no country, still passes here precisely as it did before).
 export const updateUserProfileSchema = yup
   .object({
-    fullName: yup.string().trim().notRequired(),
+    // firstName/lastName/country are the identity-relevant fields —
+    // updateUserProfile (userController.ts) requires a fresh
+    // verifyIdentity re-proof when any of these actually change, and
+    // resets payout KYC / may clear the saved payout account. userName
+    // is purely cosmetic and never triggers any of that.
+    firstName: yup.string().trim().notRequired(),
+    lastName: yup.string().trim().notRequired(),
+    userName: yup.string().trim().notRequired(),
     country: yup.string().trim().uppercase().notRequired(),
     phoneNumber: yup
       .object({
@@ -84,6 +101,15 @@ export const updateUserProfileSchema = yup
       .notRequired(),
     password: yup.string().notRequired(),
     oldPassword: yup.string().notRequired(),
+    // Only actually required when firstName/lastName/country are present
+    // and changing — updateUserProfile checks that itself (unlike
+    // updatePayoutAccountSchema's identically-named fields, which lean on
+    // a route-level verifyIdentity middleware to read them off the raw
+    // body first, this route re-proves identity conditionally from inside
+    // the controller, so these two have to survive stripUnknown by being
+    // declared here instead).
+    currentPassword: yup.string().notRequired(),
+    otpToken: yup.string().trim().notRequired(),
   })
   .noUnknown(true);
 
@@ -121,7 +147,9 @@ export const verifyEmailSchema = yup
 
 export const registerAdminSchema = yup
   .object({
-    fullName: yup.string().trim().required("fullName is required"),
+    firstName: yup.string().trim().required("firstName is required"),
+    lastName: yup.string().trim().required("lastName is required"),
+    userName: yup.string().trim().notRequired(),
     email: yup.string().trim().lowercase().email("A valid email is required").required("email is required"),
     password: yup.string().required("password is required"),
   })
@@ -156,7 +184,10 @@ export const updatePayoutAccountSchema = yup
     accountNumber: yup.string().trim().required("accountNumber is required"),
     bankName: yup.string().trim().required("bankName is required"),
     bankCode: optionalTrimmedString(),
-    country: yup.string().trim().required("country is required"),
+    // Uppercased here (not just by the Mongoose schema on save) so
+    // updatePayoutAccount's own country === user.country check — which
+    // runs before save — compares like with like.
+    country: yup.string().trim().uppercase().required("country is required"),
   })
   .noUnknown(true);
 

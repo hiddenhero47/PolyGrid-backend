@@ -69,7 +69,7 @@ describe("PATCH /api/admin/profiles/:profileType/:id/status", () => {
 
   it("records an optional reason, returns it via the review endpoint, clears it on unban, and notifies the owner both times", async () => {
     const admin = await createAdmin();
-    const owner = await createUser({ fullName: "Chidi Okonkwo", email: "chidi@example.com" });
+    const owner = await createUser({ fullName: { firstName: "Chidi", lastName: "Okonkwo" }, userName: "Chidi Okonkwo", email: "chidi@example.com" });
     const profile = await createConsultancyProfile({ user: owner });
 
     const banned = await request(app)
@@ -305,7 +305,7 @@ describe("GET /api/admin/profiles (search)", () => {
 
   it("matches the profile's own name/slug or the owner's name/email, and includes owner + rating per row", async () => {
     const admin = await createAdmin();
-    const owner = await createUser({ fullName: "Chidi Okonkwo", email: "chidi@example.com" });
+    const owner = await createUser({ fullName: { firstName: "Chidi", lastName: "Okonkwo" }, userName: "Chidi Okonkwo", email: "chidi@example.com" });
     const profile = await createConsultancyProfile({ user: owner, headline: "Structural Engineering Pro" });
     const otherOwner = await createUser();
     await createConsultancyProfile({ user: otherOwner, headline: "Totally unrelated" });
@@ -318,7 +318,7 @@ describe("GET /api/admin/profiles (search)", () => {
     expect(row.id).toBe(profile.id);
     expect(row.name).toBe("Structural Engineering Pro");
     expect(row.slug).toBe(profile.slug);
-    expect(row.owner).toEqual({ id: owner.id, fullName: "Chidi Okonkwo", email: "chidi@example.com" });
+    expect(row.owner).toEqual({ id: owner.id, userName: "Chidi Okonkwo", email: "chidi@example.com" });
     expect(row.ratingAverage).toBe(profile.ratingAverage);
     expect(row.ratingCount).toBe(profile.ratingCount);
 

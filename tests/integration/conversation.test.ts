@@ -354,7 +354,7 @@ describe("POST /api/messages/:id/report and GET /api/messages/reports", () => {
   });
 
   it("filters by ?status=, and includes the reported message's sender", async () => {
-    const me = await createUser({ fullName: "Message Sender" });
+    const me = await createUser({ fullName: { firstName: "Message", lastName: "Sender" }, userName: "Message Sender" });
     const contact = await createUser();
     await createContactConnection(me, contact);
     const admin = await createAdmin();
@@ -376,7 +376,7 @@ describe("POST /api/messages/:id/report and GET /api/messages/reports", () => {
       .get("/api/messages/reports?status=pending")
       .set("Authorization", `Bearer ${generateToken(admin)}`);
     expect(pendingOnly.body.data).toHaveLength(1);
-    expect(pendingOnly.body.data[0].messageId.sender.fullName).toBe("Message Sender");
+    expect(pendingOnly.body.data[0].messageId.sender.userName).toBe("Message Sender");
 
     await request(app)
       .patch(`/api/messages/reports/${reported.body._id}/resolve`)
@@ -392,7 +392,7 @@ describe("POST /api/messages/:id/report and GET /api/messages/reports", () => {
       .get("/api/messages/reports?status=resolved")
       .set("Authorization", `Bearer ${generateToken(admin)}`);
     expect(resolvedOnly.body.data).toHaveLength(1);
-    expect(resolvedOnly.body.data[0].resolvedBy.fullName).toBe(admin.fullName);
+    expect(resolvedOnly.body.data[0].resolvedBy.userName).toBe(admin.userName);
   });
 
   it("includes up to 3 surrounding messages from the same conversation, before and after", async () => {

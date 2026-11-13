@@ -206,7 +206,7 @@ export const getProfileReviews = asyncHandler(async (req: Request, res: Response
   const filter = { profileType, profileId, isHidden: { $ne: true } };
 
   const [reviews, total] = await Promise.all([
-    Review.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("reviewer", "fullName"),
+    Review.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("reviewer", "userName"),
     Review.countDocuments(filter),
   ]);
 
@@ -218,7 +218,7 @@ export const getProfileReviews = asyncHandler(async (req: Request, res: Response
 
 interface PopulatedReviewerOrHider {
   _id: mongoose.Types.ObjectId;
-  fullName: string;
+  userName: string;
   email?: string;
 }
 
@@ -311,8 +311,8 @@ export const getReviewsForModeration = asyncHandler(async (req: Request, res: Re
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("reviewer", "fullName email")
-      .populate("hiddenBy", "fullName")
+      .populate("reviewer", "userName email")
+      .populate("hiddenBy", "userName")
       .populate("profileId"),
     Review.countDocuments(filter),
   ]);

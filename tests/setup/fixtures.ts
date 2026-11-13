@@ -64,6 +64,7 @@ import {
   EMPLOYMENT_TYPE,
 } from "../../src/models/jobOpeningModel";
 import { JobApplication, IJobApplication, APPLICATION_STATUS } from "../../src/models/jobApplicationModel";
+import { PayoutKyc, PAYOUT_KYC_METHOD, PAYOUT_KYC_STATUS } from "../../src/models/payoutKycModel";
 
 let counter = 0;
 const next = (): number => {
@@ -83,7 +84,8 @@ export const createUser = async ({
   const n = next();
 
   const user = new User({
-    fullName: `Test User ${n}`,
+    fullName: { firstName: "Test", lastName: `User ${n}` },
+    userName: `Test User ${n}`,
     email: `test.user.${n}.${Date.now()}@example.com`,
     password: await bcrypt.hash("password123", 4),
     systemRole,
@@ -180,6 +182,33 @@ export const createSubscription = async ({
   await user.save();
 
   return subscription;
+};
+
+interface CreateEscrowEligibleUserOptions extends CreateUserOptions {
+  country?: string;
+}
+
+// Job/Store creation and acceptance now requires a party's own country
+// to be in SystemSettings.supportedCountries AND a verified PayoutKyc on
+// file (see helpers/paymentGuardrails.ts's assertEscrowEligible) — any
+// test driving the real create/accept/award/confirm HTTP flow needs this
+// for whichever party gets auto-confirmed. Callers still need to
+// separately seed SystemSettings.supportedCountries to include whatever
+// country is used here (see payment.test.ts's own beforeEach).
+export const createEscrowEligibleUser = async ({
+  country = "NG",
+  ...overrides
+}: CreateEscrowEligibleUserOptions = {}): Promise<IUser> => {
+  const user = await createUser({ country, ...overrides });
+
+  await PayoutKyc.create({
+    user: user._id,
+    country,
+    method: PAYOUT_KYC_METHOD.AUTOMATED,
+    status: PAYOUT_KYC_STATUS.VERIFIED,
+  });
+
+  return user;
 };
 
 export const createUserWithActiveSubscription = async (

@@ -118,8 +118,26 @@ export interface IPayoutAccount {
   country: string;
 }
 
+// Legal identity — used *only* for KYC matching (Dojah, see
+// payoutKycController.ts) and payout-account name matching (see
+// userController.ts's updatePayoutAccount/updateUserProfile and
+// helpers/nameMatch.ts). Never shown anywhere else in the app; see
+// userName below for the field every other part of the app displays.
+// A nested sub-document, same pattern as phoneNumber/payoutAccount on
+// this same model, not two flat top-level fields.
+export interface IFullName {
+  firstName: string;
+  lastName: string;
+}
+
 export interface IUser extends Document {
-  fullName: string;
+  fullName: IFullName;
+  // Purely a display name — shown everywhere a user's name appears
+  // (jobs, messages, reviews, emails, notifications, admin lists).
+  // Deliberately NOT unique, NOT used for login, and NEVER consulted
+  // for identity matching — the user's own _id stays the one unique
+  // identifier (e.g. for a future referral code).
+  userName: string;
   email: string;
   password: string;
   // The user's own country — distinct from phoneNumber.country (a dialing
@@ -166,11 +184,23 @@ const tokenEntrySchema = new Schema<ITokenEntry>(
   { _id: false },
 );
 
+const fullNameSchema = new Schema<IFullName>(
+  {
+    firstName: { type: String, required: [true, "Please add a first name"], trim: true },
+    lastName: { type: String, required: [true, "Please add a last name"], trim: true },
+  },
+  { _id: false },
+);
+
 const userSchema = new Schema<IUser>(
   {
     fullName: {
+      type: fullNameSchema,
+      required: true,
+    },
+    userName: {
       type: String,
-      required: [true, "Please add a full name"],
+      required: [true, "Please add a display name"],
       trim: true,
     },
     email: {

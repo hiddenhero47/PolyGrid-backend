@@ -28,6 +28,11 @@ import { sendTemplatedEmail } from "../helpers/emailSender";
 import { AppError } from "../middleware/errorMiddleware";
 import { PROFILE_MODEL_REGISTRY, ProfileType } from "../constants/profileTypes";
 import { createConnectedAccount, createOnboardingLink, updateExternalAccount } from "../helpers/stripeConnect";
+import { splitFullName, namesMatch } from "../helpers/nameMatch";
+import { verifyCurrentPasswordOr2FA } from "../middleware/verifyIdentityMiddleware";
+import { PayoutKyc, PAYOUT_KYC_STATUS } from "../models/payoutKycModel";
+import { notify } from "../helpers/notify";
+import { NOTIFICATION_TYPE } from "../models/notificationModel";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -42,6 +47,7 @@ const generateToken = (user: IUser): string => {
 const toPublicUser = (user: IUser) => ({
   id: user.id,
   fullName: user.fullName,
+  userName: user.userName,
   email: user.email,
   country: user.country,
   phoneNumber: user.phoneNumber,
@@ -136,7 +142,7 @@ const sendVerificationEmail = async (
     to: user.email,
     subject: "Verify Your Email",
     template: "verifyEmail",
-    variables: { name: user.fullName, verifyUrl, expiresIn: "24 hours" },
+    variables: { name: user.userName, verifyUrl, expiresIn: "24 hours" },
   });
 
   return { verifyEmailToken, verifyUrl };
@@ -146,7 +152,7 @@ const sendVerificationEmail = async (
 // @route   POST /api/users
 // @access  Public
 export const registerUser = asyncHandler(async (req: Request, res: Response) => {
-  const { fullName, email, password, phoneNumber } = req.body;
+  const { firstName, lastName, userName, email, password, phoneNumber } = req.body;
 
   const userExists = await User.findOne({ email });
   if (userExists) {
@@ -157,8 +163,15 @@ export const registerUser = asyncHandler(async (req: Request, res: Response) => 
   const salt = await bcrypt.genSalt(10);
   const hashedPassword = await bcrypt.hash(password, salt);
 
+  // Neither is required at signup — a real name only matters once you go
+  // to verify payout KYC (see payoutKycController.ts), so this defaults
+  // to a placeholder rather than forcing it up front.
+  const resolvedFirstName = firstName || "John";
+  const resolvedLastName = lastName || "Doe";
+
   const user = await User.create({
-    fullName,
+    fullName: { firstName: resolvedFirstName, lastName: resolvedLastName },
+    userName: userName || `${resolvedFirstName} ${resolvedLastName}`,
     email,
     password: hashedPassword,
     phoneNumber,
@@ -310,7 +323,7 @@ const createOAuthUser = async ({
   providerId,
   picture,
 }: {
-  fullName?: string;
+  fullName?: { firstName: string; lastName: string };
   email: string;
   provider: AuthProviderName;
   providerId: string;
@@ -343,8 +356,11 @@ const createOAuthUser = async ({
     }
   }
 
+  const name = fullName || { firstName: "User", lastName: "User" };
+
   return User.create({
-    fullName: fullName || "User",
+    fullName: name,
+    userName: `${name.firstName} ${name.lastName}`,
     email,
     avatar,
     password: dummyPassword,
@@ -393,7 +409,7 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
     }
 
     user = await createOAuthUser({
-      fullName: name,
+      fullName: name ? splitFullName(name) : undefined,
       email,
       provider: AUTH_PROVIDER.GOOGLE,
       providerId: sub,
@@ -478,7 +494,7 @@ export const appleLogin = asyncHandler(async (req: Request, res: Response) => {
     }
 
     user = await createOAuthUser({
-      fullName: "Apple User",
+      fullName: { firstName: "Apple", lastName: "User" },
       email,
       provider: AUTH_PROVIDER.APPLE,
       providerId: sub,
@@ -561,7 +577,17 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
     throw new Error("User not found");
   }
 
-  const { fullName, phoneNumber, country, password, oldPassword } = req.body;
+  const {
+    firstName,
+    lastName,
+    userName,
+    phoneNumber,
+    country,
+    password,
+    oldPassword,
+    currentPassword,
+    otpToken,
+  } = req.body;
 
   if (password) {
     if (!oldPassword) {
@@ -582,7 +608,49 @@ export const updateUserProfile = asyncHandler(async (req: Request, res: Response
     user.sessionId = crypto.randomUUID();
   }
 
-  if (fullName) user.fullName = fullName;
+  // firstName/lastName/country are the identity-relevant fields — changing
+  // any of them needs a fresh re-proof of identity (same password/2FA check
+  // updatePayoutAccount is gated behind). Once payout KYC is VERIFIED,
+  // they're locked outright: a payout account can only ever exist
+  // alongside a verified record (see updatePayoutAccount), so the only
+  // way to change your name/country at that point is to deliberately
+  // revoke KYC first (see payoutKycController.ts's revokeMyPayoutKyc),
+  // which clears both together — never a silent side effect of an
+  // ordinary profile edit.
+  const nameChanged =
+    (firstName && firstName !== user.fullName.firstName) ||
+    (lastName && lastName !== user.fullName.lastName);
+  const countryChanged = country && country !== user.country;
+
+  if (nameChanged || countryChanged) {
+    const payoutKyc = await PayoutKyc.findOne({ user: user._id });
+
+    if (payoutKyc?.status === PAYOUT_KYC_STATUS.VERIFIED) {
+      const error: AppError = new Error(
+        "Your name and country are locked once payout KYC is verified — revoke your payout KYC before changing them",
+      );
+      error.statusCode = 400;
+      error.code = "PAYOUT_KYC_VERIFIED_LOCK";
+      throw error;
+    }
+
+    await verifyCurrentPasswordOr2FA(user, { currentPassword, otpToken });
+
+    // A stale PENDING/FAILED submission was checked against the old
+    // name/country — invalidate it, since it needs resubmitting anyway.
+    if (payoutKyc) {
+      await PayoutKyc.deleteOne({ _id: payoutKyc._id });
+      await notify(
+        user._id,
+        NOTIFICATION_TYPE.PAYOUT_KYC_RESET,
+        "Your pending payout verification was cleared because your name or country changed — please resubmit.",
+      );
+    }
+  }
+
+  if (firstName) user.fullName.firstName = firstName;
+  if (lastName) user.fullName.lastName = lastName;
+  if (userName) user.userName = userName;
   if (phoneNumber) user.phoneNumber = phoneNumber;
   if (country) user.country = country;
 
@@ -688,6 +756,28 @@ export const updatePayoutAccount = asyncHandler(async (req: Request, res: Respon
 
   const { accountName, accountNumber, bankName, bankCode, country } = req.body;
   const payoutAccount = { accountName, accountNumber, bankName, bankCode, country };
+
+  const payoutKyc = await PayoutKyc.findOne({ user: user._id });
+  if (payoutKyc?.status !== PAYOUT_KYC_STATUS.VERIFIED) {
+    const error: AppError = new Error("Complete payout KYC before adding a payout account");
+    error.statusCode = 400;
+    error.code = "PAYOUT_KYC_REQUIRED";
+    throw error;
+  }
+
+  if (!namesMatch(splitFullName(accountName), user.fullName)) {
+    const error: AppError = new Error("The payout account name must match your own name on file");
+    error.statusCode = 400;
+    error.code = "PAYOUT_ACCOUNT_NAME_MISMATCH";
+    throw error;
+  }
+
+  if (country !== user.country) {
+    const error: AppError = new Error("Your payout account's country must match your own country on file");
+    error.statusCode = 400;
+    error.code = "PAYOUT_ACCOUNT_COUNTRY_MISMATCH";
+    throw error;
+  }
 
   if (user.stripeConnectedAccountId) {
     await updateExternalAccount(user.stripeConnectedAccountId, payoutAccount);
@@ -913,7 +1003,7 @@ export const requestReset = asyncHandler(async (req: Request, res: Response) => 
     to: user.email,
     subject: "Reset Your Password",
     template: "forgotPassword",
-    variables: { name: user.fullName, resetUrl, expiresIn: "10 minutes" },
+    variables: { name: user.userName, resetUrl, expiresIn: "10 minutes" },
   });
 
   // Still included outside production — lets the flow be exercised
@@ -979,7 +1069,7 @@ export const resetPassword = asyncHandler(async (req: Request, res: Response) =>
 // @route   POST /api/users/admin-create
 // @access  Private (Super Admin only)
 export const registerAdmin = asyncHandler(async (req: Request, res: Response) => {
-  const { fullName, email, password } = req.body;
+  const { firstName, lastName, userName, email, password } = req.body;
 
   const userExists = await User.findOne({ email });
   if (userExists) {
@@ -991,7 +1081,8 @@ export const registerAdmin = asyncHandler(async (req: Request, res: Response) =>
   const hashedPassword = await bcrypt.hash(password, salt);
 
   const admin = new User({
-    fullName,
+    fullName: { firstName, lastName },
+    userName: userName || `${firstName} ${lastName}`,
     email,
     password: hashedPassword,
     verified: true,
@@ -1040,7 +1131,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
     // someone's search box (or email) can't throw or behave unexpectedly.
     const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(escaped, "i");
-    filter.$or = [{ email: pattern }, { fullName: pattern }];
+    filter.$or = [{ email: pattern }, { userName: pattern }];
   }
 
   const [users, total] = await Promise.all([

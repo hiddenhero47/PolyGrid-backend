@@ -47,7 +47,7 @@ describe("POST /api/consultancy-profiles", () => {
   });
 
   it("creates a profile with a unique slug", async () => {
-    const user = await createUser({ fullName: "Ada Lovelace" });
+    const user = await createUser({ fullName: { firstName: "Ada", lastName: "Lovelace" }, userName: "Ada Lovelace" });
 
     const res = await request(app)
       .post("/api/consultancy-profiles")
@@ -79,8 +79,8 @@ describe("POST /api/consultancy-profiles", () => {
   });
 
   it("disambiguates a slug collision", async () => {
-    const first = await createUser({ fullName: "Ada Lovelace" });
-    const second = await createUser({ fullName: "Ada Lovelace" });
+    const first = await createUser({ fullName: { firstName: "Ada", lastName: "Lovelace" }, userName: "Ada Lovelace" });
+    const second = await createUser({ fullName: { firstName: "Ada", lastName: "Lovelace" }, userName: "Ada Lovelace" });
 
     await request(app)
       .post("/api/consultancy-profiles")

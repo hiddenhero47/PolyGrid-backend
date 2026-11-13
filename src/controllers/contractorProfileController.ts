@@ -127,7 +127,7 @@ export const createContractorProfile = asyncHandler(async (req: Request, res: Re
   const profile = await ContractorProfile.create({
     userId: requester._id,
     currentSubscription: requester.currentSubscription,
-    slug: await generateUniqueSlug(requester.fullName),
+    slug: await generateUniqueSlug(requester.userName),
     headline,
     bio,
     specialties: resolvedSpecialties,

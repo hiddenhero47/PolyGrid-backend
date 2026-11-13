@@ -19,11 +19,27 @@ import { PAY_TYPE, EMPLOYMENT_TYPE, MAX_OPENING_FILES } from "../../src/models/j
 import { APPLICATION_STATUS } from "../../src/models/jobApplicationModel";
 import { JobApplication } from "../../src/models/jobApplicationModel";
 import { Job } from "../../src/models/jobModel";
+import { PayoutKyc, PAYOUT_KYC_METHOD, PAYOUT_KYC_STATUS } from "../../src/models/payoutKycModel";
+import { SystemSettings } from "../../src/models/systemSettingsModel";
 
 const app = createApp();
 
 beforeAll(async () => {
   await connectTestDB();
+});
+
+// clearTestDB wipes SystemSettings between tests, and its own defaults
+// are deliberately restrictive (nothing supported) — accepting an
+// application now requires the poster's own country to be supported
+// (see helpers/paymentGuardrails.ts's assertEscrowEligible), so every
+// test here needs NG permitted, same pattern as payment.test.ts's own
+// beforeEach.
+beforeEach(async () => {
+  await SystemSettings.create({
+    supportedCountries: ["NG"],
+    maxOutstandingExposure: 1_000_000,
+    maxTransactionAmount: 1_000_000,
+  });
 });
 
 afterEach(async () => {
@@ -34,9 +50,19 @@ afterAll(async () => {
   await disconnectTestDB();
 });
 
+// acceptApplication auto-confirms the poster's own side of the new Job
+// immediately, so the poster must already be escrow-eligible (verified
+// payout KYC, supported country) before that can happen — see
+// helpers/paymentGuardrails.ts's assertEscrowEligible.
 const createEligiblePoster = async () => {
-  const user = await createUserWithActiveSubscription();
+  const user = await createUserWithActiveSubscription({ country: "NG" });
   await createClientProfile({ user, currentSubscription: user.currentSubscription, isVerified: true });
+  await PayoutKyc.create({
+    user: user._id,
+    country: "NG",
+    method: PAYOUT_KYC_METHOD.AUTOMATED,
+    status: PAYOUT_KYC_STATUS.VERIFIED,
+  });
   return user;
 };
 
@@ -554,7 +580,7 @@ describe("GET /api/job-openings/:id/applications — sealed from other applicant
     // their email stays hidden until a real Contact connection exists —
     // which only happens at acceptApplication, not just by listing
     // pending applications.
-    expect(visibleForPoster.body[0].applicant.fullName).toEqual(expect.any(String));
+    expect(visibleForPoster.body[0].applicant.userName).toEqual(expect.any(String));
     expect(visibleForPoster.body[0].applicant.email).toBeUndefined();
   });
 });
@@ -600,6 +626,25 @@ describe("PATCH .../applications/:applicationId/accept and /reject", () => {
       .get("/api/job-openings/applications/mine")
       .set("Authorization", `Bearer ${generateToken(workerUser)}`);
     expect(myApplications.body.data[0].job).toBe(res.body.job._id);
+  });
+
+  it("blocks accepting without the poster's own verified payout KYC", async () => {
+    const poster = await createEligiblePoster();
+    await PayoutKyc.deleteOne({ user: poster._id });
+    const opening = await createJobOpening({ postedBy: poster, workersNeeded: 1 });
+    const { user: workerUser } = await createEligibleWorker();
+
+    const applied = await request(app)
+      .post(`/api/job-openings/${opening.id}/applications`)
+      .set("Authorization", `Bearer ${generateToken(workerUser)}`)
+      .field("data", JSON.stringify({ message: "Ready to work" }));
+
+    const res = await request(app)
+      .patch(`/api/job-openings/${opening.id}/applications/${applied.body.id}/accept`)
+      .set("Authorization", `Bearer ${generateToken(poster)}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_REQUIRED");
   });
 
   it("rejects the remaining pending applications once the opening fills", async () => {

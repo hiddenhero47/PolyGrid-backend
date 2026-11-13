@@ -35,7 +35,7 @@ describe("POST /api/labor-profiles", () => {
   });
 
   it("creates a profile with a unique slug, filtering invalid skills", async () => {
-    const user = await createUser({ fullName: "Chidi Okafor" });
+    const user = await createUser({ fullName: { firstName: "Chidi", lastName: "Okafor" }, userName: "Chidi Okafor" });
 
     const res = await request(app)
       .post("/api/labor-profiles")

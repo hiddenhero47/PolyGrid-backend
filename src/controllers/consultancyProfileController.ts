@@ -146,7 +146,7 @@ export const createProfile = asyncHandler(async (req: Request, res: Response) =>
   const profile = await ConsultancyProfile.create({
     userId: requester._id,
     currentSubscription: requester.currentSubscription,
-    slug: await generateUniqueSlug(requester.fullName),
+    slug: await generateUniqueSlug(requester.userName),
     headline,
     bio,
     specializations: resolvedSpecializations,

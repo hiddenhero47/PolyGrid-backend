@@ -29,6 +29,7 @@ import {
   createStoreProfile,
 } from "../setup/fixtures";
 import { SYSTEM_ROLE, ACCOUNT_TYPE, User } from "../../src/models/userModel";
+import { PayoutKyc, PAYOUT_KYC_METHOD, PAYOUT_KYC_STATUS } from "../../src/models/payoutKycModel";
 import { sendTemplatedEmail } from "../../src/helpers/emailSender";
 import bcrypt from "bcryptjs";
 
@@ -51,7 +52,7 @@ describe("POST /api/users (register)", () => {
   it("registers a new user without logging them in — no auth token until the email is verified", async () => {
     const res = await request(app)
       .post("/api/users")
-      .send({ fullName: "Jane Doe", email: "jane@example.com", password: "password123" });
+      .send({ firstName: "Jane", lastName: "Doe", email: "jane@example.com", password: "password123" });
 
     expect(res.status).toBe(201);
     expect(res.body.systemRole).toBe(SYSTEM_ROLE.USER);
@@ -69,7 +70,7 @@ describe("POST /api/users (register)", () => {
   it("sends a verification email on register, and verifying it is what unlocks login", async () => {
     const res = await request(app)
       .post("/api/users")
-      .send({ fullName: "Jane Doe", email: "verify-me@example.com", password: "password123" });
+      .send({ firstName: "Jane", lastName: "Doe", email: "verify-me@example.com", password: "password123" });
 
     expect(res.status).toBe(201);
     expect(res.body.token).toBeUndefined();
@@ -95,7 +96,7 @@ describe("POST /api/users (register)", () => {
 
     const res = await request(app)
       .post("/api/users")
-      .send({ fullName: "Jane", email: "dupe@example.com", password: "password123" });
+      .send({ firstName: "Jane", lastName: "Doe", email: "dupe@example.com", password: "password123" });
 
     expect(res.status).toBe(400);
   });
@@ -103,6 +104,16 @@ describe("POST /api/users (register)", () => {
   it("rejects missing fields", async () => {
     const res = await request(app).post("/api/users").send({ email: "x@example.com" });
     expect(res.status).toBe(400);
+  });
+
+  it("defaults fullName/userName to a placeholder when no name is given — a real name only matters for payout KYC", async () => {
+    const res = await request(app)
+      .post("/api/users")
+      .send({ email: "no-name@example.com", password: "password123" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.fullName).toEqual({ firstName: "John", lastName: "Doe" });
+    expect(res.body.userName).toBe("John Doe");
   });
 });
 
@@ -249,7 +260,7 @@ describe("POST /api/users/social/apple", () => {
 });
 
 describe("PUT /api/users/profile", () => {
-  it("updates fullName/phoneNumber", async () => {
+  it("updates firstName/lastName/phoneNumber — a name change requires re-proof of identity", async () => {
     const user = await createUser();
     const token = generateToken(user);
 
@@ -257,16 +268,133 @@ describe("PUT /api/users/profile", () => {
       .put("/api/users/profile")
       .set("Authorization", `Bearer ${token}`)
       .send({
-        fullName: "New Name",
+        firstName: "New",
+        lastName: "Name",
+        currentPassword: "password123",
         phoneNumber: { number: "+2348012345678", country: "NG" },
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.user.fullName).toBe("New Name");
+    expect(res.body.user.fullName).toEqual({ firstName: "New", lastName: "Name" });
     expect(res.body.user.phoneNumber).toEqual({
       number: "+2348012345678",
       country: "NG",
     });
+  });
+
+  it("rejects a name change without the current password or a 2FA code", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ firstName: "New" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("IDENTITY_REQUIRED");
+  });
+
+  it("rejects a name/country change once payout KYC is verified — must be revoked first", async () => {
+    const user = await createUser({
+      fullName: { firstName: "Jane", lastName: "Doe" },
+      country: "NG",
+      payoutAccount: {
+        accountName: "Jane Doe",
+        accountNumber: "0123456789",
+        bankName: "Test Bank",
+        country: "NG",
+      },
+    });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      // Even a trivial case-only correction counts — once verified,
+      // name/country are locked outright, not just reset.
+      .send({ firstName: "JANE", lastName: "Doe", currentPassword: "password123" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_KYC_VERIFIED_LOCK");
+
+    // Untouched — nothing partially applied.
+    const stillSame = await User.findById(user.id);
+    expect(stillSame?.fullName.firstName).toBe("Jane");
+    expect(await PayoutKyc.findOne({ user: user._id })).not.toBeNull();
+  });
+
+  it("clears a stale, not-yet-verified payout KYC submission on a name/country change", async () => {
+    const user = await createUser({
+      fullName: { firstName: "Jane", lastName: "Doe" },
+      country: "NG",
+    });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.PENDING,
+    });
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ firstName: "Someone", lastName: "Else", currentPassword: "password123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.fullName).toEqual({ firstName: "Someone", lastName: "Else" });
+    expect(await PayoutKyc.findOne({ user: user._id })).toBeNull();
+  });
+
+  it("DELETE /me/payout-kyc revokes KYC and clears the payout account, unlocking the name again", async () => {
+    const user = await createUser({
+      fullName: { firstName: "Jane", lastName: "Doe" },
+      country: "NG",
+      payoutAccount: {
+        accountName: "Jane Doe",
+        accountNumber: "0123456789",
+        bankName: "Test Bank",
+        country: "NG",
+      },
+    });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
+
+    const revoked = await request(app)
+      .delete("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ currentPassword: "password123" });
+
+    expect(revoked.status).toBe(200);
+    expect(await PayoutKyc.findOne({ user: user._id })).toBeNull();
+    expect((await User.findById(user.id))?.payoutAccount).toBeUndefined();
+
+    const res = await request(app)
+      .put("/api/users/profile")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ firstName: "Someone", lastName: "Else", currentPassword: "password123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.fullName).toEqual({ firstName: "Someone", lastName: "Else" });
+  });
+
+  it("DELETE /me/payout-kyc 404s when there's nothing to revoke", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .delete("/api/users/me/payout-kyc")
+      .set("Authorization", `Bearer ${generateToken(user)}`)
+      .send({ currentPassword: "password123" });
+
+    expect(res.status).toBe(404);
   });
 
   it("sets the user's own country, used by the payment guardrails (helpers/paymentGuardrails.ts)", async () => {
@@ -275,7 +403,7 @@ describe("PUT /api/users/profile", () => {
     const res = await request(app)
       .put("/api/users/profile")
       .set("Authorization", `Bearer ${generateToken(user)}`)
-      .send({ country: "ng" });
+      .send({ country: "ng", currentPassword: "password123" });
 
     expect(res.status).toBe(200);
     expect(res.body.user.country).toBe("NG");
@@ -312,11 +440,13 @@ describe("PUT /api/users/profile", () => {
     const res = await request(app)
       .put("/api/users/profile")
       .set("Authorization", `Bearer ${generateToken(user)}`)
-      .field("fullName", "Still Updates")
+      .field("firstName", "Still")
+      .field("lastName", "Updates")
+      .field("currentPassword", "password123")
       .attach("file", Buffer.from("not a real image"), "avatar.png");
 
     expect(res.status).toBe(200);
-    expect(res.body.user.fullName).toBe("Still Updates");
+    expect(res.body.user.fullName).toEqual({ firstName: "Still", lastName: "Updates" });
     expect(res.body.user.avatar).toBeUndefined();
     expect(res.body.avatarWarnings).toEqual(expect.arrayContaining([expect.any(String)]));
   });
@@ -578,7 +708,13 @@ describe("PUT /api/users/payout-account", () => {
   });
 
   it("sets the payout account once the current password checks out", async () => {
-    const user = await createUser();
+    const user = await createUser({ fullName: { firstName: "Jane", lastName: "Doe" }, country: "NG" });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
     const token = generateToken(user);
 
     const res = await request(app)
@@ -593,9 +729,38 @@ describe("PUT /api/users/payout-account", () => {
     expect(me.body.payoutAccount.bankName).toBe("Test Bank");
   });
 
+  it("rejects a payout account name that doesn't match the user's own name", async () => {
+    const user = await createUser({ fullName: { firstName: "Someone", lastName: "Else" }, country: "NG" });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
+    const token = generateToken(user);
+
+    const res = await request(app)
+      .put("/api/users/payout-account")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...payoutAccountPayload, currentPassword: "password123" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("PAYOUT_ACCOUNT_NAME_MISMATCH");
+  });
+
   it("takes a 2FA code instead of a password once 2FA is enabled", async () => {
     const secret = authenticator.generateSecret();
-    const user = await createUser({ user2fa: { enable: true, secret } });
+    const user = await createUser({
+      fullName: { firstName: "Jane", lastName: "Doe" },
+      country: "NG",
+      user2fa: { enable: true, secret },
+    });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
     const token = generateToken(user);
 
     const wrongCode = await request(app)
@@ -613,7 +778,13 @@ describe("PUT /api/users/payout-account", () => {
   });
 
   it("never touches Stripe when the user hasn't onboarded to Connect", async () => {
-    const user = await createUser();
+    const user = await createUser({ fullName: { firstName: "Jane", lastName: "Doe" }, country: "NG" });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
     const token = generateToken(user);
 
     const res = await request(app)
@@ -626,7 +797,17 @@ describe("PUT /api/users/payout-account", () => {
   });
 
   it("pushes the new bank account to Stripe once a Connect account already exists", async () => {
-    const user = await createUser({ stripeConnectedAccountId: "acct_123" });
+    const user = await createUser({
+      fullName: { firstName: "Jane", lastName: "Doe" },
+      country: "NG",
+      stripeConnectedAccountId: "acct_123",
+    });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+    });
     const token = generateToken(user);
 
     const res = await request(app)
@@ -643,8 +824,16 @@ describe("PUT /api/users/payout-account", () => {
 
   it("never saves locally when Stripe rejects the new bank account — no drift between PolyGrid and Stripe", async () => {
     const user = await createUser({
+      fullName: { firstName: "Jane", lastName: "Doe" },
+      country: "NG",
       stripeConnectedAccountId: "acct_123",
       payoutAccount: { ...payoutAccountPayload, accountNumber: "9999999999" },
+    });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
     });
     const token = generateToken(user);
     mockUpdateExternalAccount.mockRejectedValueOnce(new Error("invalid routing number"));
@@ -725,7 +914,7 @@ describe("email verification flow", () => {
   it("verifies the email from the token registration already sent", async () => {
     const registerRes = await request(app)
       .post("/api/users")
-      .send({ fullName: "Jane Doe", email: "jane-verify@example.com", password: "password123" });
+      .send({ firstName: "Jane", lastName: "Doe", email: "jane-verify@example.com", password: "password123" });
 
     const verifyRes = await request(app)
       .post("/api/users/verify-email")
@@ -782,7 +971,7 @@ describe("email verification flow", () => {
 
     const registerRes = await request(app)
       .post("/api/users")
-      .send({ fullName: "Reuse Test", email: "reuse-verify@example.com", password: "password123" });
+      .send({ firstName: "Reuse", lastName: "Test", email: "reuse-verify@example.com", password: "password123" });
 
     const first = await request(app)
       .post("/api/users/verify-email")
@@ -807,7 +996,7 @@ describe("admin-only user management", () => {
     const res = await request(app)
       .post("/api/users/admin-create")
       .set("Authorization", `Bearer ${token}`)
-      .send({ fullName: "New Admin", email: "admin@example.com", password: "password123" });
+      .send({ firstName: "New", lastName: "Admin", email: "admin@example.com", password: "password123" });
 
     expect(res.status).toBe(401);
   });
@@ -819,7 +1008,7 @@ describe("admin-only user management", () => {
     const res = await request(app)
       .post("/api/users/admin-create")
       .set("Authorization", `Bearer ${token}`)
-      .send({ fullName: "New Admin", email: "admin@example.com", password: "password123" });
+      .send({ firstName: "New", lastName: "Admin", email: "admin@example.com", password: "password123" });
 
     expect(res.status).toBe(201);
     expect(res.body.systemRole).toBe(SYSTEM_ROLE.ADMIN);
@@ -851,15 +1040,23 @@ describe("admin-only user management", () => {
     const blocked = await request(app)
       .post("/api/users/admin-create")
       .set("Authorization", `Bearer ${token}`)
-      .send({ fullName: "New Admin", email: "nope@example.com", password: "password123" });
+      .send({ firstName: "New", lastName: "Admin", email: "nope@example.com", password: "password123" });
     expect(blocked.status).toBe(401);
   });
 
-  it("finds a user by a case-insensitive match on email or fullName via ?q=", async () => {
+  it("finds a user by a case-insensitive match on email or userName via ?q=", async () => {
     const superAdmin = await createSuperAdmin();
     const token = generateToken(superAdmin);
-    await createUser({ fullName: "Charles Okonkwo", email: "charles.okonkwo@example.com" });
-    await createUser({ fullName: "Someone Else", email: "someone@example.com" });
+    await createUser({
+      fullName: { firstName: "Charles", lastName: "Okonkwo" },
+      userName: "Charles Okonkwo",
+      email: "charles.okonkwo@example.com",
+    });
+    await createUser({
+      fullName: { firstName: "Someone", lastName: "Else" },
+      userName: "Someone Else",
+      email: "someone@example.com",
+    });
 
     const byName = await request(app)
       .get("/api/users?q=charles")

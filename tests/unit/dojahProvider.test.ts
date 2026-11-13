@@ -24,9 +24,40 @@ describe("dojahProvider.verifyMatch", () => {
       lastName: "okafor",
     });
 
-    expect(mockGet).toHaveBeenCalledWith("/api/v1/kyc/bvn", { params: { bvn: "12345678901" } });
+    expect(mockGet).toHaveBeenCalledWith("/api/v1/kyc/bvn/full", { params: { bvn: "12345678901" } });
     expect(result.matched).toBe(true);
     expect(result.reference).toBe("dojah_ref_1");
+  });
+
+  // Confirmed live against sandbox.dojah.io's actual response shape —
+  // bvn=22222222222 (Dojah's own documented sandbox test value) returns
+  // exactly this record, including the real "customer" field name (not
+  // "reference" — the lookup endpoint has no reference field of its own).
+  it("matches the real sandbox response shape for Dojah's documented test BVN", async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        entity: {
+          bvn: "22222222222",
+          date_of_birth: "2000-05-01",
+          first_name: "John",
+          gender: "Male",
+          last_name: "Adamu",
+          middle_name: "Doe",
+          phone_number1: "07012345678",
+          customer: "6bb82c41-e15e-4308-b99d-e9640818eca9",
+        },
+      },
+    });
+
+    const result = await dojahProvider.verifyMatch({
+      idType: "bvn",
+      idNumber: "22222222222",
+      firstName: "John",
+      lastName: "Adamu",
+    });
+
+    expect(result.matched).toBe(true);
+    expect(result.reference).toBe("6bb82c41-e15e-4308-b99d-e9640818eca9");
   });
 
   it("fails to match on a genuine name mismatch", async () => {

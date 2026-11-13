@@ -79,7 +79,9 @@ export interface IPayoutKyc extends Document {
   updatedAt: Date;
 }
 
-const payoutKycDocumentSchema = new Schema<IVerificationDocument>(
+// Exported so payoutKycHistoryModel.ts can reuse the same sub-schema
+// shape for its own (document-track) snapshot, rather than redefining it.
+export const payoutKycDocumentSchema = new Schema<IVerificationDocument>(
   {
     type: { type: String, required: true },
     fileName: { type: String, required: true },

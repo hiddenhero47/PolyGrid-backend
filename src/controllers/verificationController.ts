@@ -306,7 +306,7 @@ export const getVerifications = asyncHandler(async (req: Request, res: Response)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("user", "fullName email")
+      .populate("user", "userName email")
       // See getMyVerifications' identical populate for why — same gap,
       // same fix, for the admin queue.
       .populate("templateId", "name version fields documents"),

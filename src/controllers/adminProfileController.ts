@@ -41,14 +41,14 @@ const notifyProfileStatusChanged = async (
   banned: boolean,
   banReason?: string,
 ): Promise<void> => {
-  const owner = await User.findById(ownerId).select("email fullName");
+  const owner = await User.findById(ownerId).select("email userName");
   if (!owner) return;
 
   await sendTemplatedEmail({
     to: owner.email,
     subject: banned ? "Your PolyGrid profile has been suspended" : "Your PolyGrid profile is active again",
     template: "profileStatusChanged",
-    variables: { name: owner.fullName, banned, banReason },
+    variables: { name: owner.userName, banned, banReason },
   });
 
   await notify(
@@ -173,7 +173,7 @@ export const getProfileForReview = asyncHandler(async (req: Request, res: Respon
 //          reached from its public page or the verification drawer. `q`
 //          matches the profile's own name field (see PROFILE_NAME_FIELD)
 //          or slug (see PROFILE_SLUG_FIELD — ClientProfile has none), or
-//          the owning User's fullName/email. `status` includes
+//          the owning User's userName/email. `status` includes
 //          `banned`/`inactive`, unlike every public search/browse
 //          endpoint for this same profile type, which excludes both (see
 //          constants/profileStatus.ts).
@@ -206,7 +206,7 @@ export const searchProfilesForAdmin = asyncHandler(async (req: Request, res: Res
     const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(escaped, "i");
 
-    const matchingUsers = await User.find({ $or: [{ fullName: pattern }, { email: pattern }] }).select("_id");
+    const matchingUsers = await User.find({ $or: [{ userName: pattern }, { email: pattern }] }).select("_id");
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const orConditions: FilterQuery<any>[] = [
@@ -228,7 +228,7 @@ export const searchProfilesForAdmin = asyncHandler(async (req: Request, res: Res
   ]);
 
   const owners = await User.find({ _id: { $in: profiles.map((profile) => profile.userId) } }).select(
-    "fullName email",
+    "userName email",
   );
   const ownerById = new Map(owners.map((owner) => [owner.id, owner]));
 
@@ -243,7 +243,7 @@ export const searchProfilesForAdmin = asyncHandler(async (req: Request, res: Res
         slug: slugField ? profile[slugField] : undefined,
         status: profile.status,
         isVerified: profile.isVerified,
-        owner: owner ? { id: owner.id, fullName: owner.fullName, email: owner.email } : null,
+        owner: owner ? { id: owner.id, userName: owner.userName, email: owner.email } : null,
         ratingAverage: profile.ratingAverage,
         ratingCount: profile.ratingCount,
         createdAt: profile.createdAt,

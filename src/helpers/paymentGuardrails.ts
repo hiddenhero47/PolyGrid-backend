@@ -1,5 +1,6 @@
 import { Job } from "../models/jobModel";
 import { IUser } from "../models/userModel";
+import { PayoutKyc, PAYOUT_KYC_STATUS } from "../models/payoutKycModel";
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_RAIL, PaymentRail, PaymentTargetType } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME, PaymentProviderName } from "../models/paymentProviderModel";
 import { DigitalPurchase, DIGITAL_PURCHASE_STATUS, DIGITAL_PURCHASE_PAYOUT_STATUS } from "../models/digitalPurchaseModel";
@@ -163,7 +164,12 @@ export const assertPaymentAllowed = async (
 
   const settings = await getSystemSettings();
 
-  if (!settings.supportedCountries.includes(buyer.country)) {
+  // Subscriptions pay PolyGrid directly — there's no money held on
+  // anyone else's behalf, so this is the one target type that's exempt
+  // from the supported-country gate (Job/DigitalPurchase/Store, which
+  // rides on a Job, all still require one — see assertEscrowEligible
+  // below for Job's own pre-payment check).
+  if (targetType !== PAYMENT_TARGET_TYPE.SUBSCRIPTION && !settings.supportedCountries.includes(buyer.country)) {
     throw badRequest("Payments aren't supported in your country yet");
   }
 
@@ -189,5 +195,31 @@ export const assertPaymentAllowed = async (
   const exposure = await getOutstandingExposure();
   if (exposure + amount > settings.maxOutstandingExposure) {
     throw badRequest("The platform has reached its current processing capacity — try again later");
+  }
+};
+
+// Before any party's own `isConfirmed` flips to true on a Job (direct
+// creation, accepting an application, awarding a bid, confirming as the
+// counterparty, or a store order's auto-confirmed seller) — checked this
+// early, not just at payment time, so no one gets partway into a job
+// only to discover escrow isn't available to them, and so PolyGrid can
+// never be accused of approving a job and then stalling someone's KYC to
+// avoid paying them out.
+export const assertEscrowEligible = async (user: IUser): Promise<void> => {
+  const settings = await getSystemSettings();
+
+  if (!user.country || !settings.supportedCountries.includes(user.country)) {
+    const error: AppError = new Error("Escrow isn't supported in your country yet");
+    error.statusCode = 400;
+    error.code = "COUNTRY_NOT_SUPPORTED";
+    throw error;
+  }
+
+  const payoutKyc = await PayoutKyc.findOne({ user: user._id });
+  if (payoutKyc?.status !== PAYOUT_KYC_STATUS.VERIFIED) {
+    const error: AppError = new Error("You need verified payout KYC before you can create or accept a job");
+    error.statusCode = 400;
+    error.code = "PAYOUT_KYC_REQUIRED";
+    throw error;
   }
 };

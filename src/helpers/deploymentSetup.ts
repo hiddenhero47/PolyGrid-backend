@@ -1,9 +1,13 @@
 import bcrypt from "bcryptjs";
+import { Types } from "mongoose";
 import { User, SYSTEM_ROLE } from "../models/userModel";
 import { VerificationTemplate, TEMPLATE_FIELD_TYPE, TEMPLATE_DOCUMENT_FORMAT } from "../models/verificationTemplateModel";
 import { PROFILE_TYPE, ProfileType } from "../constants/profileTypes";
 import { Conversation } from "../models/conversationModel";
 import { SystemSettings } from "../models/systemSettingsModel";
+import { splitFullName } from "./nameMatch";
+import { PayoutKyc, PAYOUT_KYC_STATUS } from "../models/payoutKycModel";
+import { PayoutKycHistory } from "../models/payoutKycHistoryModel";
 
 // Mirrors house-maduekwe-backend's helpers/ensureAdmin.js +
 // helpers/appSetup.js pattern — a set of idempotent "ensure X exists"
@@ -56,7 +60,8 @@ export const ensureSuperAdminExists = async (): Promise<SetupTaskResult> => {
     const hashedPassword = await bcrypt.hash(password, salt);
 
     const superAdmin = new User({
-      fullName: name,
+      fullName: splitFullName(name),
+      userName: name,
       email,
       password: hashedPassword,
       verified: true,
@@ -217,6 +222,123 @@ export const ensureSystemSettingsSeeded = async (): Promise<SetupTaskResult> => 
       task: "Ensure SystemSettings seeded",
       status: "failed",
       message: "Failed to seed SystemSettings — see server logs",
+    };
+  }
+};
+
+// @task Backfill User.fullName/userName onto the new {firstName, lastName}
+// + userName shape — a one-time migration for any document still holding
+// the old plain-string `fullName` from before that restructure. Reads via
+// the raw collection (not the Mongoose model), since the model's own
+// fullNameSchema cast would reject the old string shape outright before
+// this ever got a chance to fix it. userName gets the old string as-is
+// (not just the first name) — the most recognizable, least-lossy choice
+// for a field that's purely cosmetic.
+export const ensureUserNamesNormalized = async (): Promise<SetupTaskResult> => {
+  try {
+    const legacy = await User.collection
+      .find({ "fullName.firstName": { $exists: false } })
+      .project({ fullName: 1 })
+      .toArray();
+
+    if (legacy.length === 0) {
+      return {
+        task: "Normalize User names",
+        status: "success",
+        message: "Every User already has the firstName/lastName + userName shape",
+      };
+    }
+
+    await User.collection.bulkWrite(
+      legacy.map((doc) => {
+        const oldFullName = String(doc.fullName ?? "");
+        return {
+          updateOne: {
+            filter: { _id: doc._id },
+            update: { $set: { fullName: splitFullName(oldFullName), userName: oldFullName } },
+          },
+        };
+      }),
+    );
+
+    return {
+      task: "Normalize User names",
+      status: "success",
+      message: `Backfilled firstName/lastName/userName for ${legacy.length} user(s)`,
+    };
+  } catch (err) {
+    console.error("[DEPLOYMENT SETUP] ensureUserNamesNormalized failed:", err);
+    return {
+      task: "Normalize User names",
+      status: "failed",
+      message: "Failed to normalize User names — see server logs",
+    };
+  }
+};
+
+// @task Backfill PayoutKycHistory for every already-VERIFIED PayoutKyc
+// record that predates the history collection — otherwise anyone
+// verified before this feature shipped would show zero bookkeeping
+// entries despite genuinely being verified. Best-effort by nature: it
+// snapshots the user's *current* fullName/country, since the actual
+// values at the moment they were originally verified were never
+// recorded anywhere to recover — accurate for anyone who hasn't changed
+// either since (the common case, and the only case possible going
+// forward now that a verified identity is locked — see
+// userController.ts's updateUserProfile), approximate for anyone who
+// changed theirs under the old, pre-lock rules.
+export const ensurePayoutKycHistoryBackfilled = async (): Promise<SetupTaskResult> => {
+  try {
+    const alreadyLogged = new Set(
+      (await PayoutKycHistory.distinct("user")).map((id) => id.toString()),
+    );
+
+    const verifiedRecords = await PayoutKyc.find({ status: PAYOUT_KYC_STATUS.VERIFIED }).populate<{
+      user: { _id: Types.ObjectId; fullName: { firstName: string; lastName: string } } | null;
+    }>("user", "fullName");
+
+    const missing = verifiedRecords.filter(
+      (record) => record.user && !alreadyLogged.has(record.user._id.toString()),
+    );
+
+    if (missing.length === 0) {
+      return {
+        task: "Backfill PayoutKycHistory",
+        status: "success",
+        message: "Every verified PayoutKyc record already has a history entry",
+      };
+    }
+
+    await PayoutKycHistory.insertMany(
+      missing.map((record) => {
+        const owner = record.user as { _id: Types.ObjectId; fullName: { firstName: string; lastName: string } };
+        return {
+          user: owner._id,
+          fullName: { firstName: owner.fullName.firstName, lastName: owner.fullName.lastName },
+          country: record.country,
+          method: record.method,
+          idType: record.idType,
+          provider: record.provider,
+          last4: record.last4,
+          providerReference: record.providerReference,
+          documents: record.documents,
+          reviewedBy: record.reviewedBy,
+          verifiedAt: record.verifiedAt ?? record.updatedAt,
+        };
+      }),
+    );
+
+    return {
+      task: "Backfill PayoutKycHistory",
+      status: "success",
+      message: `Backfilled a history entry for ${missing.length} already-verified user(s)`,
+    };
+  } catch (err) {
+    console.error("[DEPLOYMENT SETUP] ensurePayoutKycHistoryBackfilled failed:", err);
+    return {
+      task: "Backfill PayoutKycHistory",
+      status: "failed",
+      message: "Failed to backfill PayoutKycHistory — see server logs",
     };
   }
 };

@@ -24,7 +24,7 @@ import {
 import { Payment, PAYMENT_TARGET_TYPE, PAYMENT_STATUS } from "../models/paymentModel";
 import { PAYMENT_PROVIDER_NAME } from "../models/paymentProviderModel";
 import { PayoutKyc, PAYOUT_KYC_STATUS } from "../models/payoutKycModel";
-import { resolveRail, buildTransactionCountries } from "../helpers/paymentGuardrails";
+import { resolveRail, buildTransactionCountries, assertEscrowEligible } from "../helpers/paymentGuardrails";
 import {
   uploadHandler,
   deleteStoredFile,
@@ -76,9 +76,9 @@ const withContractLinks = (party: IJobParty) => {
 // loadPartyUsers below) — every existing read of job.client.userId /
 // job.provider.userId elsewhere in this file keeps seeing a plain
 // ObjectId, exactly as before.
-const toJobPartyUserSummary = (user: Pick<IUser, "id" | "fullName" | "avatar"> | undefined) =>
+const toJobPartyUserSummary = (user: Pick<IUser, "id" | "userName" | "avatar"> | undefined) =>
   user
-    ? { id: user.id, fullName: user.fullName, avatar: user.avatar ? toPublicMediaFile(user.avatar) : undefined }
+    ? { id: user.id, userName: user.userName, avatar: user.avatar ? toPublicMediaFile(user.avatar) : undefined }
     : null;
 
 // Fetched as a separate, batched lookup rather than job.populate() — a
@@ -93,7 +93,7 @@ const loadPartyUsers = async (jobs: IJob[]): Promise<Map<string, IUser>> => {
     ids.add(job.provider.userId.toString());
   }
 
-  const users = await User.find({ _id: { $in: [...ids] } }).select("fullName avatar");
+  const users = await User.find({ _id: { $in: [...ids] } }).select("userName avatar");
   return new Map(users.map((user) => [user.id, user]));
 };
 
@@ -148,7 +148,7 @@ const notifyPaymentRequestDecision = async (
   approved: boolean,
   declineReason?: string,
 ): Promise<void> => {
-  const requesterUser = await User.findById(requestedBy).select("email fullName");
+  const requesterUser = await User.findById(requestedBy).select("email userName");
   if (!requesterUser) return;
 
   await sendTemplatedEmail({
@@ -156,7 +156,7 @@ const notifyPaymentRequestDecision = async (
     subject: `Your ${requestType} request was ${approved ? "approved" : "declined"}`,
     template: "paymentRequestDecision",
     variables: {
-      name: requesterUser.fullName,
+      name: requesterUser.userName,
       jobTitle: job.jobTitle,
       requestType,
       approved,
@@ -389,6 +389,8 @@ export const createJob = asyncHandler(async (req: Request, res: Response) => {
     throw new Error("Counterparty user not found");
   }
 
+  await assertEscrowEligible(requester);
+
   const resolvedStages = normalizeStages(stages);
 
   const client =
@@ -522,7 +524,7 @@ export const searchJobs = asyncHandler(async (req: Request, res: Response) => {
     const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(escaped, "i");
 
-    const matchingUsers = await User.find({ $or: [{ fullName: pattern }, { email: pattern }] }).select("_id");
+    const matchingUsers = await User.find({ $or: [{ userName: pattern }, { email: pattern }] }).select("_id");
     const qOr = [{ jobTitle: pattern }, ...partyIsFilter(matchingUsers.map((u) => u._id))];
 
     // userId and q can both be present — AND them together rather than
@@ -572,6 +574,8 @@ export const confirmJob = asyncHandler(async (req: Request, res: Response) => {
     res.status(400);
     throw new Error("You have already confirmed this job");
   }
+
+  await assertEscrowEligible(requester);
 
   job[role].isConfirmed = true;
 
@@ -951,9 +955,9 @@ export const getDisputedJobs = asyncHandler(async (req: Request, res: Response) 
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("client.userId", "fullName email")
-      .populate("provider.userId", "fullName email")
-      .populate("disputedBy", "fullName email"),
+      .populate("client.userId", "userName email")
+      .populate("provider.userId", "userName email")
+      .populate("disputedBy", "userName email"),
     Job.countDocuments(filter),
   ]);
 
@@ -1280,8 +1284,8 @@ export const getPendingRefundRequests = asyncHandler(async (req: Request, res: R
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("client.userId", "fullName email")
-      .populate("provider.userId", "fullName email"),
+      .populate("client.userId", "userName email")
+      .populate("provider.userId", "userName email"),
     Job.countDocuments(filter),
   ]);
 
@@ -1618,8 +1622,8 @@ export const getPendingPayoutRequests = asyncHandler(async (req: Request, res: R
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("client.userId", "fullName email")
-      .populate("provider.userId", "fullName email"),
+      .populate("client.userId", "userName email")
+      .populate("provider.userId", "userName email"),
     Job.countDocuments(filter),
   ]);
 

@@ -1,5 +1,10 @@
 import express from "express";
-import { getPayoutKycRecords, approvePayoutKyc, rejectPayoutKyc } from "../controllers/payoutKycController";
+import {
+  getPayoutKycRecords,
+  approvePayoutKyc,
+  rejectPayoutKyc,
+  getPayoutKycHistory,
+} from "../controllers/payoutKycController";
 import { secureRole } from "../middleware/authMiddleware";
 import { SYSTEM_ROLE, REVIEW_ROLES } from "../models/userModel";
 import { validateBody } from "../validators/validate";
@@ -14,6 +19,7 @@ const router = express.Router();
 // Read-only queue — customer_care can see it too; approve/reject stay
 // admin-only, same split verificationRoutes.ts already uses.
 router.get("/", secureRole([...REVIEW_ROLES]), getPayoutKycRecords);
+router.get("/history", secureRole([...REVIEW_ROLES]), getPayoutKycHistory);
 router.patch("/:id/approve", secureRole([SYSTEM_ROLE.ADMIN, SYSTEM_ROLE.SUPER_ADMIN]), approvePayoutKyc);
 router.patch(
   "/:id/reject",

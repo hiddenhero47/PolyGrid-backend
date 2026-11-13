@@ -17,6 +17,7 @@ import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
 import { loadEligibleClientProfile } from "./clientProfileController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
+import { assertEscrowEligible } from "../helpers/paymentGuardrails";
 import { IMediaFile } from "../models/mediaFile";
 import { NOTIFICATION_TYPE } from "../models/notificationModel";
 import { notify } from "../helpers/notify";
@@ -678,7 +679,7 @@ export const getProjectBids = asyncHandler(async (req: Request, res: Response) =
   const bids = await Bid.find({ project: project._id })
     .sort({ createdAt: -1 })
     .populate("contractorId", "headline slug ratingAverage ratingCount")
-    .populate("bidder", "fullName");
+    .populate("bidder", "userName");
 
   res.status(200).json(bids.map(toPublicBid));
 });
@@ -717,6 +718,8 @@ export const awardBid = asyncHandler(async (req: Request, res: Response) => {
     res.status(400);
     throw new Error(`This bid has already been ${bid.status}`);
   }
+
+  await assertEscrowEligible(requester);
 
   bid.status = BID_STATUS.ACCEPTED;
   await bid.save();

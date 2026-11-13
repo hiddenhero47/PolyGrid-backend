@@ -10,11 +10,29 @@ import {
 } from "../setup/fixtures";
 import { Contact } from "../../src/models/contactModel";
 import { Job } from "../../src/models/jobModel";
+import { PayoutKyc, PAYOUT_KYC_METHOD, PAYOUT_KYC_STATUS } from "../../src/models/payoutKycModel";
+import { SystemSettings } from "../../src/models/systemSettingsModel";
+import { IUser } from "../../src/models/userModel";
 
 const app = createApp();
 
 beforeAll(async () => {
   await connectTestDB();
+});
+
+// clearTestDB wipes SystemSettings between tests, and its own defaults
+// are deliberately restrictive (nothing supported) — placing an order
+// now requires the *store owner's* own country to be supported (see
+// helpers/paymentGuardrails.ts's assertEscrowEligible, called on the
+// seller, not the buyer, since the seller is the one auto-confirmed on
+// the new Job), so every test here needs NG permitted, same pattern as
+// payment.test.ts's own beforeEach.
+beforeEach(async () => {
+  await SystemSettings.create({
+    supportedCountries: ["NG"],
+    maxOutstandingExposure: 1_000_000,
+    maxTransactionAmount: 1_000_000,
+  });
 });
 
 afterEach(async () => {
@@ -24,6 +42,21 @@ afterEach(async () => {
 afterAll(async () => {
   await disconnectTestDB();
 });
+
+// createOrder auto-confirms the store owner's own side of the new Job
+// immediately, so the owner must already be escrow-eligible (verified
+// payout KYC, supported country) — see
+// helpers/paymentGuardrails.ts's assertEscrowEligible.
+const createEligibleStoreOwner = async (): Promise<IUser> => {
+  const user = await createUserWithActiveSubscription({ country: "NG" });
+  await PayoutKyc.create({
+    user: user._id,
+    country: "NG",
+    method: PAYOUT_KYC_METHOD.AUTOMATED,
+    status: PAYOUT_KYC_STATUS.VERIFIED,
+  });
+  return user;
+};
 
 describe("POST /api/store-orders", () => {
   it("requires authentication", async () => {
@@ -49,8 +82,30 @@ describe("POST /api/store-orders", () => {
     expect(res.status).toBe(404);
   });
 
-  it("blocks ordering from your own store", async () => {
+  it("404s (not a KYC-specific error) when the shop owner isn't escrow-eligible", async () => {
+    // An active subscription, but no verified payout KYC — same masking
+    // instinct as the inactive-subscription case above: a buyer is never
+    // told the real reason is the seller's own KYC/country status.
+    const buyer = await createUser();
     const owner = await createUserWithActiveSubscription();
+    const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
+    const product = await createProduct({ store });
+
+    const res = await request(app)
+      .post("/api/store-orders")
+      .set("Authorization", `Bearer ${generateToken(buyer)}`)
+      .send({
+        storeId: store.id,
+        items: [{ productId: product.id, quantity: 2 }],
+        shippingDestination: { country: "NG" },
+      });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBeUndefined();
+  });
+
+  it("blocks ordering from your own store", async () => {
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     const product = await createProduct({ store });
 
@@ -68,7 +123,7 @@ describe("POST /api/store-orders", () => {
 
   it("requires a shipping destination", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     const product = await createProduct({ store });
 
@@ -82,9 +137,9 @@ describe("POST /api/store-orders", () => {
 
   it("rejects a product that doesn't belong to the given store", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
-    const otherOwner = await createUserWithActiveSubscription();
+    const otherOwner = await createEligibleStoreOwner();
     const otherStore = await createStoreProfile({
       user: otherOwner,
       currentSubscription: otherOwner.currentSubscription,
@@ -105,7 +160,7 @@ describe("POST /api/store-orders", () => {
 
   it("rejects a destination none of the order's products ship to", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     // Fixture default only ships to NG.
     const product = await createProduct({ store });
@@ -124,7 +179,7 @@ describe("POST /api/store-orders", () => {
 
   it("resolves a state-specific shipping price over the nationwide default", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     const product = await createProduct({
       store,
@@ -152,7 +207,7 @@ describe("POST /api/store-orders", () => {
 
   it("places an order, spins up a Job the shop owner created, and connects buyer and owner as contacts", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     const product = await createProduct({ store, title: "Dangote Cement", price: 12.5 });
 
@@ -190,8 +245,10 @@ describe("POST /api/store-orders", () => {
   });
 
   it("lets the shop owner (job creator) adjust the price before the buyer confirms", async () => {
-    const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    // The buyer is the one confirming the job below, which now requires
+    // them to be escrow-eligible too (see jobController.ts's confirmJob).
+    const buyer = await createEligibleStoreOwner();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     const product = await createProduct({ store, price: 100 });
 
@@ -223,7 +280,7 @@ describe("POST /api/store-orders", () => {
 
   it("rejects a quantity less than 1", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({ user: owner, currentSubscription: owner.currentSubscription });
     const product = await createProduct({ store });
 
@@ -243,7 +300,7 @@ describe("POST /api/store-orders", () => {
 describe("GET /api/store-orders/mine and /store", () => {
   it("shows the buyer their own orders and the owner their store's orders", async () => {
     const buyer = await createUser();
-    const owner = await createUserWithActiveSubscription();
+    const owner = await createEligibleStoreOwner();
     const store = await createStoreProfile({
       user: owner,
       currentSubscription: owner.currentSubscription,
@@ -284,7 +341,7 @@ describe("GET /api/store-orders/mine and /store", () => {
       .get("/api/store-orders/store")
       .set("Authorization", `Bearer ${generateToken(owner)}`);
     expect(storeOrders.body.data).toHaveLength(1);
-    expect(storeOrders.body.data[0].buyer.fullName).toBeTruthy();
+    expect(storeOrders.body.data[0].buyer.userName).toBeTruthy();
     expect(storeOrders.body.data[0].store.storeName).toBe("Lagos Building Supplies");
     expect(storeOrders.body.data[0].job.status).toBe(created.body.job.status);
   });

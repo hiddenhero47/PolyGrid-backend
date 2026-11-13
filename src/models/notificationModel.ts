@@ -20,6 +20,9 @@ export const NOTIFICATION_TYPE = {
   PROFILE_STATUS_CHANGED: "profile_status_changed",
   PAYMENT_ON_HOLD: "payment_on_hold",
   PAYOUT_KYC_DECIDED: "payout_kyc_decided",
+  PAYOUT_KYC_RESET: "payout_kyc_reset",
+  PAYOUT_ACCOUNT_CLEARED: "payout_account_cleared",
+  PAYOUT_KYC_REVOKED: "payout_kyc_revoked",
 } as const;
 export type NotificationType = (typeof NOTIFICATION_TYPE)[keyof typeof NOTIFICATION_TYPE];
 

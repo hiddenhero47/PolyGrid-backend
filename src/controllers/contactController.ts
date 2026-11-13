@@ -88,16 +88,16 @@ export const getContacts = asyncHandler(async (req: Request, res: Response) => {
 
   // Fetched for the whole list up front (bounded by however many contacts
   // this person actually has, not a page size) — needed both to filter
-  // by name below and to attach fullName/avatar per row, same summary
+  // by name below and to attach userName/avatar per row, same summary
   // jobController.toJobPartyUserSummary gives, so a contact row can show
   // a name instead of just an email.
-  const users = await User.find({ _id: { $in: fullList.map((entry) => entry.user) } }).select("fullName avatar");
+  const users = await User.find({ _id: { $in: fullList.map((entry) => entry.user) } }).select("userName avatar");
   const userById = new Map(users.map((user) => [user.id, user]));
 
   if (q) {
     fullList = fullList.filter((entry) => {
-      const fullName = userById.get(entry.user.toString())?.fullName ?? "";
-      return entry.email.toLowerCase().includes(q) || fullName.toLowerCase().includes(q);
+      const userName = userById.get(entry.user.toString())?.userName ?? "";
+      return entry.email.toLowerCase().includes(q) || userName.toLowerCase().includes(q);
     });
   }
 
@@ -106,7 +106,7 @@ export const getContacts = asyncHandler(async (req: Request, res: Response) => {
     return {
       user: entry.user,
       email: entry.email,
-      fullName: user?.fullName,
+      userName: user?.userName,
       avatar: user?.avatar ? toPublicMediaFile(user.avatar) : undefined,
       connectedAt: entry.connectedAt,
     };

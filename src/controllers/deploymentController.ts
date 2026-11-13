@@ -4,6 +4,8 @@ import {
   ensureSuperAdminExists,
   ensureVerificationTemplatesSeeded,
   ensureSystemSettingsSeeded,
+  ensureUserNamesNormalized,
+  ensurePayoutKycHistoryBackfilled,
   ensureConversationIndexesFixed,
   SetupTaskResult,
 } from "../helpers/deploymentSetup";
@@ -18,6 +20,8 @@ export const runDeploymentSetupTasks = async (): Promise<SetupTaskResult[]> => [
   await ensureSuperAdminExists(),
   await ensureVerificationTemplatesSeeded(),
   await ensureSystemSettingsSeeded(),
+  await ensureUserNamesNormalized(),
+  await ensurePayoutKycHistoryBackfilled(),
   await ensureConversationIndexesFixed(),
 ];
 

@@ -12,7 +12,7 @@ import { sendTemplatedEmail } from "./emailSender";
 // surfaces here rather than racing the response" shape as
 // systemPayoutController.ts's notifySystemPayoutSettled.
 export const notifyPaymentHoldUpdate = async (payment: IPayment, released: boolean): Promise<void> => {
-  const recipient = await User.findById(payment.user).select("email fullName");
+  const recipient = await User.findById(payment.user).select("email userName");
   if (!recipient) return;
 
   await sendTemplatedEmail({
@@ -20,7 +20,7 @@ export const notifyPaymentHoldUpdate = async (payment: IPayment, released: boole
     subject: released ? "Your payment has cleared" : "Your payment is under review",
     template: "paymentHoldUpdate",
     variables: {
-      name: recipient.fullName,
+      name: recipient.userName,
       amount: payment.amount,
       currency: payment.currency,
       released,

@@ -8,7 +8,8 @@ import {
   PAYOUT_KYC_ID_TYPE,
   PayoutKycIdType,
 } from "../models/payoutKycModel";
-import { IUser } from "../models/userModel";
+import { PayoutKycHistory } from "../models/payoutKycHistoryModel";
+import { User, IUser } from "../models/userModel";
 import { ITemplateDocument, TEMPLATE_DOCUMENT_FORMAT } from "../models/verificationTemplateModel";
 import { resolveAndSaveDocuments } from "./verificationController";
 import { getSystemSettings } from "../helpers/systemSettings";
@@ -63,14 +64,11 @@ export const submitPayoutKyc = asyncHandler(async (req: Request, res: Response) 
       throw badRequest("idNumber must be an 11-digit number");
     }
 
-    const [firstName, ...rest] = requester.fullName.trim().split(/\s+/);
-    const lastName = rest.join(" ") || firstName;
-
     const { matched, reference } = await getIdentityVerificationProvider(kycProvider).verifyMatch({
       idType: idType as PayoutKycIdType,
       idNumber,
-      firstName,
-      lastName,
+      firstName: requester.fullName.firstName,
+      lastName: requester.fullName.lastName,
     });
 
     // $set/$unset explicitly — a plain object here would have Mongoose
@@ -107,6 +105,20 @@ export const submitPayoutKyc = asyncHandler(async (req: Request, res: Response) 
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
+
+    if (matched) {
+      await PayoutKycHistory.create({
+        user: requester._id,
+        fullName: { firstName: requester.fullName.firstName, lastName: requester.fullName.lastName },
+        country: requester.country,
+        method: PAYOUT_KYC_METHOD.AUTOMATED,
+        idType,
+        provider: kycProvider,
+        last4: idNumber.slice(-4),
+        providerReference: reference,
+        verifiedAt: record.verifiedAt,
+      });
+    }
 
     res.status(201).json(record);
     return;
@@ -172,6 +184,48 @@ export const getMyPayoutKyc = asyncHandler(async (req: Request, res: Response) =
   res.status(200).json({ record, track });
 });
 
+// @desc    Revoke my own payout KYC — the only way to unlock fullName/
+//          country editing once verified (see userController.ts's
+//          updateUserProfile). Clears the payout account too: it can
+//          only ever exist alongside a verified record (see
+//          updatePayoutAccount), so once that's gone the account's own
+//          name/country can no longer be vouched for either.
+// @route   DELETE /api/users/me/payout-kyc
+// @access  Private — behind verifyIdentity, same sensitivity tier as
+//          /payout-account.
+export const revokeMyPayoutKyc = asyncHandler(async (req: Request, res: Response) => {
+  const requester = req.user as IUser;
+
+  const payoutKyc = await PayoutKyc.findOneAndDelete({ user: requester._id });
+  if (!payoutKyc) {
+    res.status(404);
+    throw new Error("You don't have a payout KYC record to revoke");
+  }
+
+  const user = await User.findById(requester.id);
+  const hadPayoutAccount = Boolean(user?.payoutAccount);
+  if (user?.payoutAccount) {
+    user.payoutAccount = undefined;
+    await user.save();
+  }
+
+  await notify(
+    requester._id,
+    NOTIFICATION_TYPE.PAYOUT_KYC_REVOKED,
+    "Your payout KYC was revoked. You can now change your name/country, then verify again when you're ready.",
+  );
+
+  if (hadPayoutAccount) {
+    await notify(
+      requester._id,
+      NOTIFICATION_TYPE.PAYOUT_ACCOUNT_CLEARED,
+      "Your saved payout account was removed along with your payout KYC — please add it again once you're re-verified.",
+    );
+  }
+
+  res.status(200).json({ message: "Payout KYC revoked" });
+});
+
 const paginationParams = (req: Request) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 20, 100);
@@ -199,6 +253,35 @@ export const getPayoutKycRecords = asyncHandler(async (req: Request, res: Respon
       .limit(limit)
       .populate("user", "fullName email country"),
     PayoutKyc.countDocuments(filter),
+  ]);
+
+  res.status(200).json({ data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+});
+
+// @desc    Permanent bookkeeping log of every payout KYC verification
+//          that has ever happened — unlike the live PayoutKyc record
+//          above (one per user, overwritten/deleted as they
+//          resubmit/revoke), this never changes once written. Optional
+//          `userId` narrows it to one person's own verification history.
+// @route   GET /api/payout-kyc/history?userId=
+// @access  Private (REVIEW_ROLES — read-only)
+export const getPayoutKycHistory = asyncHandler(async (req: Request, res: Response) => {
+  const { page, limit, skip } = paginationParams(req);
+  const { userId } = req.query as { userId?: string };
+
+  const filter: Record<string, unknown> = {};
+  if (userId) {
+    filter.user = userId;
+  }
+
+  const [data, total] = await Promise.all([
+    PayoutKycHistory.find(filter)
+      .sort({ verifiedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("user", "userName email")
+      .populate("reviewedBy", "userName email"),
+    PayoutKycHistory.countDocuments(filter),
   ]);
 
   res.status(200).json({ data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });
@@ -236,6 +319,19 @@ export const approvePayoutKyc = asyncHandler(async (req: Request, res: Response)
   record.reviewedBy = admin._id as typeof record.reviewedBy;
   record.reviewedAt = new Date();
   await record.save();
+
+  const owner = await User.findById(record.user);
+  if (owner) {
+    await PayoutKycHistory.create({
+      user: record.user,
+      fullName: { firstName: owner.fullName.firstName, lastName: owner.fullName.lastName },
+      country: record.country,
+      method: PAYOUT_KYC_METHOD.DOCUMENT,
+      documents: record.documents,
+      reviewedBy: admin._id,
+      verifiedAt: record.verifiedAt,
+    });
+  }
 
   await notify(record.user, NOTIFICATION_TYPE.PAYOUT_KYC_DECIDED, "Your payout KYC was approved", {
     payoutKycId: record.id,

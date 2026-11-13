@@ -19,6 +19,7 @@ import { loadEligibleClientProfile } from "./clientProfileController";
 import { Job, JOB_TYPE } from "../models/jobModel";
 import { getPlatformFeePercent } from "./jobController";
 import { IUser, SYSTEM_ROLE } from "../models/userModel";
+import { assertEscrowEligible } from "../helpers/paymentGuardrails";
 import { IMediaFile } from "../models/mediaFile";
 import { NOTIFICATION_TYPE } from "../models/notificationModel";
 import { notify } from "../helpers/notify";
@@ -785,7 +786,7 @@ export const getOpeningApplications = asyncHandler(async (req: Request, res: Res
   const applications = await JobApplication.find({ posting: opening._id })
     .sort({ createdAt: -1 })
     .populate("workerId", "headline slug ratingAverage ratingCount")
-    .populate("applicant", "fullName");
+    .populate("applicant", "userName");
 
   res.status(200).json(applications.map(toPublicApplication));
 });
@@ -825,6 +826,8 @@ export const acceptApplication = asyncHandler(async (req: Request, res: Response
     res.status(400);
     throw new Error(`This application has already been ${application.status}`);
   }
+
+  await assertEscrowEligible(requester);
 
   const job = await Job.create({
     jobTitle: opening.title,

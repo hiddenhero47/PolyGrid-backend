@@ -23,7 +23,7 @@ import {
   changeUserRole,
   setAccountStatus,
 } from "../controllers/userController";
-import { submitPayoutKyc, getMyPayoutKyc } from "../controllers/payoutKycController";
+import { submitPayoutKyc, getMyPayoutKyc, revokeMyPayoutKyc } from "../controllers/payoutKycController";
 import { protect, secureRole } from "../middleware/authMiddleware";
 import { verifyIdentity } from "../middleware/verifyIdentityMiddleware";
 import { SYSTEM_ROLE } from "../models/userModel";
@@ -79,6 +79,7 @@ router.post("/me/connect/onboard", protect, startConnectOnboarding);
 // either way, same sensitivity tier as /payout-account above.
 router.post("/me/payout-kyc", protect, verifyIdentity, submitPayoutKyc);
 router.get("/me/payout-kyc", protect, getMyPayoutKyc);
+router.delete("/me/payout-kyc", protect, verifyIdentity, revokeMyPayoutKyc);
 
 router.post(
   "/2fa/setup",

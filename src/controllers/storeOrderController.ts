@@ -4,7 +4,8 @@ import { StoreOrder, IStoreOrder } from "../models/storeOrderModel";
 import { StoreProfile, IStoreProfile } from "../models/storeProfileModel";
 import { Product, resolveShippingPrice } from "../models/productModel";
 import { Job, IJob, JOB_TYPE } from "../models/jobModel";
-import { IUser } from "../models/userModel";
+import { User, IUser } from "../models/userModel";
+import { assertEscrowEligible } from "../helpers/paymentGuardrails";
 import { toPublicMediaFile } from "../models/mediaFile";
 import { Subscription } from "../models/subscriptionModel";
 import { connectUsers } from "./contactController";
@@ -179,6 +180,20 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
   const destinationLabel = [shippingDestination.state, shippingDestination.country].filter(Boolean).join(", ");
   const itemsSummary = resolvedItems.map((item) => `${item.quantity} x ${item.titleSnapshot}`).join(", ");
 
+  // The shop owner is the one auto-confirmed below (see the comment two
+  // lines down), so they're the one who must be escrow-eligible here —
+  // same instinct as the inactive-subscription check above: a buyer is
+  // never told the real reason an order can't go through is the seller's
+  // own KYC/country status, just that the store "isn't found."
+  const owner = await User.findById(store.userId);
+  try {
+    if (!owner) throw new Error("owner missing");
+    await assertEscrowEligible(owner);
+  } catch {
+    res.status(404);
+    throw new Error("Store not found");
+  }
+
   // Built directly, not through POST /api/jobs — that endpoint always
   // makes whoever calls it a confirmed party, but here the *buyer* is the
   // one calling checkout while the *shop owner* needs to be the
@@ -249,7 +264,7 @@ export const getStoreOrders = asyncHandler(async (req: Request, res: Response) =
   const filter = { store: store._id };
 
   const [data, total] = await Promise.all([
-    StoreOrder.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("buyer", "fullName email"),
+    StoreOrder.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("buyer", "userName email"),
     StoreOrder.countDocuments(filter),
   ]);
 

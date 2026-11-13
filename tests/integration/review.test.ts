@@ -346,7 +346,7 @@ describe("GET /api/reviews/moderation", () => {
     const admin = await createAdmin();
     const providerUser = await createUser();
     const contractorProfile = await createContractorProfile({ user: providerUser, headline: "Steel Frame Experts" });
-    const clientUser = await createUser({ fullName: "Chidi Okonkwo", email: "chidi@example.com" });
+    const clientUser = await createUser({ fullName: { firstName: "Chidi", lastName: "Okonkwo" }, userName: "Chidi Okonkwo", email: "chidi@example.com" });
 
     await leaveReview(clientUser, providerUser, 4, "Solid work");
 
@@ -360,7 +360,7 @@ describe("GET /api/reviews/moderation", () => {
     expect(row.profileType).toBe("ContractorProfile");
     expect(row.profileId).toBe(contractorProfile.id);
     expect(row.profileName).toBe("Steel Frame Experts");
-    expect(row.reviewer.fullName).toBe("Chidi Okonkwo");
+    expect(row.reviewer.userName).toBe("Chidi Okonkwo");
     expect(row.reviewer.email).toBe("chidi@example.com");
   });
 
@@ -384,8 +384,8 @@ describe("GET /api/reviews/moderation", () => {
     expect(res.body.data[0].profileId).toBe(profileA.id);
   });
 
-  it("filters by isHidden and by minRating/maxRating, and includes hiddenBy's fullName", async () => {
-    const admin = await createAdmin({ fullName: "Mod Erator" });
+  it("filters by isHidden and by minRating/maxRating, and includes hiddenBy's userName", async () => {
+    const admin = await createAdmin({ fullName: { firstName: "Mod", lastName: "Erator" }, userName: "Mod Erator" });
     const providerUser = await createUser();
     await createContractorProfile({ user: providerUser });
     const client1 = await createUser();
@@ -403,7 +403,7 @@ describe("GET /api/reviews/moderation", () => {
       .set("Authorization", `Bearer ${generateToken(admin)}`);
     expect(hiddenOnly.body.data).toHaveLength(1);
     expect(hiddenOnly.body.data[0].id).toBe(lowReview.id);
-    expect(hiddenOnly.body.data[0].hiddenBy.fullName).toBe("Mod Erator");
+    expect(hiddenOnly.body.data[0].hiddenBy.userName).toBe("Mod Erator");
 
     const visibleOnly = await request(app)
       .get("/api/reviews/moderation?isHidden=false")

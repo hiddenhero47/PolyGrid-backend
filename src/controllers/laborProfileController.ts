@@ -144,7 +144,7 @@ export const createLaborProfile = asyncHandler(async (req: Request, res: Respons
   const profile = await LaborProfile.create({
     userId: requester._id,
     currentSubscription: requester.currentSubscription,
-    slug: await generateUniqueSlug(requester.fullName),
+    slug: await generateUniqueSlug(requester.userName),
     headline,
     bio,
     skills: resolvedSkills,

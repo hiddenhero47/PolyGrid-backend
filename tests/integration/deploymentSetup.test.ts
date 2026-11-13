@@ -6,9 +6,14 @@ import { PROFILE_TYPE } from "../../src/constants/profileTypes";
 import {
   ensureSuperAdminExists,
   ensureVerificationTemplatesSeeded,
+  ensureUserNamesNormalized,
+  ensurePayoutKycHistoryBackfilled,
   ensureConversationIndexesFixed,
 } from "../../src/helpers/deploymentSetup";
 import { Conversation } from "../../src/models/conversationModel";
+import { createUser } from "../setup/fixtures";
+import { PayoutKyc, PAYOUT_KYC_STATUS, PAYOUT_KYC_METHOD } from "../../src/models/payoutKycModel";
+import { PayoutKycHistory } from "../../src/models/payoutKycHistoryModel";
 
 const SUPER_ADMIN_ENV_KEYS = ["SUPER_ADMIN_NAME", "SUPER_ADMIN_EMAIL", "SUPER_ADMIN_PASSWORD"] as const;
 const savedEnv: Record<string, string | undefined> = {};
@@ -117,6 +122,134 @@ describe("ensureVerificationTemplatesSeeded", () => {
     await ensureVerificationTemplatesSeeded();
 
     expect(await VerificationTemplate.countDocuments({ country: "NG" })).toBe(Object.values(PROFILE_TYPE).length);
+  });
+});
+
+describe("ensureUserNamesNormalized", () => {
+  it("backfills firstName/lastName/userName for a User still on the old plain-string fullName", async () => {
+    // Inserted via the raw collection, bypassing Mongoose's own
+    // fullNameSchema cast — simulates a pre-restructure document, the
+    // same reason ensureConversationIndexesFixed's own test creates its
+    // old index by hand rather than via the current schema.
+    const { insertedId } = await User.collection.insertOne({
+      fullName: "Legacy Name Here",
+      email: "legacy-user@example.com",
+      password: "hashed",
+      systemRole: SYSTEM_ROLE.USER,
+      activeAccountType: "normal",
+      accountStatus: "active",
+      authProviders: [],
+      verified: false,
+      user2fa: { enable: false },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await ensureUserNamesNormalized();
+
+    expect(result.status).toBe("success");
+    expect(result.message).toContain("1");
+
+    // .lean() — comparing a hydrated Mongoose subdocument directly with
+    // toEqual trips jest's equality checker over internal getters it
+    // doesn't expect; a plain object sidesteps that entirely.
+    const migrated = await User.findById(insertedId).lean();
+    expect(migrated?.fullName).toEqual({ firstName: "Legacy", lastName: "Name Here" });
+    expect(migrated?.userName).toBe("Legacy Name Here");
+  });
+
+  it("is a no-op once every User already has the new shape", async () => {
+    await createSuperAdmin();
+
+    const result = await ensureUserNamesNormalized();
+
+    expect(result.status).toBe("success");
+    expect(result.message).toContain("already");
+  });
+
+  it("running it twice never double-processes an already-migrated document", async () => {
+    await User.collection.insertOne({
+      fullName: "Run Twice",
+      email: "run-twice@example.com",
+      password: "hashed",
+      systemRole: SYSTEM_ROLE.USER,
+      activeAccountType: "normal",
+      accountStatus: "active",
+      authProviders: [],
+      verified: false,
+      user2fa: { enable: false },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await ensureUserNamesNormalized();
+    const second = await ensureUserNamesNormalized();
+
+    expect(second.status).toBe("success");
+    expect(second.message).toContain("already");
+
+    const migrated = await User.findOne({ email: "run-twice@example.com" }).lean();
+    expect(migrated?.fullName).toEqual({ firstName: "Run", lastName: "Twice" });
+  });
+});
+
+describe("ensurePayoutKycHistoryBackfilled", () => {
+  it("backfills a history entry for an already-verified PayoutKyc record with none yet", async () => {
+    const user = await createUser({ country: "NG", fullName: { firstName: "Ada", lastName: "Okafor" } });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      idType: "bvn",
+      last4: "1234",
+      providerReference: "ref-legacy",
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+      verifiedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+
+    const result = await ensurePayoutKycHistoryBackfilled();
+
+    expect(result.status).toBe("success");
+    expect(result.message).toContain("1");
+
+    const history = await PayoutKycHistory.findOne({ user: user._id });
+    expect(history).toBeTruthy();
+    expect(history?.fullName).toEqual({ firstName: "Ada", lastName: "Okafor" });
+    expect(history?.providerReference).toBe("ref-legacy");
+  });
+
+  it("is a no-op once every verified record already has a history entry", async () => {
+    const user = await createUser({ country: "NG" });
+    const record = await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.AUTOMATED,
+      status: PAYOUT_KYC_STATUS.VERIFIED,
+      verifiedAt: new Date(),
+    });
+    await ensurePayoutKycHistoryBackfilled();
+
+    const second = await ensurePayoutKycHistoryBackfilled();
+
+    expect(second.status).toBe("success");
+    expect(second.message).toContain("already");
+    expect(await PayoutKycHistory.countDocuments({ user: user._id })).toBe(1);
+    expect(record.status).toBe(PAYOUT_KYC_STATUS.VERIFIED); // sanity: untouched by the backfill
+  });
+
+  it("never touches a PENDING or FAILED record", async () => {
+    const user = await createUser({ country: "NG" });
+    await PayoutKyc.create({
+      user: user._id,
+      country: "NG",
+      method: PAYOUT_KYC_METHOD.DOCUMENT,
+      status: PAYOUT_KYC_STATUS.PENDING,
+    });
+
+    const result = await ensurePayoutKycHistoryBackfilled();
+
+    expect(result.status).toBe("success");
+    expect(await PayoutKycHistory.countDocuments({ user: user._id })).toBe(0);
   });
 });
 
